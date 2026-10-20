@@ -111,12 +111,32 @@ static uint32_t ngc_init(void *self, void *work, size_t size, bool check_languag
 static uint32_t ngc_mask_mode(void *self, int mode) { (void)self; (void)mode; return 0; }
 static uint32_t ngc_mask_text(void *self, int *count, uint16_t *text, uint32_t mask) { (void)self; (void)text; (void)mask; if (count) *count = 0; return 0; }
 
+/* ---------- nn::olsc (save data cloud backup) ----------
+   Offline console: the backup setting the game chooses is kept for the session (the game turns it on when a resident
+   is linked to the account), there is no cached backup info, and custom data is accepted. The calls that would talk to
+   the server (upload, download, licence check, list) stop the runtime with their name, so an online path shows up. */
+static uint8_t olsc_setting;
+static uint32_t olsc_set_enabled(const void *uid, bool enabled) { (void)uid; olsc_setting = enabled; return 0; }
+static uint8_t olsc_get_setting(const void *uid) { (void)uid; return olsc_setting; }
+static bool olsc_try_info_cache(void *info, const void *uid) { (void)info; (void)uid; return false; }
+static void olsc_set_custom_data(const void *uid, const char *data, size_t size) { (void)uid; (void)data; (void)size; }
+static void olsc_online(void) { runtime_fail("nn::olsc cloud backup request (online feature, not supported offline)"); }
+
 void *runtime_acnh_override(const char *name) {
     static const struct { const char *name; void *fn; } map[] = {
         {"_ZN2nn3ngc15ProfanityFilterC1Ev", ngc_ctor}, {"_ZN2nn3ngc15ProfanityFilterD1Ev", ngc_dtor},
         {"_ZN2nn3ngc15ProfanityFilter10InitializeEPvmb", ngc_init},
         {"_ZN2nn3ngc15ProfanityFilter11SetMaskModeENS1_8MaskModeE", ngc_mask_mode},
-        {"_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPDsj", ngc_mask_text}};
+        {"_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPDsj", ngc_mask_text},
+        {"_ZN2nn4olsc31SetSaveDataBackupSettingEnabledERKNS_7account3UidEb", olsc_set_enabled},
+        {"_ZN2nn4olsc24GetSaveDataBackupSettingERKNS_7account3UidE", olsc_get_setting},
+        {"_ZN2nn4olsc29TryGetSaveDataBackupInfoCacheEPNS0_18SaveDataBackupInfoERKNS_7account3UidE", olsc_try_info_cache},
+        {"_ZN2nn4olsc13SetCustomDataERKNS_7account3UidEPKcm", olsc_set_custom_data},
+        {"_ZN2nn4olsc25UploadSaveDataBackupAsyncERKNS_7account10UserHandleE", olsc_online},
+        {"_ZN2nn4olsc27DownloadSaveDataBackupAsyncERKNS_7account10UserHandleENS0_16SaveDataBackupIdE", olsc_online},
+        {"_ZN2nn4olsc32VerifySaveDataBackupLicenseAsyncERKNS_7account10UserHandleE", olsc_online},
+        {"_ZN2nn4olsc34UpdateSaveDataBackupInfoCacheAsyncERKNS_7account10UserHandleE", olsc_online},
+        {"_ZN2nn4olsc39ListDownloadableSaveDataBackupInfoAsyncERKNS_7account10UserHandleEPvm", olsc_online}};
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (!strcmp(name, map[i].name)) return map[i].fn;
     return NULL;
 }
