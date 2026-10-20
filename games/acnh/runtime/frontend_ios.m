@@ -70,12 +70,12 @@ uint64_t front_game_res(int docked){(void)docked;return (720ULL<<32)|1280;}
 static _Atomic int appActive=1;
 int runtime_front_focus(void){return atomic_load(&appActive);}
 void mtl_app_active(int active);
-/* Not active (background, Control Center, lock): stop GPU submission (iOS rejects background GPU work) and tell the game focus changed, like the Mac window. */
+/* In the background (home screen, another app full screen, lock): stop GPU submission (iOS rejects background GPU work) and tell the game focus changed, like the Mac window. */
 static void app_active_changed(int active){
  if(atomic_exchange(&appActive,active)==active)return;
  if(!active)runtime_input_clear();
  mtl_app_active(active);runtime_oe_push_message(15);
- fprintf(stderr,"[totk] app %s\n",active?"became active":"resigned active: GPU submission paused");
+ fprintf(stderr,"[totk] app %s\n",active?"in the foreground: GPU submission on":"in the background: GPU submission paused");
 }
 void runtime_front_request_close(void){fprintf(stderr,"[totk] close requested; iOS apps are closed by the user\n");}
 void runtime_front_text_test(const char *op,const char *text){(void)text;fprintf(stderr,"[totk] text entry test \"%s\" ignored: iOS has no text entry bar (the keyboard request is cancelled)\n",op?op:"");}
@@ -85,9 +85,9 @@ void runtime_front_text_test(const char *op,const char *text){(void)text;fprintf
 @implementation TOTKVsync
 -(void)tick:(CADisplayLink *)l{(void)l;
  /* The display link runs only while the app is on screen. If the app started while it was not frontmost (iPad locked, a
-    remote launch) the "became active" notification can be missed; then GPU submission stayed paused and the boot screen
-    never went away (2026-10-20). Seen on screen and active by UIKit: resume. */
- if(!atomic_load(&appActive)&&UIApplication.sharedApplication.applicationState==UIApplicationStateActive)app_active_changed(1);
+    remote launch) the "back in the foreground" notification can be missed; then GPU submission stayed paused and the boot
+    screen never went away (2026-10-20). On screen and not in the background: resume. */
+ if(!atomic_load(&appActive)&&UIApplication.sharedApplication.applicationState!=UIApplicationStateBackground)app_active_changed(1);
  pthread_mutex_lock(&vsyncLock);for(unsigned i=0;i<vsyncCount;i++)hle_signal_system_event(vsyncEvents[i]);pthread_mutex_unlock(&vsyncLock);}
 @end
 static TOTKVsync *vsyncTarget;
@@ -119,11 +119,14 @@ void runtime_ios_attach_layer(CAMetalLayer *layer,UIView *host){
  bootProgress=[[UIProgressView alloc] initWithFrame:CGRectMake(w/2-140,h/2+30,280,8)];bootProgress.hidden=YES;
  [bootOverlay addSubview:bootStage];[bootOverlay addSubview:bootDetail];[bootOverlay addSubview:bootProgress];[host addSubview:bootOverlay];
  NSNotificationCenter *nc=NSNotificationCenter.defaultCenter;
- [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;app_active_changed(0);}];
- [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n){(void)n;app_active_changed(1);}];
- /* The UIScene life cycle's own events, too (an app built with the iOS 27 SDK has to adopt it; ios/Sources/main.m). */
- [nc addObserverForName:UISceneWillDeactivateNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){(void)n;app_active_changed(0);}];
- [nc addObserverForName:UISceneDidActivateNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){(void)n;app_active_changed(1);}];
+ /* iOS forbids GPU work only in the background. Merely inactive (another app focused in Stage Manager or Split View,
+    Control Center or a notification over it) the app is still on screen and keeps drawing: pausing then left a dark
+    screen (2026-10-20: inactive 1.4 s after launch on an iPad, never active again). So submission pauses when the app
+    enters the background and resumes when it comes back, for the app and for its scene. */
+ [nc addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){(void)n;app_active_changed(0);}];
+ [nc addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){(void)n;app_active_changed(1);}];
+ [nc addObserverForName:UISceneDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){(void)n;app_active_changed(0);}];
+ [nc addObserverForName:UISceneWillEnterForegroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n){(void)n;app_active_changed(1);}];
  vsyncTarget=[TOTKVsync new];displayLink=[CADisplayLink displayLinkWithTarget:vsyncTarget selector:@selector(tick:)];
  displayLink.preferredFrameRateRange=CAFrameRateRangeMake(60,60,60);[displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
