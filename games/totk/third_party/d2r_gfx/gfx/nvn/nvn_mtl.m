@@ -4236,6 +4236,14 @@ static double uw_ui_squeeze(const char *vs, const p_draw *dw, const p_draw_idx *
     double f = uw_ratio() * th / tw;
     return f > 1.001 ? f : 1;
 }
+/* The vertical squeeze for a ratio narrower than the canvas's (a 16:10 Mac screen): the present stretches the canvas
+   taller, so the UI is squeezed by the canvas's ratio over the narrow one about the canvas centre and keeps its shape in
+   the middle 16:9 band of the window. 1 for wide ratios, which uw_ui_squeeze handles. */
+static double uw_ui_squeeze_y(const char *vs, const p_draw *dw, const p_draw_idx *di, NSUInteger tw, NSUInteger th) {
+    if (uw_ui_squeeze(vs, dw, di, tw, th) != 1 || !g_uw_ui || !vs || !uw_ui_vs(vs) || (dw ? dw->count : di ? di->count : 0) != 6 || !uw_on_canvas() || !tw || !th) return 1;
+    double r = uw_ratio(), f = r > 0 ? tw / (r * th) : 1;
+    return f > 1.001 ? f : 1;
+}
 /* TOTK_MFX: the scene is complete: end the pass (the draw that follows opens it again, loading the canvas, with the UI
    attachment) and copy the canvas into this frame's scene texture. */
 static void mfx_snapshot_scene(void) {
@@ -9718,6 +9726,9 @@ frz_plain:;
     double ux = uw_ui_squeeze(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th), cx = tw / 2.0;   // key 4: UI squeezed by 1 / ux about the canvas centre
     double vx = S.has_vp ? S.vp[0][0] : 0, vw = S.has_vp ? S.vp[0][2] : tw;
     if (ux != 1) { vx = cx + (vx - cx) / ux; vw /= ux; }
+    double uy = uw_ui_squeeze_y(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th), cy = th / 2.0;   // narrow TOTK_ASPECT: UI squeezed by 1 / uy about the centre
+    double vy = (S.has_vp ? S.vp[0][1] : 0) + vo, vh = (S.has_vp ? S.vp[0][3] : th) * vs;
+    if (uy != 1) { vy = cy + (vy - cy) / uy; vh /= uy; }
     if ((atomic_load(&g_uw_log) > 0 && uw_on_canvas()) || atomic_load(&g_draw_log) > 0)
         MLOG("[uw] F%llu pass %llu ui %d squeeze %.3f vs %.8s fs %.8s count %u inst %d vp %s%g,%g,%g,%g sc %s%d,%d,%d,%d blend %#x tex %ux%u fmt %#x ser %llu bl %u,%u,%u/%u,%u,%u cm %#x prim %d",
              (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, g_uw_ui, ux, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",
@@ -9746,13 +9757,14 @@ frz_plain:;
             }
         }
     }
-    if (S.has_vp) enc_r_viewport(en, (MTLViewport){vx, S.vp[0][1] + vo, vw, S.vp[0][3] * vs, S.dr[0], S.dr[1]});
-    else enc_r_viewport(en, (MTLViewport){vx, vo, vw, th * vs, 0, 1});
+    if (S.has_vp) enc_r_viewport(en, (MTLViewport){vx, vy, vw, vh, S.dr[0], S.dr[1]});
+    else enc_r_viewport(en, (MTLViewport){vx, vy, vw, vh, 0, 1});
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc) {
         long sx0 = R.sc.x, sx1 = (long)R.sc.x + R.sc.w;
         if (ux != 1) { sx0 = lround(cx + (sx0 - cx) / ux); sx1 = lround(cx + (sx1 - cx) / ux); }
         long x0 = sx0 < 0 ? 0 : sx0, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = sx1, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
+        if (uy != 1) { y0 = lround(cy + (y0 - cy) / uy); y1 = lround(cy + (y1 - cy) / uy); }
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++; return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};

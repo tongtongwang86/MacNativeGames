@@ -166,7 +166,9 @@ static CGFloat drawable_scale(void){static CGFloat f=-1;if(f<0){const char *e=ge
 static void front_sync_drawable(void){
  NSView *v=window.contentView;if(!v||!metalLayer)return;
  CGFloat s=window.backingScaleFactor>0?window.backingScaleFactor:1,ts=drawable_scale();CGSize px=CGSizeMake(round(v.bounds.size.width*s*ts),round(v.bounds.size.height*s*ts));
- if(px.width<1||px.height<1||CGSizeEqualToSize(metalLayer.drawableSize,px))return;
+ if(px.width<1||px.height<1)return;
+ runtime_aspect_window(px.width,px.height);   /* the picture follows the window's shape (aspect_patch.h) */
+ if(CGSizeEqualToSize(metalLayer.drawableSize,px))return;
  metalLayer.contentsScale=s;metalLayer.drawableSize=px;fprintf(stderr,"[totk] window drawable %.0fx%.0f (scale %.0f)\n",px.width,px.height,s);
 }
 @interface TOTKWindowDelegate:NSObject<NSWindowDelegate>

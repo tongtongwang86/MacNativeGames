@@ -96,6 +96,8 @@ void runtime_ios_attach_layer(CAMetalLayer *layer,UIView *host){
  /* TOTK_IOS_DRAWABLE_H (default 720; 0 = native pixels): build the drawable this many pixels tall at the view's aspect, so the
     game picture (1280x720 canvas) lands about 1:1 and the system compositor scales it to the screen instead of our GPU. */
  double vw=round(host.bounds.size.width*s),vh=round(host.bounds.size.height*s);
+ /* The picture takes the screen's shape (aspect_patch.h); landscape only, so the longer side is the width. */
+ runtime_aspect_window(vw>vh?vw:vh,vw>vh?vh:vw);
  const char *dh=getenv("TOTK_IOS_DRAWABLE_H");long want=dh?strtol(dh,NULL,10):720;
  /* the 16:9 picture should get about want rows: a screen narrower than 16:9 (an iPad, about 4:3; 2026-10-17) holds it by
     width, so there the drawable is want*16/9 columns wide (1281x890 on a 2360x1640 iPad); an iPhone keeps want rows */
