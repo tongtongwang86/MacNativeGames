@@ -12,7 +12,8 @@ The same steps as games/totk/ios/tools/build_ipa.py, whose helpers it uses:
      compiled into device metallibs (compile_seed.py). Shaders the Mac has not seen yet are missing on the device until
      a Mac run has met them and the IPA is built again.
   4. xcodegen + xcodebuild (unsigned), the increased-memory-limit entitlement in an ad-hoc signature, the player's icon
-     (--icon), then RomFS, the DLC folders, the seed and a system font into GameData/, zipped as Payload/ACNH.app.
+     (--icon), then RomFS, the 60 FPS SpeedFix when tooling/acnh-60fps has it, the DLC folders, the seed and a system font
+     into GameData/, zipped as Payload/ACNH.app.
 Saves live in the app's Documents (Files app: save/save/device is the island); with an iCloud-capable signing profile
 SaveSync keeps them in step with the Mac."""
 import argparse, hashlib, json, os, shutil, subprocess, sys
@@ -137,6 +138,10 @@ def main():
     res = app / 'GameData'; res.mkdir(exist_ok=True)
     copy_tree((GAME / 'extracted/romfs').resolve(), res / 'romfs')
     copy_tree(seed, res / 'shader-seed')
+    sf = GAME / 'tooling/acnh-60fps'   # 60 FPS SpeedFix (scripts/speedfix.py): its code is in the export above; the app gets
+    if (sf / 'speedfix_main_300.pchtxt').is_file():   # the list for its data words and the RomFS overlay
+        (res / 'speedfix').mkdir(exist_ok=True); clone(sf / 'speedfix_main_300.pchtxt', res / 'speedfix/speedfix_main_300.pchtxt')
+        copy_tree(sf / 'romfs', res / 'speedfix/romfs'); print('60 FPS SpeedFix included', flush=True)
     aoc = (GAME / 'extracted/aoc').resolve()   # DLC folders (extracted/aoc/<index>), if any
     if aoc.is_dir():
         (res / 'aoc').mkdir(exist_ok=True)

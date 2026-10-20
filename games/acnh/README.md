@@ -66,11 +66,21 @@ keeps its width and grows taller, so nothing is cut off.
 
 ## 60 FPS
 
-Not available. ACNH steps its simulation once per frame and asks for 30 fps (present interval 2, set once at start from
-sead's framework config, main+0x26f7cd8); there is no time step to scale as in TotK, whose engine already supports a
-variable frame rate. Its movement and animation use per-frame constants throughout (`mSpeedChaseStep`,
-`mStickSpeedAddCalcRate`, ...), so running at 60 Hz plays the game at twice the speed. MetalFX frame interpolation (key 2)
-does not engage yet: its scene, camera, depth and UI inputs are found with TotK-specific hooks.
+```bash
+python3 scripts/speedfix.py   # once: fetches and checks the mod's files, builds its RomFS overlay
+```
+
+60 FPS at the normal game speed comes from the community mod "ACNH 60 FPS + SpeedFix" by tmouh
+([github.com/tmouh/acnh-60fps](https://github.com/tmouh/acnh-60fps), CC BY-NC 4.0), v1.4.2 for 3.0.0. Its files are not
+in this repository: the script downloads them from one pinned commit into `tooling/acnh-60fps` (checked against SHA-256s)
+and applies its parameter patch to your own `StaticParam.pack` (input and result checked). ACNH steps its world once
+per frame with amounts tuned for 30 updates a second and has no global speed setting, so the mod rescales 6,417 words of
+main and 1,544 parameters. The runtime applies the patch list when the folder has it (`acnh_patches.c`; `ACNH_SPEEDFIX=0`
+for the game's 30 FPS), reads the mod's RomFS files first, and presents one game frame per 60 Hz tick (the mod's SDK
+"enabler" works inside NVN, which runs in the host here). Checked on 3.0.0: no patched word is an instruction the rewriter
+changed, a relocated pointer or an aspect site; 60 FPS shows twice the frames of 30 (p99 frame time 18.9 ms), and a
+scripted 2 s walk covers the same distance as at 30 FPS. Below 60 FPS the game slows down in step, as with the mod. The
+iPhone / iPad app gets it when the Mac build has it (code at export, data words and RomFS files at load).
 
 ## iPhone / iPad
 

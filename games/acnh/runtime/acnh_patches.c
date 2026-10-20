@@ -4,6 +4,8 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <strings.h>
+#include <sys/stat.h>
 /* ACNH game-code patches: applied to main after relocation, before its text is sealed. Each site checks the original
    instruction first (aspect_patch.h checks that it still produces a float ratio). */
 #include "game_patches.h"
@@ -104,6 +106,61 @@ static void aspect_install_reads(Module *m, uint64_t stub_off, uint64_t data_off
 }
 #define ASPECT_STUBS_END(m) ((((m)->text_end + 15) & ~15ULL) + ASPECT_READ_STUB * (sizeof aspect_reads / sizeof *aspect_reads))
 
+/* 60 FPS at the normal game speed: the community "ACNH 60 FPS + SpeedFix" mod (tmouh, github.com/tmouh/acnh-60fps,
+   CC BY-NC 4.0; not in this repository: scripts/speedfix.py fetches one pinned commit into tooling/acnh-60fps and builds
+   its RomFS overlay). ACNH steps its world once per frame with amounts tuned for 30 updates a second and has no global
+   speed setting, so the mod rescales 6,417 words of main (speeds x1/2, accelerations x1/4, update counts x2, ...) and
+   1,544 parameters in RomFS. Its patch list (speedfix_main_300.pchtxt) names main's build ID ("@nsobid-"), and its
+   "<offset> <4 bytes>" lines are main+offset ("@flag offset_shift 0x100" is the step to NSO file offsets, which a loader
+   of the memory image does not take). It is applied when the folder has it (ACNH_SPEEDFIX_DIR, default
+   tooling/acnh-60fps; ACNH_SPEEDFIX=0 leaves it out): the build ID must be main's and every word must lie in main's code,
+   read-only data or data. Checked on 3.0.0 against this port: none of the 6,417 words is an instruction the rewriter
+   changed, a relocated pointer or an aspect site, and none of the mod's code uses x18, system registers or svc.
+   The mod's SDK "enabler" presents a frame at every vblank inside NVN, which runs in the host here: the host presents
+   one game frame per 60 Hz tick instead (DM_PRESENT_INTERVAL=display). Below 60 FPS the game slows down in step, as
+   with the mod. iPhone / iPad: the code words were applied by the iOS export (checked here); data words are written. */
+static int speedfix_apply(Module *m) {
+    const char *off = getenv("ACNH_SPEEDFIX"); if (off && !strcmp(off, "0")) { fprintf(stderr, "[acnh] 60 FPS SpeedFix off (ACNH_SPEEDFIX=0)\n"); return 0; }
+    const char *dir = getenv("ACNH_SPEEDFIX_DIR"); if (!dir || !*dir) dir = "tooling/acnh-60fps";
+    char path[2048]; snprintf(path, sizeof path, "%s/speedfix_main_300.pchtxt", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "[acnh] 30 FPS (no SpeedFix in %s: python3 scripts/speedfix.py)\n", dir); return 0; }
+    char line[512]; int id_ok = 0, shift_ok = 0, enabled = 0; unsigned words = 0, code = 0;
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!strncmp(line, "@nsobid-", 8)) { id_ok = !strncasecmp(line + 8, ACNH_MAIN_BUILD_ID, strlen(ACNH_MAIN_BUILD_ID)); if (!id_ok) break; continue; }
+        if (!strcmp(line, "@flag offset_shift 0x100")) { shift_ok = 1; continue; }
+        if (!strcmp(line, "@enabled")) { enabled = 1; continue; }
+        if (!strcmp(line, "@disabled")) { enabled = 0; continue; }
+        if (!strcmp(line, "@stop")) break;
+        if (line[0] == '@' || line[0] == '/' || !line[0]) continue;
+        unsigned long long o; char hex[16]; int used = 0;
+        if (sscanf(line, "%8llx %8[0-9A-Fa-f]%n", &o, hex, &used) != 2 || strlen(hex) != 8 || (line[used] && line[used] != ' '))
+            { fprintf(stderr, "[acnh] SpeedFix: unreadable line \"%s\"\n", line); runtime_fail("SpeedFix patch list is not the expected format"); }
+        if (!enabled) continue;
+        if (!id_ok || !shift_ok) runtime_fail("SpeedFix patch list: no matching @nsobid / offset_shift 0x100 before its words");
+        if (o + 4 > m->file_size || (o >= m->text_end && o < m->ro_off)) runtime_fail("SpeedFix patch outside main's code and data");
+        uint8_t w[4]; for (int i = 0; i < 4; i++) { unsigned b; sscanf(hex + 2 * i, "%2x", &b); w[i] = (uint8_t)b; }
+        if (o < m->text_end) {
+            code++;
+#if TARGET_OS_IPHONE
+            if (memcmp(m->base + o, w, 4)) { fprintf(stderr, "[acnh] SpeedFix main+%#llx not in this build's code\n", o); runtime_fail("SpeedFix: the app was exported without it"); }
+            words++; continue;
+#endif
+        }
+        memcpy(m->base + o, w, 4); words++;
+    }
+    fclose(f);
+    if (!id_ok) { fprintf(stderr, "[acnh] SpeedFix %s is for another main (build ID); 30 FPS\n", path); return 0; }
+    if (!words) runtime_fail("SpeedFix patch list has no words");
+    char ov[2100]; snprintf(ov, sizeof ov, "%s/romfs", dir);
+    struct stat st; if (stat(ov, &st) != 0 || !S_ISDIR(st.st_mode)) runtime_fail("SpeedFix: its RomFS files are missing (python3 scripts/speedfix.py)");
+    setenv("ACNH_ROMFS_OVERLAY", ov, 0);
+    setenv("DM_PRESENT_INTERVAL", "display", 0);   /* one game frame per 60 Hz tick: the enabler */
+    fprintf(stderr, "[acnh] 60 FPS SpeedFix: %u words (%u code, %u data) from %s, RomFS overlay %s\n", words, code, words - code, path, ov);
+    return 1;
+}
+
 /* ACNH_SITE_PROBE=<hex>,<hex>,... (Mac, diagnostics): counts how often each main+<hex> instruction runs and logs the
    counts every 5 s. Each site branches to a stub in the text padding after the aspect stubs that bumps a counter on the
    data page after main (+64 + 4 * i), runs the instruction (it must not be PC-relative) and branches back. */
@@ -151,6 +208,7 @@ void runtime_game_patches(Module *m) {
        pacing base keeps the game's own interval meaning. DM_PRESENT_HZ set by the user still wins. */
     setenv("DM_PRESENT_HZ", "60", 0);
     fprintf(stderr, "[acnh] main at %p\n", (void *)m->base);   /* for debugger offsets (main+0x...) */
+    speedfix_apply(m);   /* before the aspect stubs, which check their own words */
     /* Stubs go to main's text padding: 432 zero bytes between text_end and read-only data (ro_off). */
     aspect_install_reads(m, (m->text_end + 15) & ~15ULL, (m->file_size + 0x3fff) & ~0x3fffULL);
 #if !TARGET_OS_IPHONE
