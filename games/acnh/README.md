@@ -62,7 +62,10 @@ The picture follows the window's shape (`aspect_patch.h`, as in TotK): key 4 swi
 `TOTK_ASPECT=21:9` fixes a ratio. ACNH builds most of its sead perspective projections on the fly, so the ratio is put in
 where sead reads it (`acnh_patches.c`), and only for projections whose aspect is exactly 16:9; the game's UI goes through
 one of those too. Wider than 16:9 the view widens and the UI stays in the middle 16:9; narrower (16:10, 4:3, iPad) the view
-keeps its width and grows taller, so nothing is cut off.
+keeps its width and grows taller, so nothing is cut off. A UI layout keeps the projection it was built with, so after the
+window's shape changes mid-game (full screen, a resize, key 4) the host fits it to the new shape at draw time, and UI
+panels that reach the layout's edge (backdrops, the black around the screen wipe's circle) are extended to the window's
+edge (`uw_acnh_refit` in `nvn_mtl.m`; `ACNH_UI_FIT=0` turns both off).
 
 ## 60 FPS
 

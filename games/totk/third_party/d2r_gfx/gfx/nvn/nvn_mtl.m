@@ -6745,6 +6745,74 @@ static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_
 static double g_ui_moff;
 static __strong id<MTLTexture> g_flash_hdr_source;   // diagnostic: tone-map input (may be reused later in the frame)
 static __strong id<MTLTexture> g_flash_tonemap_target; // diagnostic: tone-map output, before FXAA
+/* ACNH (games/acnh): its UI (ui2d layouts: panes, text, the HUD) goes through a sead perspective projection that the game's
+   aspect patch (acnh_patches.c) fits to the window's shape: wider, the view widens; narrower, it keeps its width and grows
+   taller. So the layout keeps its 16:9 shape, fitted to the window, and the projection's P11 / P00 equals the window ratio
+   it was built for (16:9: 1.778). Two things are adjusted here, per draw into the presented picture whose vertex stage's
+   uniform binding 0 holds such a projection (rows 0 and 1 a pure x / y scale, row 3 (0, 0, -1, w)):
+   - Shape changes. A layout keeps the projection it was built with, so after the window's shape changes mid-game (full
+     screen, a resize, key 4) it would still be fitted to the old shape and come out stretched. Built for q, now r, the
+     fit changes each axis by f(r) / f(q), with f the projection's scale for a ratio (normalized to 16:9):
+       x: f(t) = t <= 16/9 ? 1 : (16/9) / t        y: f(t) = (t <= 16/9 ? t : 16/9) / (16/9)
+   - Panes that reach the layout's edge. Fitted, the layout covers the middle of the window (16:10: its full width and
+     90% of the height); a pane that reaches an edge of the layout (a full-screen backdrop, the black around the circle
+     of the screen wipe, a fade) would stop there and leave the scene showing beyond it. Such an edge is moved to the
+     window's edge (E = 1 / f(r) in layout units), the pane's other edge stays: the pane stretches, its content (black,
+     a backdrop) does not need its shape. Only the ui2d pane shaders below place their quad from this buffer (entry 33:
+     size and offset of the unit quad, 4..6: model-view rows); text and other shaders (the wipe's circle) are only fitted.
+   The result is a scale S and offset O of the draw's normalized device coordinates per axis, applied to its viewport and
+   scissor (uw_acnh_refit). ACNH_UI_FIT=0: off. */
+static double acnh_fx(double t) { return t <= 16.0 / 9 ? 1 : (16.0 / 9) / t; }
+static double acnh_fy(double t) { return (t <= 16.0 / 9 ? t : 16.0 / 9) / (16.0 / 9); }
+static int acnh_pane_shader(const char *vs) {
+    static const char *const pane[] = {"171c8262", "302b31ef", "44dd4786", "ac195790", "f0919299", "5ddfd93b"};
+    if (!vs) return 0;
+    for (size_t i = 0; i < sizeof pane / sizeof *pane; i++) if (!strncmp(vs, pane[i], 8)) return 1;
+    return 0;
+}
+/* The pane's rectangle in layout units (c: the vertex stage's binding 0 as vec4 rows; q: the ratio its projection was
+   built for): x0, x1, y0, y1 (16:9 layout edges at -1 and 1). 0 when its corners cannot be placed. */
+static int acnh_pane_rect(const float (*c)[4], double q, double *rc) {
+    rc[0] = rc[2] = 1e9; rc[1] = rc[3] = -1e9;
+    for (int k = 0; k < 4; k++) {
+        double px = (k & 1) * c[33][0] + c[33][2], py = (k >> 1) * -c[33][1] + c[33][3], v[3], cl[4];
+        for (int r = 0; r < 3; r++) v[r] = c[4 + r][0] * px + c[4 + r][1] * py + c[4 + r][3];
+        for (int r = 0; r < 4; r++) cl[r] = c[r][0] * v[0] + c[r][1] * v[1] + c[r][2] * v[2] + c[r][3];
+        if (!(fabs(cl[3]) > 1e-6)) return 0;
+        double x = cl[0] / cl[3] / acnh_fx(q), y = cl[1] / cl[3] / acnh_fy(q);
+        if (x < rc[0]) rc[0] = x; if (x > rc[1]) rc[1] = x; if (y < rc[2]) rc[2] = y; if (y > rc[3]) rc[3] = y;
+    }
+    return rc[1] > rc[0] && rc[3] > rc[2];
+}
+/* One axis: built with fb (NDC per layout unit), now f; a pane from lo to hi (or none). NDC_out = S * NDC_in + O. */
+static void acnh_axis(double fb, double f, int pane, double lo, double hi, double *S, double *O) {
+    double a = 1, b = 0, E = 1 / f;
+    if (pane) {
+        double lo2 = lo <= -0.99 && lo > -E ? -E : lo, hi2 = hi >= 0.99 && hi < E ? E : hi;
+        if (lo2 != lo || hi2 != hi) { a = (hi2 - lo2) / (hi - lo); b = lo2 - a * lo; }
+    }
+    *S = f * a / fb; *O = f * b;
+}
+static int uw_acnh_refit(const char *vs, const p_draw *dw, const p_draw_idx *di, NSUInteger tw, NSUInteger th, double *sx, double *ox, double *sy, double *oy) {
+    static int on = -1; if (on < 0) { const char *e = getenv("ACNH_UI_FIT"); on = !(e && !strcmp(e, "0")); }
+    if (!on || !runtime_aspect_now || !g_mfx.swap_w || tw != g_mfx.swap_w || th != g_mfx.swap_h || (dw ? dw->count : di ? di->count : 0) != 6) return 0;
+    const p_bind_buf *u = &S.ubo[0][0]; void *mb; uint64_t mo;
+    if (!u->addr || u->size < 64 || pend_hits(u->addr, 64) || !mtl_addr(u->addr, 64, &mb, &mo)) return 0;
+    const float *m = (const float *)(uintptr_t)u->addr;   /* rows: m[0..3] row 0, m[4..7] row 1, m[12..15] row 3 */
+    double p00 = m[0], p11 = fabs(m[5]);
+    if (!(p00 > 1e-3) || !(p11 > 1e-3) || fabs(m[1]) > 1e-4 || fabs(m[4]) > 1e-4 ||
+        fabs(m[12]) > 1e-4 || fabs(m[13]) > 1e-4 || fabs(m[14] + 1) > 1e-3) return 0;   /* m[15]: text has the view folded in */
+    double q = p11 / p00; if (q < 0.4 || q > 5) return 0;
+    double r = runtime_aspect_now(); if (!(r > 0)) r = 16.0 / 9;
+    double rc[4] = {0, 0, 0, 0};
+    int pane = acnh_pane_shader(vs) && u->size >= 34 * 16 && !pend_hits(u->addr, 34 * 16) && acnh_pane_rect((const float (*)[4])(uintptr_t)u->addr, q, rc);
+    acnh_axis(acnh_fx(q), acnh_fx(r), pane, rc[0], rc[1], sx, ox);
+    acnh_axis(acnh_fy(q), acnh_fy(r), pane, rc[2], rc[3], sy, oy);
+    if (atomic_load(&g_draw_log) > 0)
+        MLOG("[uw] F%llu acnh ui %.8s q %.4f r %.4f pane %d rect x %.3f..%.3f y %.3f..%.3f -> x %.4f%+.4f y %.4f%+.4f", (unsigned long long)atomic_load(&g_cur_frame),
+             vs ? vs : "-", q, r, pane, rc[0], rc[1], rc[2], rc[3], *sx, *ox, *sy, *oy);
+    return !(fabs(*sx - 1) < 1e-4 && fabs(*ox) < 1e-4 && fabs(*sy - 1) < 1e-4 && fabs(*oy) < 1e-4);
+}
 static int ui_mat_ok(void) { const p_bind_buf *u = &S.ubo[0][0]; void *mb; uint64_t mo; return u->addr && u->size >= 64 && u->size <= 4096 && !pend_hits(u->addr, u->size) && mtl_addr(u->addr, u->size, &mb, &mo); }
 static uint64_t ui_mat_patch(const p_bind_buf *u, void *mb, uint64_t mo) {
     enum { RING = 4 << 20 }; static __strong id<MTLBuffer> ring; static uint64_t ring_gpu, la, ls, lp, lg; static size_t at; static double lo;
@@ -9724,11 +9792,18 @@ frz_plain:;
         if (uh > 0 && uh < 1) { if (ui_cover_all(uh)) vs = 1 / uh; else if (uy > 0) { so = lround(uy * th); if (ui_mat_ok()) moff = 2 * uy; else { vo = so; static int n; if (n++ < 4) MLOG("界面下移：投影矩阵这次读不到，退回挪视口（通道 %llu）", g_stat_pass); } } } }
     if (moff != g_ui_moff) { g_ui_moff = moff; args_dirty_stage(0); }
     double ux = uw_ui_squeeze(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th), cx = tw / 2.0;   // key 4: UI squeezed by 1 / ux about the canvas centre
+    double acnh_sx = 1, acnh_ox = 0, acnh_sy = 1, acnh_oy = 0;   // ACNH UI: fitted to the current window shape (uw_acnh_refit)
+    int acnh = uw_acnh_refit(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th, &acnh_sx, &acnh_ox, &acnh_sy, &acnh_oy);
     double vx = S.has_vp ? S.vp[0][0] : 0, vw = S.has_vp ? S.vp[0][2] : tw;
     if (ux != 1) { vx = cx + (vx - cx) / ux; vw /= ux; }
     double uy = uw_ui_squeeze_y(pr && pr->sh[0] ? pr->sh[0]->key : NULL, dw, di, tw, th), cy = th / 2.0;   // narrow TOTK_ASPECT: UI squeezed by 1 / uy about the centre
     double vy = (S.has_vp ? S.vp[0][1] : 0) + vo, vh = (S.has_vp ? S.vp[0][3] : th) * vs;
     if (uy != 1) { vy = cy + (vy - cy) / uy; vh /= uy; }
+    double avx = vx, avw = vw, avy = vy, avh = vh;   // ACNH: NDC' = S * NDC + O per axis (Metal: x right, y up; viewport y down)
+    if (acnh) {
+        vx = avx + (acnh_ox + 1 - acnh_sx) / 2 * avw; vw = acnh_sx * avw;
+        vy = avy + (1 - acnh_oy - acnh_sy) / 2 * avh; vh = acnh_sy * avh;
+    }
     if ((atomic_load(&g_uw_log) > 0 && uw_on_canvas()) || atomic_load(&g_draw_log) > 0)
         MLOG("[uw] F%llu pass %llu ui %d squeeze %.3f vs %.8s fs %.8s count %u inst %d vp %s%g,%g,%g,%g sc %s%d,%d,%d,%d blend %#x tex %ux%u fmt %#x ser %llu bl %u,%u,%u/%u,%u,%u cm %#x prim %d",
              (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, g_uw_ui, ux, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",
@@ -9765,6 +9840,11 @@ frz_plain:;
         if (ux != 1) { sx0 = lround(cx + (sx0 - cx) / ux); sx1 = lround(cx + (sx1 - cx) / ux); }
         long x0 = sx0 < 0 ? 0 : sx0, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = sx1, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
         if (uy != 1) { y0 = lround(cy + (y0 - cy) / uy); y1 = lround(cy + (y1 - cy) / uy); }
+        if (acnh) {   // the scissor moves with the viewport: pixel' = v' + (pixel - v) * (size' / size)
+            x0 = lround(vx + (x0 - avx) * vw / avw); x1 = lround(vx + (x1 - avx) * vw / avw);
+            y0 = lround(vy + (y0 - avy) * vh / avh); y1 = lround(vy + (y1 - avy) * vh / avh);
+            if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
+        }
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { g_draw_skip[10]++; return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
