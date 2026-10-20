@@ -12,7 +12,9 @@ targets:
     type: application
     platform: iOS
     sources:
-      - Sources
+      - path: Sources
+        excludes:
+          - Info.plist   # the app's Info.plist is Gen/Info.plist (below), made from this one
       - path: ../../totk/ios/Sources/touch_pad.m
       - path: ../runtime
         excludes:
