@@ -78,8 +78,19 @@ void runtime_shortcut_help_toggle(void) {}
     unsetenv("TOTK_AUTOLOAD");
     chdir(docs.fileSystemRepresentation);
     host_argv[0] = strdup("TOTK"); host_argv[1] = strdup(res.fileSystemRepresentation); host_argv[2] = strdup("boot");
-    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    self.window.rootViewController = [TOTKGameController new]; [self.window makeKeyAndVisible]; return YES;
+    return YES;
+}
+@end
+
+/* The window comes with the scene: iOS 27 stops apps built with its SDK that do not adopt the UIScene life cycle
+   (UIApplicationSceneManifest in project.yml names this class). */
+@interface TOTKScene : UIResponder <UIWindowSceneDelegate> @property(nonatomic,strong) UIWindow *window; @end
+@implementation TOTKScene
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
+    (void)session; (void)options;
+    if (![scene isKindOfClass:UIWindowScene.class]) return;
+    self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+    self.window.rootViewController = [TOTKGameController new]; [self.window makeKeyAndVisible];
 }
 @end
 
