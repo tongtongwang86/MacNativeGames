@@ -1,4 +1,5 @@
 /* Horizon services reached by the current TOTK startup. Unknown operations fail. */
+#include <dirent.h>
 #include "runtime.h"
 #include "game_version.h"
 #include <TargetConditionals.h>
@@ -222,11 +223,37 @@ static uint64_t language_code_make(int language) {
 static bool language_code_equal(const uint64_t *code,const int *language) { if(!code||!language)runtime_fail("language comparison pointer"); return *code==language_code_make(*language); }
 static bool language_equal_code(const int *language,const uint64_t *code) { return language_code_equal(code,language); }
 static void host_oe_init(void) { fprintf(stderr,"[totk] application environment: local macOS process\n"); }
-static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: no DLC\n"); }
-static int host_aoc_count(void) { return 0; }
-static int host_aoc_list(int *out,int offset,int count) {
- (void)out;if(offset<0||count<0)runtime_fail("invalid add-on content list range");return 0;
+/* Add-on content (DLC): the folders in ACNH_AOC (default extracted/aoc), one per DLC named by its index (the DLC's title
+   ID minus the base 0x01006F8002327000: 300 and 301 are the Pocket Camp and Nook Inc. item tickets, 1000 is Happy Home
+   Paradise), are the DLC this console owns. nn::fs::MountAddOnContent mounts one (romfs.c). */
+#define AOC_BASE_ID 0x01006F8002327000ull
+static int aoc_index[64], aoc_n = -1;
+static int int_cmp(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+static void aoc_scan(void) {
+ if (aoc_n >= 0) return;
+ aoc_n = 0; const char *dir = getenv("ACNH_AOC"); if (!dir || !*dir) dir = "extracted/aoc";
+ DIR *d = opendir(dir); if (!d) return;
+ for (struct dirent *e; (e = readdir(d)) && aoc_n < 64; ) {
+  char *end; long v = strtol(e->d_name, &end, 10);
+  if (e->d_name[0] >= '0' && e->d_name[0] <= '9' && !*end && v >= 0 && v < 0x10000 && e->d_type == DT_DIR) aoc_index[aoc_n++] = (int)v;
+ }
+ closedir(d); qsort(aoc_index, (size_t)aoc_n, sizeof *aoc_index, int_cmp);
 }
+static void host_aoc_init(void) {
+ aoc_scan(); fprintf(stderr,"[acnh] add-on content: %d DLC", aoc_n);
+ for (int i = 0; i < aoc_n; i++) fprintf(stderr, "%s%d", i ? ", " : " (", aoc_index[i]);
+ fprintf(stderr, "%s\n", aoc_n ? ")" : "");
+}
+static int host_aoc_count(void) { aoc_scan(); return aoc_n; }
+static int host_aoc_list(int *out,int offset,int count) {
+ if(offset<0||count<0||(!out&&count))runtime_fail("invalid add-on content list range");
+ aoc_scan(); int n=0; for(int i=offset;i<aoc_n&&n<count;i++)out[n++]=aoc_index[i]; return n;
+}
+static uint64_t host_aoc_base_id(void) { return AOC_BASE_ID; }
+static uint32_t host_aoc_prepare(int index) { aoc_scan(); for (int i = 0; i < aoc_n; i++) if (aoc_index[i] == index) return 0; return 0x1f4u << 9 | 166u; }   /* not owned: an aoc (module 166) error */
+static uint32_t host_aoc_mount_status(void) { return 0; }
+static void host_aoc_notify(uint64_t data_id) { (void)data_id; }
+static void host_aoc_update_cached_list(void) {}
 static void host_error_init(void) { fprintf(stderr,"[totk] error contexts: local diagnostics\n"); }
 static void host_fs_init(void) { runtime_fs_init(); }
 static void host_pctl_init(void) { fprintf(stderr,"[totk] local application parental controls initialized\n"); }
@@ -316,6 +343,9 @@ void *runtime_override(const char *name) {
   {"_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE",language_code_equal},{"_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE",language_equal_code},
   {"nndiagStartup",host_diag_init},{"_ZN2nn2oe10InitializeEv",host_oe_init},{"_ZN2nn3aoc10InitializeEv",host_aoc_init},
   {"_ZN2nn3aoc17CountAddOnContentEv",host_aoc_count},{"_ZN2nn3aoc16ListAddOnContentEPiii",host_aoc_list},
+  {"_ZN2nn3aoc21GetAddOnContentBaseIdEv",host_aoc_base_id},{"_ZN2nn3aoc19PrepareAddOnContentEi",host_aoc_prepare},
+  {"_ZN2nn3aoc28CheckAddOnContentMountStatusEv",host_aoc_mount_status},{"_ZN2nn3aoc16UpdateCachedListEv",host_aoc_update_cached_list},
+  {"_ZN2nn3aoc23NotifyMountAddOnContentENS_3ncm6DataIdE",host_aoc_notify},{"_ZN2nn3aoc25NotifyUnmountAddOnContentENS_3ncm6DataIdE",host_aoc_notify},
   {"_ZN2nn3err26InitializeContextWriterApiEv",host_error_init},{"_ZN2nn2fs24InitializeForApplicationEv",host_fs_init},
   {"_ZN2nn4pctl10InitializeEv",host_pctl_init},{"_ZN2nn4diag34InitializeApplicationAbortObserverEv",host_abort_init}};
  for(size_t i=0;i<sizeof(entries)/sizeof(entries[0]);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;

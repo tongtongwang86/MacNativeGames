@@ -76,4 +76,4 @@ targets:
         - ../../totk/third_party/d2r_gfx/gfx/nvn/include
         - Gen
         - Gen/deps/include
-      OTHER_CFLAGS: $(inherited) -mcpu=apple-a15 -I../runtime -I../../totk/third_party/d2r_gfx/gfx/nvn -I../../totk/third_party/d2r_gfx/gfx/nvn/include -IGen -I../build -DNVN_API_MAJOR=53 -DNVN_API_MINOR=313 -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1
+      OTHER_CFLAGS: $(inherited) -mcpu=apple-a15 -I../runtime -I../../totk/third_party/d2r_gfx/gfx/nvn -I../../totk/third_party/d2r_gfx/gfx/nvn/include -IGen -I../build -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1

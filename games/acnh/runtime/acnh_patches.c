@@ -11,11 +11,12 @@
 #include "game_version.h"
 
 /* Camera aspect ratio (aspect_patch.h: the picture follows the window's shape, key 4 toggles 16:9).
-   ACNH 2.0.6 uses sead's PerspectiveProjection (default ctor main+0x271f5e0, ctor(near, far, fovy, aspect) main+0x271f6f0,
-   aspect at +0xb0: TOTK's layout). Unlike TOTK, most of its projections are made on the fly (the ctor runs about 850
+   ACNH uses sead's PerspectiveProjection (2.0.6: default ctor main+0x271f5e0, ctor(near, far, fovy, aspect) main+0x271f6f0;
+   aspect at +0xb0, TOTK's layout). Unlike TOTK, most of its projections are made on the fly (the ctor runs about 850
    times a second, reached through function pointers), and the cameras take their aspect from a viewport rectangle; so
-   the ratio is not changed where it is produced but where sead reads it: the perspective matrix (main+0x271f8a0), the
-   near-plane size (main+0x271f970) and getAspect (main+0x271f870), which the game's culling and screen picking use.
+   the ratio is not changed where it is produced but where sead reads it: the perspective matrix, the near-plane size and
+   getAspect, which the game's culling and screen picking use (3.0.0: main+0x37e3e28, +0x37e3ef4, +0x37e3e0c; 2.0.6 had the
+   same code at main+0x271f8a0 / +0x271f970 / +0x271f870, with the matrix's registers allocated differently).
    Only the game's own screen ratio is replaced: a stored aspect of exactly 16:9 (0x3fe38e39, what 1920/1080 and
    1280/720 give) becomes the window's, while projections with other ratios (the 3D model views in menus, render
    targets) keep theirs. ACNH draws its UI through such a 16:9 perspective too, so the UI follows the same rule: wider
@@ -34,10 +35,10 @@
    out: ldp x10, x11, [sp], #16;  b <after the read>
    Only x10 / x11 (restored) and no flags are touched. iPhone / iPad: written by the iOS export, checked on the device. */
 typedef struct { uint64_t offset; uint32_t original; unsigned reg; int height; const char *what; } AspectRead;   /* height: s<h>, -1 none */
-static const AspectRead aspect_reads[] = {
-    {0x271f8ac, 0x2d558c02, 3, 2, "perspective matrix: ldp s2, s3, [x0, #0xac]"},
-    {0x271f9b8, 0x2d558c02, 3, 2, "near-plane size: ldp s2, s3, [x0, #0xac]"},
-    {0x271f870, 0xbd40b000, 0, -1, "getAspect: ldr s0, [x0, #0xb0]"},
+static const AspectRead aspect_reads[] = {   /* ACNH 3.0.0 */
+    {0x37e3e34, 0x2d558801, 2, 1, "perspective matrix: ldp s1, s2, [x0, #0xac]"},
+    {0x37e3f3c, 0x2d558c02, 3, 2, "near-plane size: ldp s2, s3, [x0, #0xac]"},
+    {0x37e3e0c, 0xbd40b000, 0, -1, "getAspect: ldr s0, [x0, #0xb0]"},
 };
 #define ASPECT_READ_STUB 80
 #define ASPECT_VSCALE_SLOT 52   /* data page: the vertical scale (float, 0 = none) */
@@ -87,7 +88,7 @@ static void aspect_install_reads(Module *m, uint64_t stub_off, uint64_t data_off
 #else
         if (have != r->original) {
             fprintf(stderr, "[acnh] aspect main+%#llx: found %08x, expected %08x (%s)\n", (unsigned long long)r->offset, have, r->original, r->what);
-            runtime_fail("aspect patch: the camera code does not match ACNH 2.0.6");
+            runtime_fail("aspect patch: the camera code does not match ACNH 3.0.0");
         }
         for (unsigned b = 0; b < ASPECT_READ_STUB; b++) if (m->base[s + b]) runtime_fail("aspect patch: text padding in use");
         memcpy(m->base + s, stub, sizeof stub); memcpy(m->base + r->offset, &jump, 4);

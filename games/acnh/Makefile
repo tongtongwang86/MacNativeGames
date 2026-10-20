@@ -1,12 +1,13 @@
-# Animal Crossing: New Horizons 2.0.6 on the MacNativeGames native runtime (Apple silicon, Metal 4).
-# Game files: extracted/ -> ../../../extracted (exefs/ and romfs/ of base + 2.0.6). Everything made from them stays
+# Animal Crossing: New Horizons 3.0.0 on the MacNativeGames native runtime (Apple silicon, Metal 4).
+# Game files: extracted/ -> ../../../extracted (exefs/ and romfs/ of base + 3.0.0). Everything made from them stays
 # local (rewritten/, analysis/, build/: .gitignore).
 TP := ../totk/third_party
 GFX_SRC := $(wildcard $(TP)/d2r_gfx/gfx/nvn/*.c $(TP)/d2r_gfx/gfx/nvn/*.m $(TP)/d2r_gfx/gfx/nvn/*.S $(TP)/d2r_gfx/gfx/tex/*.c $(TP)/d2r_gfx/gfx/tex/*.m)
 GFX_OBJECTS := $(patsubst $(TP)/%,build/gfx/%.o,$(GFX_SRC))
-# NVN API 53.313: what ACNH 2.0.6 (SDK 10.9) checks for; TOTK builds keep 55.15. ACNH relies on NVN's default depth
+# NVN API 55.15 (the d2r_gfx default, as TOTK): what ACNH 3.0.0 checks for (main+0x37b65ec: major 0x37, minor >= 0xf;
+# 2.0.6 wanted 53.313). ACNH relies on NVN's default depth
 # mode (near = -w, GL clip z) without calling nvnDeviceSetDepthMode.
-GFX_FLAGS := -DNVN_API_MAJOR=53 -DNVN_API_MINOR=313 -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1 -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TP)/d2r_gfx/gfx/nvn/include
+GFX_FLAGS := -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1 -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TP)/d2r_gfx/gfx/nvn/include
 NATIVE_OPT ?= -O2
 PY := .venv/bin/python
 

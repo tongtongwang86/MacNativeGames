@@ -1,6 +1,6 @@
-# Animal Crossing: New Horizons 2.0.6 (native, Apple silicon + Metal 4)
+# Animal Crossing: New Horizons 3.0.0 (native, Apple silicon + Metal 4)
 
-Runs ACNH 2.0.6 on macOS the same way `games/totk` runs TotK: the game's own ARM64 code executes natively, after
+Runs ACNH 3.0.0 (with its DLC) on macOS the same way `games/totk` runs TotK: the game's own ARM64 code executes natively, after
 d2r's `patch_nso.py` rewrites the instructions that need the host (`x18`, `tpidr*`, `svc`, counter reads). Each
 rewritten site is checked in an emulator against the original. NVN goes to Metal 4 through `d2r_gfx` and Ryujinx's
 shader translator, shared with TotK through `third_party` → `../totk/third_party`.
@@ -43,6 +43,18 @@ The plan, and the list of what ACNH needs (services, applets, fonts, NVN 53), is
 - `scripts/import_save.py <saves dir> --uid <resident UID>` copies a Ryujinx/JKSV-layout device save (`0/`) into
   `user-data/save/device/` (it backs up an existing one first) and sets the account to the resident's UID. The source is
   only read.
+
+## 3.0.0 and DLC
+
+The port moved from 2.0.6 to 3.0.0 on 2026-10-20 (a 2.0.6 save is updated by the game on its first start: keep a copy).
+Extract the update as for 2.0.6 (acnh-recomp `docs/BUILDING.md`), with two changes:
+- hactool needs the two BKTR checks that TotK's `build_app.py` (`build_hactool`) relaxes: newer updates leave padding
+  after the patch tables (the IVFC hashes still check the result).
+- DLC: extract each add-on NSP's data NCA (its own ticket's title key) with `--romfsdir=extracted/aoc/<index>`, index =
+  the DLC's title ID minus `01006F8002327000`: 300 (Pocket Camp ticket), 301 (Nook Inc. silk rug), 1000 (Happy Home
+  Paradise). `nn::aoc` lists those folders (`services.c`, `ACNH_AOC`) and `nn::fs::MountAddOnContent` mounts one (`romfs.c`).
+What 3.0.0 needed in the runtime: NVN API 55.15 (it checks for it), `olsc:u` and `pctl` as services (in 3.0.0 those SDK
+parts are linked into main without names, so they can no longer be replaced by name), and the aspect sites moved.
 
 ## Screen shape
 

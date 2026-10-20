@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind the native loader to ACNH 2.0.6's verified rewritten images; generated tables stay local (never commit)."""
+"""Bind the native loader to ACNH's (3.0.0) verified rewritten images; generated tables stay local (never commit)."""
 import argparse
 import hashlib
 import json

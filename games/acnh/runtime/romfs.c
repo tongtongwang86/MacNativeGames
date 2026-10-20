@@ -1,5 +1,9 @@
-/* Read-only game RomFS for ACNH, backed by the extracted romfs folder (hactool output of base + 2.0.6).
-   ACNH_ROMFS overrides the folder (default extracted/romfs). Every path is resolved relative to that folder with the
+/* Read-only game RomFS for ACNH, backed by the extracted romfs folder (hactool output of base + update).
+   ACNH_ROMFS overrides the folder (default extracted/romfs). ACNH_ROMFS_OVERLAY names a folder of replacement files at
+   the same paths (the 60 FPS SpeedFix's parameter files, scripts/speedfix.py), opened instead of the game's own; it
+   adds no files, so directory listings stay the game's.
+   Add-on content (DLC): nn::fs::MountAddOnContent(name, index) mounts the folder <ACNH_AOC>/<index> (default extracted/aoc,
+   one folder per DLC, extracted like the game's RomFS; services.c lists them through nn::aoc) the same way, read-only. Every path is resolved relative to that folder with the
    shared validation (no "..", no absolute paths, no backslashes) and opened with O_NOFOLLOW, so a guest path can't
    leave it. TOTK's verified-image backend (runtime-index.bin + romfs.bin, overlays) is not used here. */
 #include "runtime.h"
@@ -18,9 +22,17 @@
 #define NH 65536
 #define HANDLE_BASE 0x100000000ULL
 
-static int root_fd = -1;
+static int root_fd = -1, overlay_fd = -1;
 static char root_path[2048];
-static char mount_name[64];
+/* Mounts: [0] the game's RomFS (MountRom), then add-on content folders (MountAddOnContent). */
+typedef struct { char name[64]; int fd; char path[2048]; } RomMount;
+#define NMOUNT 9
+static RomMount rmounts[NMOUNT];
+static const RomMount *mount_of(const char *path) {
+    for (int i = 0; i < NMOUNT; i++) { size_t n = strlen(rmounts[i].name);
+        if (n && path && !strncmp(path, rmounts[i].name, n) && path[n] == ':') return &rmounts[i]; }
+    return NULL;
+}
 static int handle_fd[NH];
 static uint64_t handle_size[NH];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -39,18 +51,54 @@ void runtime_fs_init(void) {
     need(fstatat(root_fd, "Shader", &st, 0) == 0 && S_ISDIR(st.st_mode) &&
          fstatat(root_fd, "System", &st, 0) == 0 && S_ISDIR(st.st_mode), "RomFS folder is not ACNH's (no Shader/ and System/)");
     fprintf(stderr, "[acnh] read-only RomFS: folder %s\n", dir);
+    const char *ov = getenv("ACNH_ROMFS_OVERLAY");
+    if (ov && *ov) {
+        overlay_fd = open(ov, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (overlay_fd < 0) { fprintf(stderr, "[acnh] RomFS overlay %s missing\n", ov); runtime_fail("RomFS overlay folder missing"); }
+        fprintf(stderr, "[acnh] RomFS overlay: %s (its files replace the game's)\n", ov);
+    }
 }
 
-static const char *rom_path(const char *path) { return romfs_path_relative(mount_name, path); }
+static const char *rom_path(const char *path) { const RomMount *m = mount_of(path); return m ? romfs_path_relative(m->name, path) : NULL; }
 
 static unsigned mount_rom(const char *name, void *cache, uint64_t size) {
     (void)cache; (void)size;
     runtime_fs_init();
-    if (!name || !romfs_path_valid_relative(name) || strlen(name) >= sizeof(mount_name) || strchr(name, '/') || strchr(name, ':'))
+    if (!name || !romfs_path_valid_relative(name) || strlen(name) >= sizeof rmounts[0].name || strchr(name, '/') || strchr(name, ':'))
         return INVALID;
-    if (*mount_name && strcmp(name, mount_name)) runtime_fail("second RomFS mount not implemented");
-    strcpy(mount_name, name);
+    if (*rmounts[0].name && strcmp(name, rmounts[0].name)) runtime_fail("second game RomFS mount not implemented");
+    strcpy(rmounts[0].name, name); rmounts[0].fd = root_fd; strcpy(rmounts[0].path, root_path);
     return 0;
+}
+/* nn::fs::MountAddOnContent(name, index, cache, size) */
+static unsigned mount_aoc(const char *name, int index, void *cache, uint64_t size) {
+    (void)cache; (void)size;
+    if (!name || !romfs_path_valid_relative(name) || strlen(name) >= sizeof rmounts[0].name || strchr(name, '/') || strchr(name, ':') || index < 0)
+        return INVALID;
+    const char *dir = getenv("ACNH_AOC"); if (!dir || !*dir) dir = "extracted/aoc";
+    pthread_mutex_lock(&lock);
+    int slot = -1;
+    for (int i = 1; i < NMOUNT; i++) { if (!strcmp(rmounts[i].name, name)) { pthread_mutex_unlock(&lock); return 0x402u; } if (!*rmounts[i].name && slot < 0) slot = i; }
+    if (slot < 0) runtime_fail("add-on content mount table full");
+    RomMount *m = &rmounts[slot];
+    snprintf(m->path, sizeof m->path, "%s/%d", dir, index);
+    m->fd = open(m->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (m->fd < 0) { pthread_mutex_unlock(&lock); fprintf(stderr, "[acnh] add-on content %d: no folder %s\n", index, m->path); return NOT_FOUND; }
+    strcpy(m->name, name);
+    pthread_mutex_unlock(&lock);
+    fprintf(stderr, "[acnh] add-on content %d mounted as %s: (%s)\n", index, name, m->path);
+    return 0;
+}
+static unsigned aoc_cache_size(uint64_t *out, int index) { (void)index; if (!out) return INVALID; *out = 0; return 0; }
+/* Unmount of a RomFS / add-on content mount: 1 when it was one (fs_host.c). The game's RomFS stays mounted. */
+int runtime_romfs_unmount(const char *name) {
+    if (!name) return 0;
+    pthread_mutex_lock(&lock);
+    for (int i = 1; i < NMOUNT; i++) if (*rmounts[i].name && !strcmp(rmounts[i].name, name)) {
+        close(rmounts[i].fd); memset(&rmounts[i], 0, sizeof rmounts[i]); pthread_mutex_unlock(&lock);
+        fprintf(stderr, "[acnh] add-on content %s unmounted\n", name); return 1; }
+    pthread_mutex_unlock(&lock);
+    return *rmounts[0].name && !strcmp(rmounts[0].name, name);
 }
 static unsigned cache_size(uint64_t *out) { if (!out) return INVALID; *out = 0; return 0; }
 
@@ -65,9 +113,12 @@ void runtime_fs_log(const char *what, const char *path) { fs_log(what, path); }
 unsigned runtime_romfs_open(uint64_t *out, const char *path, int mode) {
     fs_log("rom", path ? path : "(null)");
     if (!out || mode != 1) return UNSUPPORTED;
+    const RomMount *m = mount_of(path);
     const char *p = rom_path(path);
-    if (!p) return NOT_FOUND;
-    int fd = openat(root_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (!m || !p) return NOT_FOUND;
+    int fd = m == &rmounts[0] && overlay_fd >= 0 ? openat(overlay_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (fd >= 0) fs_log("rom overlay", p);
+    else fd = openat(m->fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return NOT_FOUND;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return NOT_FOUND; }
@@ -127,14 +178,15 @@ void runtime_romfs_close(uint64_t h) {
 }
 unsigned runtime_romfs_entry_type(int *out, const char *path) {
     if (!out) return INVALID;
+    const RomMount *m = mount_of(path);
     const char *p = rom_path(path);
+    if (!m) return NOT_FOUND;
     if (!p) {   /* the mount root itself ("rom:/") */
-        size_t n = strlen(mount_name);
-        if (n && path && !strncmp(path, mount_name, n) && !strcmp(path + n, ":/")) { *out = 0; return 0; }
+        if (!strcmp(path + strlen(m->name), ":/")) { *out = 0; return 0; }
         return NOT_FOUND;
     }
     struct stat st;
-    if (fstatat(root_fd, p, &st, AT_SYMLINK_NOFOLLOW) != 0) return NOT_FOUND;
+    if (fstatat(m->fd, p, &st, AT_SYMLINK_NOFOLLOW) != 0) return NOT_FOUND;
     if (S_ISREG(st.st_mode)) { *out = 1; return 0; }
     if (S_ISDIR(st.st_mode)) { *out = 0; return 0; }
     return NOT_FOUND;
@@ -145,16 +197,17 @@ unsigned runtime_romfs_host_directory(const char *path, char *out, size_t size) 
     unsigned r = runtime_romfs_entry_type(&type, path);
     if (r) return r;
     if (type != 0) return NOT_FOUND;
-    const char *p = rom_path(path);
-    if (snprintf(out, size, "%s/%s", root_path, p ? p : "") >= (int)size) return INVALID;
+    const RomMount *m = mount_of(path); const char *p = rom_path(path);
+    if (snprintf(out, size, "%s/%s", m->path, p ? p : "") >= (int)size) return INVALID;
     return 0;
 }
-int runtime_romfs_owns(const char *path) { size_t n = strlen(mount_name); return n && path && !strncmp(path, mount_name, n) && path[n] == ':'; }
+int runtime_romfs_owns(const char *path) { return mount_of(path) != NULL; }
 int runtime_romfs_handle(uint64_t h) { return h > HANDLE_BASE && h < HANDLE_BASE + NH; }
 unsigned runtime_romfs_read_options(uint64_t *out, uint64_t h, int64_t off, void *buf, uint64_t size) { return runtime_romfs_read(out, h, off, buf, size); }
 void *runtime_fs_override(const char *name) {
     static const struct { const char *name; void *fn; } map[] = {
-        {"_ZN2nn2fs8MountRomEPKcPvm", mount_rom}, {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", cache_size}};
+        {"_ZN2nn2fs8MountRomEPKcPvm", mount_rom}, {"_ZN2nn2fs22QueryMountRomCacheSizeEPm", cache_size},
+        {"_ZN2nn2fs17MountAddOnContentEPKciPvm", mount_aoc}, {"_ZN2nn2fs31QueryMountAddOnContentCacheSizeEPmi", aoc_cache_size}};
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) if (!strcmp(name, map[i].name)) return map[i].fn;
     return runtime_fs_host_override(name);
 }
