@@ -30,8 +30,8 @@ The plan, and the list of what ACNH needs (services, applets, fonts, NVN 53), is
 - `scripts/prepare_runtime.py` reads that report and writes `build/runtime_tables.h`: relocations, symbols, gates
   and DT_INIT constructor flags.
 - `runtime/` is forked from `games/totk/runtime`. The ACNH changes:
-  - `acnh_patches.c`: there are no game-code patches yet, and TotK's frame-step, resolution and aspect hooks report
-    "unavailable".
+  - `acnh_patches.c`: the aspect-ratio patch (below) and `ACNH_SITE_PROBE`; TotK's frame-step and resolution hooks
+    report "unavailable".
   - `romfs.c`: a read-only backend on the extracted romfs folder (`ACNH_ROMFS` overrides it). Traversal and links
     are rejected.
   - `ipc.c`: CMIF domains. ConvertCurrentObjectToDomain, domain requests and closes, and input objects.
@@ -43,6 +43,35 @@ The plan, and the list of what ACNH needs (services, applets, fonts, NVN 53), is
 - `scripts/import_save.py <saves dir> --uid <resident UID>` copies a Ryujinx/JKSV-layout device save (`0/`) into
   `user-data/save/device/` (it backs up an existing one first) and sets the account to the resident's UID. The source is
   only read.
+
+## Screen shape
+
+The picture follows the window's shape (`aspect_patch.h`, as in TotK): key 4 switches back to the game's 16:9 and
+`TOTK_ASPECT=21:9` fixes a ratio. ACNH builds most of its sead perspective projections on the fly, so the ratio is put in
+where sead reads it (`acnh_patches.c`), and only for projections whose aspect is exactly 16:9; the game's UI goes through
+one of those too. Wider than 16:9 the view widens and the UI stays in the middle 16:9; narrower (16:10, 4:3, iPad) the view
+keeps its width and grows taller, so nothing is cut off.
+
+## 60 FPS
+
+Not available. ACNH steps its simulation once per frame and asks for 30 fps (present interval 2, set once at start from
+sead's framework config, main+0x26f7cd8); there is no time step to scale as in TotK, whose engine already supports a
+variable frame rate. Its movement and animation use per-frame constants throughout (`mSpeedChaseStep`,
+`mStickSpeedAddCalcRate`, ...), so running at 60 Hz plays the game at twice the speed. MetalFX frame interpolation (key 2)
+does not engage yet: its scene, camera, depth and UI inputs are found with TotK-specific hooks.
+
+## iPhone / iPad
+
+```bash
+python3 ios/tools/build_ipa.py   # after make build/acnh-native and a Mac run; writes build/ACNH.ipa (unsigned)
+```
+
+The same app as `games/totk/ios` (UIScene app, `runtime/frontend_ios.m`, touch controls). iOS can neither patch code nor
+translate shaders at run time: the Mac binary exports its patched code (`export-ios`), and the shaders the Mac has
+translated so far (`build/shader-cache`) become the app's seed, so play on the Mac where you want to play on the iPad
+first, or shaders the Mac has not seen draw nothing on the device. The island is in the app's Documents
+(`save/save/device`, Files app). SaveSync keeps it in step with the Mac only when the signing profile has the iCloud
+entitlements (`libs/savesync/ARCHITECTURE.md`); the app carries the increased-memory-limit entitlement.
 
 ## Use
 

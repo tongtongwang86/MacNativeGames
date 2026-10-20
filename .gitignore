@@ -32,3 +32,5 @@ games/acnh/analysis/
 games/acnh/user-data/
 games/acnh/extracted
 games/acnh/tooling/
+games/acnh/ios/Gen/
+games/acnh/ios/ACNHIOS.xcodeproj/

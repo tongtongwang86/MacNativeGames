@@ -1,0 +1,79 @@
+# ACNH for iPhone / iPad (xcodegen spec; ios/tools/build_ipa.py writes Gen/ and builds it). Same shape as games/totk/ios.
+name: ACNHIOS
+options:
+  bundleIdPrefix: org.macnativegames
+  deploymentTarget:
+    iOS: "26.0"
+configFiles:
+  Release: Gen/acnh.xcconfig
+  Debug: Gen/acnh.xcconfig
+targets:
+  ACNHIOS:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: ../../totk/ios/Sources/touch_pad.m
+      - path: ../runtime
+        excludes:
+          - frontend.m
+          - loader.c
+      - path: ../../totk/third_party/d2r_gfx/gfx/nvn
+      - path: ../../totk/third_party/d2r_gfx/gfx/tex
+        excludes:
+          - "*.md"
+      - path: Gen/embed.S
+      - path: ../vendor/savesync
+        excludes:
+          - "tests/**"
+          - "*.md"
+      - path: ../runtime/loader.c
+        compilerFlags: "-Dmain=totk_host_main"
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: ${ACNH_APP_NAME}
+        CFBundleName: ${ACNH_APP_NAME}
+        CFBundleIdentifier: ${ACNH_BUNDLE_ID}
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: ACNHScene
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UIApplicationSupportsIndirectInputEvents: true
+        GCSupportsControllerUserInteraction: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+        CADisableMinimumFrameDurationOnPhone: true
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: ${ACNH_BUNDLE_ID}
+      PRODUCT_NAME: ACNH
+      CODE_SIGN_ENTITLEMENTS: Sources/ACNH.entitlements
+      TARGETED_DEVICE_FAMILY: "1,2"
+      IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+      CODE_SIGN_STYLE: Manual
+      CODE_SIGNING_ALLOWED: NO
+      ENABLE_BITCODE: NO
+      GCC_C_LANGUAGE_STANDARD: gnu11
+      CLANG_ENABLE_OBJC_ARC: YES
+      GCC_WARN_INHIBIT_ALL_WARNINGS: YES
+      HEADER_SEARCH_PATHS:
+        - $(inherited)
+        - ../../totk/ios/Sources
+        - ../../totk/third_party/d2r_gfx/gfx/nvn
+        - ../../totk/third_party/d2r_gfx/gfx/nvn/include
+        - Gen
+        - Gen/deps/include
+      OTHER_CFLAGS: $(inherited) -mcpu=apple-a15 -I../runtime -I../../totk/third_party/d2r_gfx/gfx/nvn -I../../totk/third_party/d2r_gfx/gfx/nvn/include -IGen -I../build -DNVN_API_MAJOR=53 -DNVN_API_MINOR=313 -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1
