@@ -7,6 +7,7 @@
 #include "autoload.h"
 #include "runtime.h"
 #include "fs_host.h"
+#include "../vendor/savesync/savesync.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -78,6 +79,11 @@ static void init(void) {
     make_dir(save_root);                                   /* launcher-style EnsureSaveData */
     need(snprintf(device_root, sizeof device_root, "%s/save/device", profile) < (int)sizeof device_root, "device save path");
     make_dir(device_root);                                 /* ACNH keeps its island in the device save (type 3) */
+    /* iCloud save sync (vendor/savesync) of the device save, where the island lives (the user save stays empty): before
+       the game reads its saves; uploads after commits (below). */
+    char title[17]; snprintf(title, sizeof title, "%016llX", (unsigned long long)ACNH_TITLE_ID);
+    savesync_start(&(savesync_config){.title_id = title, .game_version = TOTK_GAME_VERSION, .save_dir = device_root,
+                                      .state_dir = profile, .log_tag = "[acnh]", .save_busy = runtime_fs_save_busy});
     snprintf(p, sizeof p, "%s/temp", profile); remove_tree(p); make_dir(p);
     snprintf(p, sizeof p, "%s/cache", profile); make_dir(p);
     fprintf(stderr, "[totk] host save storage: %s\n", save_root);
@@ -205,6 +211,7 @@ static unsigned commit(const char *name) {
     if (!found) return R_PATH_NOT_FOUND;
     for (int i = 0; i < NFILES; i++) { pthread_mutex_lock(&lock); int fd = files[i].fd; pthread_mutex_unlock(&lock); if (fd > 0) fcntl(fd, F_FULLFSYNC); }
     if (save && !(getenv("TOTK_PROBE_NEGATIVE") && atoi(getenv("TOTK_PROBE_NEGATIVE")) == 23)) atomic_store(&save_dirty, 0);   /* 23: probe-save's negative control */
+    if (save) savesync_committed();
     return 0;
 }
 

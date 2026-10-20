@@ -10,8 +10,8 @@ GFX_FLAGS := -DNVN_API_MAJOR=53 -DNVN_API_MINOR=313 -DNVN_DEFAULT_DEPTH_NEAR_MIN
 NATIVE_OPT ?= -O2
 PY := .venv/bin/python
 
-RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S))
-RUNTIME_HDR := $(wildcard runtime/*.h)
+RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S)) vendor/savesync/savesync.m
+RUNTIME_HDR := $(wildcard runtime/*.h) vendor/savesync/savesync.h
 
 .PHONY: help dependencies rewrite tables boot verify-startup clean
 help:
