@@ -99,6 +99,17 @@ first, or shaders the Mac has not seen draw nothing on the device. The island is
 (`save/save/device`, Files app). SaveSync keeps it in step with the Mac only when the signing profile has the iCloud
 entitlements (`libs/savesync/ARCHITECTURE.md`); the app carries the increased-memory-limit entitlement.
 
+## Mac app
+
+```bash
+python3 scripts/install_mac_app.py --icloud-container iCloud.<your container>   # ~/Applications/Animal Crossing.app
+```
+
+The app holds a launcher and your icon (`make icon` first); the game stays in this folder. The launcher sets what
+`make boot` sets, names the iCloud container SaveSync uses (the one the iPhone / iPad app is signed with), logs to
+`~/Library/Logs/MacNativeGames/acnh.log` and runs `build/acnh-native` in place of itself. Start the Mac app before the
+iPad's first start, so the island goes to iCloud first and the iPad takes it.
+
 ## Use
 
 ```bash
