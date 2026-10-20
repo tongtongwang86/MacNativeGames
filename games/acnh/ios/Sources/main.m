@@ -60,6 +60,9 @@ void runtime_shortcut_help_toggle(void) {}
     if (freopen(log.fileSystemRepresentation,"w",stderr)) setvbuf(stderr,NULL,_IOLBF,0);
     setenv("ACNH_ROMFS",[res stringByAppendingPathComponent:@"romfs"].fileSystemRepresentation,1);
     setenv("ACNH_AOC",[res stringByAppendingPathComponent:@"aoc"].fileSystemRepresentation,1);   /* DLC, one folder per index */
+    /* The account the island's residents belong to (the Mac profile's, bundled by build_ipa.py), if the build had one. */
+    NSString *uid = [res stringByAppendingPathComponent:@"account.uid"];
+    if ([fm fileExistsAtPath:uid]) setenv("ACNH_ACCOUNT_UID_FILE", uid.fileSystemRepresentation, 1);
     setenv("ACNH_SPEEDFIX_DIR",[res stringByAppendingPathComponent:@"speedfix"].fileSystemRepresentation,1);   /* 60 FPS SpeedFix, when the build had it */
     setenv("TOTK_OPERATION_MODE","handheld",1);
     /* System fonts: the console's own dump when the build found one (GameData/shared-fonts), else the font the Mac

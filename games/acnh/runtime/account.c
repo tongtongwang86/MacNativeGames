@@ -33,6 +33,14 @@ static void initialize(void){
  struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode))runtime_fail("invalid local account identity file");
  if(st.st_size==0){do{arc4random_buf(&local,sizeof(local));}while(!local.lo&&!local.hi);if(write(fd,&local,sizeof(local))!=sizeof(local)||fsync(fd))runtime_fail("persist local account identity");}
  else if(st.st_size!=sizeof(local)||pread(fd,&local,sizeof(local),0)!=sizeof(local)||(!local.lo&&!local.hi))runtime_fail("corrupt local account identity");
+ /* ACNH_ACCOUNT_UID_FILE: the account the island's residents belong to (the iPhone / iPad app bundles the Mac profile's
+    account.uid). ACNH ties each resident to an account; on any other account it never gets to the title screen (2026-10-20:
+    an iPad with its own random account sat on a dark screen with the Mac's island). That account replaces this one. */
+ {const char *seed=getenv("ACNH_ACCOUNT_UID_FILE");Uid want;int sf=seed&&*seed?open(seed,O_RDONLY|O_CLOEXEC):-1;
+  if(sf>=0){if(pread(sf,&want,sizeof(want),0)==sizeof(want)&&(want.lo||want.hi)&&(want.lo!=local.lo||want.hi!=local.hi)){
+     local=want;if(pwrite(fd,&local,sizeof(local),0)!=sizeof(local)||ftruncate(fd,sizeof(local))||fsync(fd))runtime_fail("persist local account identity");
+     fprintf(stderr,"[acnh] account: the island's account from %s\n",seed);}
+   close(sf);}}
  close(fd);lock_release();fprintf(stderr,"[totk] persistent local account initialized\n");
 }
 static bool same(const Uid *uid){return uid&&uid->lo==local.lo&&uid->hi==local.hi;}

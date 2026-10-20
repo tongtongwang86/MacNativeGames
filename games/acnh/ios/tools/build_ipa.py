@@ -155,6 +155,8 @@ def main():
         (res / 'aoc').mkdir(exist_ok=True)
         for d in sorted(aoc.iterdir()):
             if d.is_dir() and d.name.isdigit(): copy_tree(d, res / 'aoc' / d.name)
+    uid = GAME / 'user-data/account.uid'   # the account the island's residents belong to (import_save.py --uid)
+    if uid.is_file(): clone(uid, res / 'account.uid'); print('account: the Mac profile\'s', flush=True)
     fonts = GAME / 'user-data/fonts'
     if fonts.is_dir(): copy_tree(fonts, res / 'shared-fonts')   # a dump from the player's own console, if there is one
     font = next((Path(f) for f in SYSTEM_FONTS if Path(f).is_file()), None)
