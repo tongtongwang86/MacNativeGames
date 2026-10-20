@@ -4,8 +4,9 @@
 TP := ../totk/third_party
 GFX_SRC := $(wildcard $(TP)/d2r_gfx/gfx/nvn/*.c $(TP)/d2r_gfx/gfx/nvn/*.m $(TP)/d2r_gfx/gfx/nvn/*.S $(TP)/d2r_gfx/gfx/tex/*.c $(TP)/d2r_gfx/gfx/tex/*.m)
 GFX_OBJECTS := $(patsubst $(TP)/%,build/gfx/%.o,$(GFX_SRC))
-# NVN API 53.313: what ACNH 2.0.6 (SDK 10.9) checks for; TOTK builds keep 55.15.
-GFX_FLAGS := -DNVN_API_MAJOR=53 -DNVN_API_MINOR=313 -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TP)/d2r_gfx/gfx/nvn/include
+# NVN API 53.313: what ACNH 2.0.6 (SDK 10.9) checks for; TOTK builds keep 55.15. ACNH relies on NVN's default depth
+# mode (near = -w, GL clip z) without calling nvnDeviceSetDepthMode.
+GFX_FLAGS := -DNVN_API_MAJOR=53 -DNVN_API_MINOR=313 -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1 -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TP)/d2r_gfx/gfx/nvn/include
 NATIVE_OPT ?= -O2
 PY := .venv/bin/python
 
@@ -74,8 +75,10 @@ build/shader-service/totk_xlate: ../totk/prebuilt/macos-arm64/totk_xlate ../totk
 verify-startup: build/acnh-native
 	TOTK_VERIFY_STARTUP=1 TOTK_HEADLESS=1 build/acnh-native rewritten boot
 
+# GPU submission on, with the same safety flags the TotK app sets (games/totk/app/launcher.m)
+GPU_ENV := TOTK_GPU_ALLOW_SUBMIT=1 TOTK_GPU_WIDEN=1 TOTK_GPU_BLOCKRT=1 TOTK_GPU_MIDCLEAR=1 TOTK_GPU_BUDGET_MB=5000
 boot: build/acnh-native shader-tools
-	build/acnh-native rewritten boot
+	$(GPU_ENV) build/acnh-native rewritten boot
 
 clean:
 	rm -rf build

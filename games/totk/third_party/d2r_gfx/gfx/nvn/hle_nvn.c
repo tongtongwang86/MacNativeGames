@@ -139,6 +139,7 @@ NVN(nvnDeviceBuilderSetFlags, void, NVNdeviceBuilder *b, int f) { ((dev_builder_
 NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     dev_t_ *o = (dev_t_ *)d; memset(o, 0, sizeof *o);
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
+    o->depth_mode = NVN_DEFAULT_DEPTH_NEAR_MINUS_W ? NVN_DEPTH_MODE_NEAR_IS_MINUS_W : NVN_DEPTH_MODE_NEAR_IS_ZERO;
     OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
     return 1;
 }
@@ -205,7 +206,12 @@ NVN(nvnDeviceInstallDebugCallback, void, NVNdevice *d, const PFNNVNDEBUGCALLBACK
     dev_t_ *o = (dev_t_ *)d; o->dbg_cb = B(enable) ? (void *)cb : NULL; o->dbg_data = data;
 }
 NVN(nvnDeviceSetWindowOriginMode, void, NVNdevice *d, NVNwindowOriginMode m) { ((dev_t_ *)d)->origin = m; LOG("[nvn] 窗口原点 %s", m ? "左上（同 D3D / Metal）" : "左下（GL）"); }
-static _Atomic int g_depth_near_minus_w;
+/* NVN's own default depth mode is NEAR_IS_MINUS_W (GL clip z). TOTK sets its mode explicitly and keeps the old default
+   (0 here); ACNH never calls nvnDeviceSetDepthMode, so its build passes -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1. */
+#ifndef NVN_DEFAULT_DEPTH_NEAR_MINUS_W
+#define NVN_DEFAULT_DEPTH_NEAR_MINUS_W 0
+#endif
+static _Atomic int g_depth_near_minus_w = NVN_DEFAULT_DEPTH_NEAR_MINUS_W;
 int totk_depth_near_minus_w(void) { return atomic_load(&g_depth_near_minus_w); }
 NVN(nvnDeviceSetDepthMode, void, NVNdevice *d, NVNdepthMode m) { ((dev_t_ *)d)->depth_mode = m; atomic_store(&g_depth_near_minus_w, m == NVN_DEPTH_MODE_NEAR_IS_MINUS_W); LOG("[nvn] 深度模式 %s", m ? "近=0（同 D3D / Metal）" : "近=-w（GL）：顶点着色器翻译时做 z=(z+w)/2 转换"); }
 NVN(nvnDeviceFinalizeCommandHandle, void, NVNdevice *d, NVNcommandHandle h) { (void)d; (void)h; }
@@ -1052,6 +1058,9 @@ NVN(nvnCommandBufferUpdateUniformBuffer, void, NVNcommandBuffer *c, NVNbufferAdd
     uint32_t sz = (uint32_t)(24 + n);
     uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, OP_UPDATE_UB, (sz + 7) & ~7u);
     uint64_t dst = buf + off, nn = n; memcpy(p + 8, &dst, 8); memcpy(p + 16, &nn, 8); memcpy(p + 24, data, n);
+    if (cmdlog_on()) { float f[16] = {0}; memcpy(f, data, n < sizeof f ? n : sizeof f);
+        LOG("[cmd] F%llu UpdateUniformBuffer dst=%#llx n=%zu f=%g,%g,%g,%g %g,%g,%g,%g %g,%g,%g,%g %g,%g,%g,%g", (unsigned long long)g_frame_pub,
+            (unsigned long long)dst, n, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]); }
 }
 
 // ---------- 渲染命令：参数按 nvn_obj.h 的载荷格式录进命令内存，回放见 nvn_mtl.m ----------
