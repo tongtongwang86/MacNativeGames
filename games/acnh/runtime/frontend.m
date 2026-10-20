@@ -211,6 +211,9 @@ void runtime_front_run(void(*callback)(void)){
  @autoreleasepool{
   bootStartNS=runtime_now_ns();
   [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+  /* The player's app icon in the Dock (make icon: tooling/AppIcon.icon -> build/AppIcon.icns; ACNH_ICON_ICNS names another). */
+  {const char *ic=getenv("ACNH_ICON_ICNS");NSString *icp=ic&&*ic?@(ic):@"build/AppIcon.icns";
+   NSImage *img=[[NSFileManager defaultManager] fileExistsAtPath:icp]?[[NSImage alloc] initWithContentsOfFile:icp]:nil;if(img)[NSApp setApplicationIconImage:img];}
   runtime_gamepad_start();
   /* Default window: the docked output size, 1920x1080, scaled down (16:9 kept) when the screen's visible area is smaller. */
   /* TOTK_WINDOW_SIZE=<w>x<h> (test scripts only, e.g. the 2K output test; the desktop launcher never sets it): another starting size. */

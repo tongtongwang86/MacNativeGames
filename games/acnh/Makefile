@@ -14,9 +14,9 @@ PY := .venv/bin/python
 RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S)) vendor/savesync/savesync.m
 RUNTIME_HDR := $(wildcard runtime/*.h) vendor/savesync/savesync.h
 
-.PHONY: help dependencies rewrite tables boot verify-startup clean
+.PHONY: help dependencies rewrite tables boot verify-startup clean icon
 help:
-	@echo 'targets: dependencies rewrite tables build/acnh-native boot verify-startup'
+	@echo 'targets: dependencies rewrite tables build/acnh-native boot verify-startup icon'
 
 dependencies:
 	@test -x "$(PY)" || python3.12 -m venv .venv
@@ -86,3 +86,13 @@ clean:
 
 # rebuild the shared graphics objects when this Makefile (and so GFX_FLAGS) changes
 $(GFX_OBJECTS): Makefile
+
+# The player's app icon (an Icon Composer .icon package; not in git): the Dock icon of the Mac window (frontend.m), and
+# the iPhone / iPad app's icon (ios/tools/build_ipa.py --icon, default the same package).
+ACNH_ICON ?= tooling/AppIcon.icon
+icon: build/AppIcon.icns
+build/AppIcon.icns: $(ACNH_ICON)
+	@mkdir -p build/icon && rm -rf build/icon/AppIcon.icon && cp -R "$(ACNH_ICON)" build/icon/AppIcon.icon
+	xcrun actool build/icon/AppIcon.icon --compile build/icon --platform macosx --minimum-deployment-target 26.0 \
+	    --app-icon AppIcon --output-partial-info-plist build/icon/partial.plist >/dev/null
+	cp build/icon/AppIcon.icns "$@"

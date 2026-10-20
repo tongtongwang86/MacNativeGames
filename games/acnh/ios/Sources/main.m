@@ -59,6 +59,7 @@ void runtime_shortcut_help_toggle(void) {}
     NSString *log = [docs stringByAppendingPathComponent:@"log.txt"];
     if (freopen(log.fileSystemRepresentation,"w",stderr)) setvbuf(stderr,NULL,_IOLBF,0);
     setenv("ACNH_ROMFS",[res stringByAppendingPathComponent:@"romfs"].fileSystemRepresentation,1);
+    setenv("ACNH_AOC",[res stringByAppendingPathComponent:@"aoc"].fileSystemRepresentation,1);   /* DLC, one folder per index */
     setenv("TOTK_OPERATION_MODE","handheld",1);
     /* System fonts: the console's own dump when the build found one (GameData/shared-fonts), else the font the Mac
        build bundled (GameData/font.ttc / .ttf; iOS keeps its system fonts out of the app's reach). */

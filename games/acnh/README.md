@@ -78,6 +78,10 @@ does not engage yet: its scene, camera, depth and UI inputs are found with TotK-
 python3 ios/tools/build_ipa.py   # after make build/acnh-native and a Mac run; writes build/ACNH.ipa (unsigned)
 ```
 
+`make icon` turns your Icon Composer package (`tooling/AppIcon.icon`, not in git; `ACNH_ICON=` another) into the Mac
+window's Dock icon (`build/AppIcon.icns`), and `build_ipa.py` compiles the same package into the app (`--icon`). The DLC
+folders (`extracted/aoc`) go into the app as well.
+
 The same app as `games/totk/ios` (UIScene app, `runtime/frontend_ios.m`, touch controls). iOS can neither patch code nor
 translate shaders at run time: the Mac binary exports its patched code (`export-ios`), and the shaders the Mac has
 translated so far (`build/shader-cache`) become the app's seed, so play on the Mac where you want to play on the iPad

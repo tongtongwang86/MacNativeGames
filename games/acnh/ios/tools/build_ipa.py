@@ -11,8 +11,8 @@ The same steps as games/totk/ios/tools/build_ipa.py, whose helpers it uses:
   3. iOS cannot translate shaders either: the Mac's translated shaders (build/shader-cache/rt-<chain>) are the seed,
      compiled into device metallibs (compile_seed.py). Shaders the Mac has not seen yet are missing on the device until
      a Mac run has met them and the IPA is built again.
-  4. xcodegen + xcodebuild (unsigned), the increased-memory-limit entitlement in an ad-hoc signature, then RomFS, the
-     seed and a system font into GameData/, zipped as Payload/ACNH.app.
+  4. xcodegen + xcodebuild (unsigned), the increased-memory-limit entitlement in an ad-hoc signature, the player's icon
+     (--icon), then RomFS, the DLC folders, the seed and a system font into GameData/, zipped as Payload/ACNH.app.
 Saves live in the app's Documents (Files app: save/save/device is the island); with an iCloud-capable signing profile
 SaveSync keeps them in step with the Mac."""
 import argparse, hashlib, json, os, shutil, subprocess, sys
@@ -88,6 +88,7 @@ def main():
     p.add_argument('--out', type=Path, default=GAME / 'build/ACNH.ipa')
     p.add_argument('--logs', type=Path, default=GAME / 'build/ios-logs')
     p.add_argument('--app-name', default='Animal Crossing'); p.add_argument('--bundle-id', default='org.macnativegames.acnh')
+    p.add_argument('--icon', type=Path, default=GAME / 'tooling/AppIcon.icon', help='an Icon Composer .icon package (default tooling/AppIcon.icon, if there)')
     a = p.parse_args(); ios = GAME / 'ios'; gen = ios / 'Gen'; logs = a.logs.resolve(); out = a.out.resolve()
     if out.suffix.lower() != '.ipa': raise RuntimeError('the output must end in .ipa')
     env = dict(os.environ, DEVELOPER_DIR=developer_dir())
@@ -123,10 +124,24 @@ def main():
     if not app.is_dir(): raise RuntimeError(f'Xcode did not produce {app}')
     # The entitlement in the executable's ad-hoc signature, so re-signing tools keep it.
     run(['codesign', '--force', '--sign', '-', '--entitlements', ios / 'Sources/ACNH.entitlements', app / 'ACNH'], ios, logs / 'ios-entitlements.log', env)
+    if a.icon and a.icon.is_dir():   # the player's own icon: compiled into the app (asset catalog and icon files) and named in Info.plist
+        import plistlib, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'AppIcon.icon'; shutil.copytree(a.icon, src); partial = Path(d) / 'icon-info.plist'
+            run(['xcrun', 'actool', src, '--compile', app, '--platform', 'iphoneos', '--minimum-deployment-target', '26.0', '--target-device', 'ipad',
+                 '--target-device', 'iphone', '--app-icon', 'AppIcon', '--output-partial-info-plist', partial], ios, logs / 'icon-iphoneos.log', env)
+            info = plistlib.loads((app / 'Info.plist').read_bytes()); info.update(plistlib.loads(partial.read_bytes()))
+            (app / 'Info.plist').write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+        print(f'app icon: {a.icon}', flush=True)
     print('app built', flush=True)
     res = app / 'GameData'; res.mkdir(exist_ok=True)
     copy_tree((GAME / 'extracted/romfs').resolve(), res / 'romfs')
     copy_tree(seed, res / 'shader-seed')
+    aoc = (GAME / 'extracted/aoc').resolve()   # DLC folders (extracted/aoc/<index>), if any
+    if aoc.is_dir():
+        (res / 'aoc').mkdir(exist_ok=True)
+        for d in sorted(aoc.iterdir()):
+            if d.is_dir() and d.name.isdigit(): copy_tree(d, res / 'aoc' / d.name)
     fonts = GAME / 'user-data/fonts'
     if fonts.is_dir(): copy_tree(fonts, res / 'shared-fonts')   # a dump from the player's own console, if there is one
     font = next((Path(f) for f in SYSTEM_FONTS if Path(f).is_file()), None)
