@@ -404,14 +404,20 @@ static void accumulate(Mixer *m, int buffer, const float *src, float vol, int fr
     float *d = mixbuf(m, buffer); for (int k = 0; k < frames; k++) d[k] += src[k] * vol;
 }
 static int mix_valid(AudioRenderer *r, int32_t id) { return id >= 0 && id <= r->param.submix_count && r->mixes[id].in_use; }
-static int mix_depth(AudioRenderer *r, int id) {
-    int d = 0;
-    for (int guard = 0; id > 0 && guard < 64; guard++, d++) {
-        if (!mix_valid(r, r->mixes[id].dest_mix_id)) return d + 1;
-        id = r->mixes[id].dest_mix_id;
-    }
-    return d;
+/* Hops from a submix down to the final mix, through destination mixes and splitter destinations (the longest path):
+   a mix must be processed after every mix that feeds it. ACNH routes submix -> splitter -> submix (its voice and
+   effect buses); counting only dest_mix_id gave such a mix the same depth as its destination, so the destination
+   could be folded into the final mix before the voice had been added to it. */
+static int mix_depth_at(AudioRenderer *r, int id, int guard) {
+    if (id <= 0 || guard > 32 || !mix_valid(r, id)) return 0;
+    const AudrenMixIn *x = &r->mixes[id]; Mixer *m = r->mixer; int d = 0;
+    if (x->dest_splitter_id != SPLITTER_UNUSED && m && x->dest_splitter_id < (uint32_t)m->nsplit) {
+        const SplitInfo *s = &m->split[x->dest_splitter_id];
+        for (int k = 0; k < s->ndest; k++) { const SplitDest *t = &m->dest[s->ids[k]]; if (t->used && mix_valid(r, t->dest)) { int e = mix_depth_at(r, t->dest, guard + 1); if (e > d) d = e; } }
+    } else if (mix_valid(r, x->dest_mix_id)) d = mix_depth_at(r, x->dest_mix_id, guard + 1);
+    return d + 1;
 }
+static int mix_depth(AudioRenderer *r, int id) { return mix_depth_at(r, id, 0); }
 
 /* Guest custom effects exchange int32 samples in two rings. Each ring has CPU and DSP
    0x40-byte headers followed by samples; only the DSP header's owned cursor is advanced. */
@@ -436,6 +442,14 @@ static void mix_aux(AudioRenderer *r, int mix, const AudrenEffectIn *e) {
         if(c==p.channels-1) { if(w<=p.capacity)sh[1]=(wr+total)%p.capacity; if(at<=p.capacity)rh[0]=(read+total)%p.capacity; }
     }
     if(!e->enabled) { sh[0]=sh[1]=sh[3]=0; rh[0]=rh[1]=rh[3]=0; }
+    { /* TOTK_AUDIO_VOICELOG: once a second per aux effect, the ring cursors (DSP and CPU side) and the levels in and out */
+      static int on=-1; if(on<0) on=getenv("TOTK_AUDIO_VOICELOG")!=NULL;
+      if(on && e->enabled) { static uint64_t last[64]; static float pin[64], pout[64]; int slot=(int)(e-r->effects)&63;
+          for(unsigned c=0;c<p.channels;c++){ const float *o=mixbuf(m,m->offset[mix]+p.output[c]); for(int k=0;k<m->frame;k++) pout[slot]=fmaxf(pout[slot],fabsf(o[k])); }
+          for(unsigned c=0;c<p.channels;c++){ uint64_t w2=(uint64_t)wr+c*m->frame; for(int k=0;k<m->frame;k++) if(w2<=p.capacity) pin[slot]=fmaxf(pin[slot],fabsf(sd[(w2+(unsigned)k)%p.capacity]/32768.f)); }
+          uint64_t now=runtime_now_ns(); if(now-last[slot]>1000000000ull){ last[slot]=now; const uint32_t *scpu=(const uint32_t *)send,*rcpu=(const uint32_t *)ret;
+              fprintf(stderr,"[auxlog] effect %d mix %d ch %u cap %u: send dsp_wr %u cpu_rd %u | return dsp_rd %u cpu_wr %u | peak sent %.3f returned %.3f\n",
+                      slot,mix,p.channels,p.capacity,sh[1],scpu[0],rh[0],rcpu[1],pin[slot],pout[slot]); pin[slot]=pout[slot]=0; } } }
 }
 
 void audio_mixer_effect_result(AudioRenderer *r, int id, void *output, unsigned size) {
@@ -608,6 +622,36 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
         if (!v->in.in_use || v->state != SV_STARTED || !v->in.sample_rate || !v->valid[v->index]) continue;
         int cc = (int)v->in.channel_count; if (cc < 1 || cc > 6) { report_once(m, 2, "voice channel count unsupported", cc); continue; }
         voice_render(r, v, vs, frames);
+        { /* TOTK_AUDIO_VOICELOG=1: once a second, every voice that played: format, rate, pitch, volume, routing and level */
+          static int on = -1; if (on < 0) on = getenv("TOTK_AUDIO_VOICELOG") != NULL;
+          if (on) { float pk = 0; for (int c = 0; c < cc; c++) for (int k = 0; k < frames; k++) pk = fmaxf(pk, fabsf(vs[c][k]));
+              double route = 0; int dest = -1;
+              if (v->in.splitter_id != SPLITTER_UNUSED && v->in.splitter_id < (uint32_t)m->nsplit) { const SplitInfo *s = &m->split[v->in.splitter_id];
+                  for (int k = 0; k < s->ndest; k++) { SplitDest *d = &m->dest[s->ids[k]]; if (!d->used) continue; dest = d->dest; for (int b = 0; b < 24; b++) route += d->vol[b]; } }
+              else if (mix_valid(r, v->in.mix_id)) { dest = v->in.mix_id; for (int c = 0; c < cc; c++) { int32_t id = v->in.channel_ids[c]; if (id >= 0 && id < r->param.voice_count * 6) for (int b = 0; b < 24; b++) route += r->channels[id].mix[b]; } }
+              static uint64_t last_ns; static char seen[1024]; uint64_t now = runtime_now_ns();
+              if (now - last_ns > 1000000000ull) { last_ns = now; memset(seen, 0, sizeof seen);
+                  static int graphs; if (graphs++ % 10 == 0) for (int x = 1; x <= r->param.submix_count; x++) if (r->mixes[x].in_use) {   /* the mix graph, every 10 s */
+                      const AudrenMixIn *mx = &r->mixes[x]; char ef[96] = ""; int el = 0;
+                      for (int e = 0; e < r->param.effect_count && el < 80; e++) if (r->effects[e].type && r->effects[e].mix_id == x) el += snprintf(ef + el, sizeof ef - el, "%u%s ", r->effects[e].type, r->effects[e].enabled ? "" : "(off)");
+                      fprintf(stderr, "[voicelog] graph mix %d: buffers %d vol %.3f effects [%s] -> mix %d / splitter %#x\n", x, mx->buffer_count, mx->volume, ef, mx->dest_mix_id, mx->dest_splitter_id);
+                      if (mx->dest_splitter_id != SPLITTER_UNUSED && mx->dest_splitter_id < (uint32_t)m->nsplit) { const SplitInfo *s = &m->split[mx->dest_splitter_id];
+                          for (int k = 0; k < s->ndest; k++) { const SplitDest *d = &m->dest[s->ids[k]]; double dv = 0; for (int b = 0; b < 24; b++) dv += d->vol[b];
+                              fprintf(stderr, "[voicelog] graph    dest %d used %d -> mix %d vol %.3f\n", s->ids[k], d->used, d->dest, dv); } } } }
+              if (i < 1024 && !seen[i] && pk > 0) { seen[i] = 1;
+                  fprintf(stderr, "[voicelog] v%d fmt %u %u Hz ch %d pitch %.3f vol %.3f peak %.3f -> %s %d (route gain %.3f, mix vol %.3f)\n", i, v->in.sample_format, v->in.sample_rate, cc,
+                          v->in.pitch, v->in.volume, pk, v->in.splitter_id != SPLITTER_UNUSED ? "splitter" : "mix", dest, route, dest >= 0 && mix_valid(r, dest) ? r->mixes[dest].volume : -1.0f);
+                  for (int hop = 0, x = dest; hop < 8 && x > 0 && mix_valid(r, x); hop++) {   /* the chain down to the final mix */
+                      const AudrenMixIn *mx = &r->mixes[x]; double g = 0; for (int a = 0; a < 24; a++) for (int b = 0; b < 24; b++) g += mx->mix[a][b];
+                      int effects = 0; for (int e = 0; e < r->param.effect_count; e++) if (r->effects[e].type && r->effects[e].mix_id == x) effects++;
+                      fprintf(stderr, "[voicelog]    mix %d: buffers %d vol %.3f effects %d -> mix %d / splitter %#x (matrix sum %.3f)\n", x, mx->buffer_count, mx->volume, effects, mx->dest_mix_id, mx->dest_splitter_id, g);
+                      if (mx->dest_splitter_id != SPLITTER_UNUSED && mx->dest_splitter_id < (uint32_t)m->nsplit) {
+                          const SplitInfo *s = &m->split[mx->dest_splitter_id];
+                          for (int k = 0; k < s->ndest; k++) { const SplitDest *d = &m->dest[s->ids[k]]; double dv = 0; for (int b = 0; b < 24; b++) dv += d->vol[b];
+                              fprintf(stderr, "[voicelog]      splitter %#x dest %d: used %d -> mix %d (valid %d) vol sum %.3f\n", mx->dest_splitter_id, s->ids[k], d->used, d->dest, mix_valid(r, d->dest), dv); }
+                          if (!s->ndest) fprintf(stderr, "[voicelog]      splitter %#x has no destinations\n", mx->dest_splitter_id);
+                      }
+                      x = mx->dest_splitter_id != SPLITTER_UNUSED ? -1 : mx->dest_mix_id; } } } }
         for (int f = 0; f < 2; f++) if (v->in.biquads[f].enable) {
             const AudrenBiquad *b = &v->in.biquads[f];
             const AudrenBiquadFloat *bf=&v->float_biquads[f];
