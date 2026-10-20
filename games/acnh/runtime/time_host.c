@@ -95,6 +95,37 @@ static int64_t user_difference(const ClockSnapshot *a, const ClockSnapshot *b) {
     return (b->user.offset - a->user.offset) * 1000000000LL;
 }
 
+/* ACNH: steady-clock time points, the adjustable user clock and time-zone rules. A TimeZoneRule (0x4000 bytes,
+   opaque to the game) stands for the host's own zone: LoadTimeZoneRule marks it, and the rule-taking conversions
+   use the host's localtime. */
+#define RULE_MAGIC 0x656e6f7a74736f68ULL   /* "hostzone" */
+static unsigned steady_point(SteadyClockTimePoint *out) { if (!out) return R_INVALID; *out = steady_now(); return 0; }
+static unsigned elapsed_between(int64_t *out, const SteadyClockTimePoint *a, const SteadyClockTimePoint *b) {
+    if (!out || !a || !b) return R_INVALID;
+    if (memcmp(a->source, b->source, 16)) return R_SOURCE_MISMATCH;
+    *out = b->value - a->value; return 0;
+}
+static unsigned adjust(void) { return 0; }   /* the host clock is already NTP-corrected */
+static unsigned char accuracy_sufficient(void) { return 0; }   /* offline: the network clock was never synchronised */
+static void device_location(char *out) { if (!out) runtime_fail("time location pointer"); location_name(out); }
+static unsigned load_rule(uint8_t *rule, const char *location) {
+    if (!rule || !location) return R_INVALID;
+    char mine[0x24]; location_name(mine);
+    if (strncmp(location, mine, 0x24)) { fprintf(stderr, "[acnh] time zone rule for %.36s (host zone %s used)\n", location, mine); }
+    uint64_t magic = RULE_MAGIC; memset(rule, 0, 0x4000); memcpy(rule, &magic, 8); return 0;
+}
+static void need_rule(const uint8_t *rule) { uint64_t m; if (!rule) runtime_fail("time zone rule pointer"); memcpy(&m, rule, 8); if (m != RULE_MAGIC) runtime_fail("time zone rule not loaded by LoadTimeZoneRule"); }
+static unsigned to_calendar_rule(CalendarTime *c, CalendarAdditionalInfo *info, const int64_t *posix, const uint8_t *rule) {
+    need_rule(rule); return to_calendar(c, info, posix);
+}
+static unsigned to_posix_rule(int *count, int64_t *out, int max, const CalendarTime *c, const uint8_t *rule) {
+    need_rule(rule); if (!count || !c || (!out && max > 0)) return R_INVALID;
+    struct tm tm = {0}; tm.tm_year = c->year - 1900; tm.tm_mon = c->month - 1; tm.tm_mday = c->day;
+    tm.tm_hour = c->hour; tm.tm_min = c->minute; tm.tm_sec = c->second; tm.tm_isdst = -1;
+    time_t t = mktime(&tm); if (t == (time_t)-1) return R_INVALID;
+    int n = 0; if (max > 0) out[n++] = (int64_t)t; *count = n; return 0;
+}
+
 void *runtime_time_override(const char *name) {
     static const struct { const char *name; void *fn; } map[] = {
         {"_ZN2nn4time10InitializeEv", initialize}, {"_ZN2nn4time8FinalizeEv", finalize}, {"_ZN2nn4time13IsInitializedEv", is_initialized},
@@ -108,6 +139,15 @@ void *runtime_time_override(const char *name) {
         {"_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", snapshot_create},
         {"_ZN2nn4time20CalculateSpanBetweenEPNS_8TimeSpanERKNS0_13ClockSnapshotES5_", span_between},
         {"_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS0_13ClockSnapshotES3_", user_difference},
+        {"_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", steady_point},
+        {"_ZN2nn4time24GetElapsedSecondsBetweenEPlRKNS0_20SteadyClockTimePointES4_", elapsed_between},
+        {"_ZN2nn4time25AdjustableUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", user_time},
+        {"_ZN2nn4time25AdjustableUserSystemClock6AdjustEv", adjust},
+        {"_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", accuracy_sufficient},
+        {"_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", device_location},
+        {"_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNameE", load_rule},
+        {"_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeERKNS0_12TimeZoneRuleE", to_calendar_rule},
+        {"_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeERKNS0_12TimeZoneRuleE", to_posix_rule},
     };
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (!strcmp(name, map[i].name)) return map[i].fn;
     return NULL;

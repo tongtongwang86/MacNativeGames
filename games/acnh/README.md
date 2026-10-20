@@ -14,7 +14,8 @@ You need your own dump. Nothing made from the game is ever committed: `extracted
 |---|---|
 | N0: project, rewrite, build | Done. All three modules (`main`, `subsdk0`, `sdk`) rewrite with a structural check OK and 0 divergent sites in the emulator. `make build/acnh-native` builds. |
 | N1: tables, imports, domains, `nnMain` | Done. `make verify-startup` passes: sdk, subsdk0 and main DT_INITs run (main has 8,090 constructors), and `nnMain` is entered. CMIF domain sessions work and are used by `nifm:u`. |
-| N2: services | Started. `nifm:u` (offline) is ported. The next stop is a NULL dereference in game init (`main+0x271e720`, reached from `main+0x29eb164`), right after the game creates a thread following nifm's `CreateGeneralService`. |
+| N2: services | Main loop runs: about 60 frames a second for 120 s with no stop. Ported or added: `nifm:u`, `bcat:u` and `friend:u` (offline), hid touch and Joy-Con assignment, `nn::oe` region, device ID and exit section, settings language codes, time-zone rules and clocks, account (`OpenUser`, user list, profile image, no NSA), device save data (`MountDeviceSaveData`, sizes, `Commit`), RomFS directory listing, shared fonts (Hiragino substitute), ngc profanity filter. Audio renderer REV8 is running. |
+| N3: graphics | NVN reports API 53.313 (`-DNVN_API_MAJOR/MINOR`; TotK keeps 55.15), and agl's device setup passes. Shaders translate (`make shader-tools`). **No picture yet:** the game runs with GPU submission off, the runtime's default since full-game runs panicked macOS upstream. The TotK app turns it on (`TOTK_GPU_ALLOW_SUBMIT=1` with `TOTK_GPU_WIDEN`, `BLOCKRT`, `MIDCLEAR` and `TOTK_GPU_BUDGET_MB=5000`). |
 
 The plan, and the list of what ACNH needs (services, applets, fonts, NVN 53), is in acnh-recomp's
 `docs/NATIVE-EVALUATION.md`.
@@ -39,7 +40,9 @@ The plan, and the list of what ACNH needs (services, applets, fonts, NVN 53), is
   - `loader.c`: constructors run in rtld order (sdk, subsdk0, main), and `TOTK_VERIFY_STARTUP` stops at `nnMain`.
   - The TotK-only parts were removed: version patches, world survey, the iOS frontend and the software keyboard
     probe.
-- Shared fonts are a placeholder (`build/shared_fonts_config.h`) until N2.
+- `scripts/import_save.py <saves dir> --uid <resident UID>` copies a Ryujinx/JKSV-layout device save (`0/`) into
+  `user-data/save/device/` (it backs up an existing one first) and sets the account to the resident's UID. The source is
+  only read.
 
 ## Use
 
@@ -48,6 +51,7 @@ make dependencies      # Python 3.12 venv: lz4, capstone, unicorn
 make rewrite           # rewrite + verify (about 90 s); LLVM_BIN defaults to /opt/homebrew/opt/llvm@21/bin
 make tables
 make build/acnh-native
+make shader-tools     # SPIRV-Cross (pinned commit, built with clang) + the prebuilt shader translator
 build/acnh-native rewritten probe   # map modules, bind imports, native cross-module calls
 make verify-startup    # headless, exits at nnMain with a JSON line
 make boot              # windowed, goes as far as the services allow

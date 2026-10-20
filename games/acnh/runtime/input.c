@@ -88,6 +88,23 @@ static uint32_t show_controller_support(ControllerSupportResult *out,const void 
  return 0;
 }
 /* Vibration devices and the six-axis sensor: runtime/hid_feedback.c (none unless TOTK_RUMBLE=1 / TOTK_GYRO=1). */
+/* ACNH (SDK 10.9) also reads the touch screen and the Joy-Con assignment. No touch input yet: every sample has no
+   touches. One controller, always in dual assignment. */
+typedef struct{int64_t sampling;int32_t count,reserved;uint8_t touches[][0x28];} TouchScreenState;
+static bool touchReady;
+static void initialize_touch(void){pthread_mutex_lock(&inputLock);touchReady=true;pthread_mutex_unlock(&inputLock);}
+static void touch_fill(TouchScreenState *out,size_t touches){if(!out)runtime_fail("touch output pointer");pthread_mutex_lock(&inputLock);if(!touchReady)runtime_fail("touch screen used before InitializeTouchScreen");memset(out,0,16+touches*0x28);out->sampling=++sample;pthread_mutex_unlock(&inputLock);}
+static void touch_state1(TouchScreenState *out){touch_fill(out,1);}
+static int touch_states16(TouchScreenState *out,int max){if(max<=0)return 0;touch_fill(out,16);return 1;}
+static uint32_t supported_style_set(void){pthread_mutex_lock(&inputLock);uint32_t v=styles;pthread_mutex_unlock(&inputLock);return v;}
+static uint8_t player_led(const uint32_t *id){if(!id)runtime_fail("controller id pointer");static const uint8_t led[8]={1,3,7,15,9,5,13,11};return *id<8?led[*id]:0;}
+static int joy_assignment(const uint32_t *id){(void)id;return 0;}   /* NpadJoyAssignmentMode_Dual */
+static void joy_assign(const uint32_t *id){(void)id;}
+static void joy_assign_single(const uint32_t *id,int type){(void)id;(void)type;}
+static uint32_t joy_merge(const uint32_t *a,const uint32_t *b){(void)a;(void)b;return 0;}
+static void joy_swap(const uint32_t *a,const uint32_t *b){(void)a;(void)b;}
+typedef struct{uint32_t main,sub;} NpadControllerColor;
+static uint32_t controller_color(NpadControllerColor *left,NpadControllerColor *right,const uint32_t *id){(void)id;if(!left||!right)runtime_fail("controller color pointer");*left=*right=(NpadControllerColor){0xff828282u,0xff0f0f0fu};return 0;}
 void *runtime_input_override(const char *name){
  void *feedback=runtime_hid_feedback_override(name);if(feedback)return feedback;
  static const struct{const char *name;void *fn;} entries[]={
@@ -98,7 +115,13 @@ void *runtime_input_override(const char *name){
  {"_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE",hold_type},{"_ZN2nn3hid14DisconnectNpadERKj",disconnect},
  {"_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE",show_controller_support},
  {"_ZN2nn3hid15InitializeMouseEv",initialize_mouse},{"_ZN2nn3hid18InitializeKeyboardEv",initialize_keyboard},
- {"_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi",mouse_states},{"_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE",keyboard_state}};
+ {"_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi",mouse_states},{"_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE",keyboard_state},
+ {"_ZN2nn3hid21InitializeTouchScreenEv",initialize_touch},{"_ZN2nn3hid19GetTouchScreenStateILm1EEEvPNS0_16TouchScreenStateIXT_EEE",touch_state1},
+ {"_ZN2nn3hid20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi",touch_states16},{"_ZN2nn3hid24GetSupportedNpadStyleSetEv",supported_style_set},
+ {"_ZN2nn3hid19GetPlayerLedPatternERKj",player_led},{"_ZN2nn3hid20GetNpadJoyAssignmentERKj",joy_assignment},
+ {"_ZN2nn3hid28SetNpadJoyAssignmentModeDualERKj",joy_assign},{"_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj",joy_assign},
+ {"_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKjNS0_17NpadJoyDeviceTypeE",joy_assign_single},{"_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_",joy_merge},
+ {"_ZN2nn3hid18SwapNpadAssignmentERKjS2_",joy_swap},{"_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj",controller_color}};
  for(unsigned i=0;i<sizeof(entries)/sizeof(*entries);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;return NULL;
 }
 

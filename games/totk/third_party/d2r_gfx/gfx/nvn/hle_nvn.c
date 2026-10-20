@@ -149,8 +149,16 @@ NVN(nvnDeviceGetProcAddress, PFNNVNGENERICFUNCPTRPROC, const NVNdevice *d, const
 
 // 设备属性：Tegra X1 实测值（nnheaders nvn_DeviceConstantsNX.h，在 SMO 上逐项调 nvnDeviceGetInteger 得到）
 // Device properties: values measured on Tegra X1 (nnheaders nvn_DeviceConstantsNX.h, obtained by calling nvnDeviceGetInteger item by item on SMO)
+// The API version is per game (each game's build passes its own): TOTK main+e9d614 requires major 55, minor >= 15 (the
+// default); ACNH 2.0.6 (agl device setup, main+0x26ef2a4) requires major 53, minor >= 313.
+#ifndef NVN_API_MAJOR
+#define NVN_API_MAJOR 55
+#endif
+#ifndef NVN_API_MINOR
+#define NVN_API_MINOR 15
+#endif
 static const int g_devinfo[] = {
-    [0x00] = 55, [0x01] = 15,   // Experimental ABI target: TOTK main+e9d614 requires major 55, minor >= 15. Unsupported functions stop.
+    [0x00] = NVN_API_MAJOR, [0x01] = NVN_API_MINOR,   // Experimental ABI target. Unsupported functions stop.
     [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4, [0x08] = 16, [0x09] = 32,
     [0x0A] = 16, [0x0B] = 4, [0x0C] = 4, [0x0D] = 4, [0x0E] = 16, [0x0F] = 32, [0x10] = 32, [0x11] = 256, [0x12] = 256,
     [0x13] = 4, [0x14] = 8, [0x15] = 512, [0x16] = 256, [0x17] = 2, [0x18] = 256, [0x19] = 4096, [0x1A] = 131072,

@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
 typedef struct{uint64_t lo,hi;} Uid;
 typedef struct{Uid uid;uint64_t token;} UserHandle;
 static Uid local;
@@ -39,12 +41,44 @@ static unsigned preselected(UserHandle *out){if(!out)runtime_fail("account null 
 static uint32_t user_id(Uid *out,const UserHandle *handle){lock_acquire();bool ok=out&&valid(handle);if(ok)*out=local;lock_release();return ok?0:0x7c67;}
 static void close_user(const UserHandle *handle){lock_acquire();if(!valid(handle))runtime_fail("invalid local account handle close");for(unsigned i=0;i<64;i++)if(tokens[i]==handle->token){tokens[i]=0;break;}lock_release();}
 static uint32_t existence(unsigned char *out,const Uid *uid){if(!out||!uid)return 0x7c67;initialize();*out=same(uid);return 0;}
-static uint32_t nickname(char *out,const Uid *uid){initialize();if(!out||!same(uid))return 0x7c67;memset(out,0,33);memcpy(out,"Local",5);return 0;}
+/* ACNH_NICKNAME: the account nickname (the island resident keeps its own name in the save); default "Player". */
+static uint32_t nickname(char *out,const Uid *uid){initialize();if(!out||!same(uid))return 0x7c67;const char *n=getenv("ACNH_NICKNAME");if(!n||!*n)n="Player";size_t k=strlen(n);if(k>32)k=32;memset(out,0,33);memcpy(out,n,k);return 0;}
+/* ACNH: the user list (one user), OpenUser by id, and a plain 256x256 JPEG as the profile picture. */
+static uint32_t open_user(UserHandle *out,const Uid *uid){if(!out||!uid)runtime_fail("account OpenUser pointer");initialize();if(!same(uid))return 0x7c67;
+ lock_acquire();for(unsigned i=0;i<64;i++)if(!tokens[i]){tokens[i]=nextToken++;*out=(UserHandle){local,tokens[i]};lock_release();return 0;}lock_release();runtime_fail("account user handles exhausted");}
+static uint32_t list_users(int *count,Uid *out,int max){if(!count||(!out&&max>0))runtime_fail("account user list pointer");initialize();int n=0;if(max>0)out[n++]=local;for(int i=n;i<max;i++)out[i]=(Uid){0,0};*count=n;return 0;}
+static uint32_t promote(const Uid *uid){initialize();return same(uid)?0:0x7c67;}
+static uint8_t *profile_jpeg;static size_t profile_jpeg_size;
+static void make_profile_jpeg(void){
+ CGColorSpaceRef cs=CGColorSpaceCreateDeviceRGB();CGContextRef ctx=CGBitmapContextCreate(NULL,256,256,8,0,cs,kCGImageAlphaNoneSkipLast);
+ CGContextSetRGBFillColor(ctx,0.36,0.72,0.55,1);CGContextFillRect(ctx,CGRectMake(0,0,256,256));CGImageRef img=CGBitmapContextCreateImage(ctx);
+ CFMutableDataRef data=CFDataCreateMutable(NULL,0);CGImageDestinationRef dst=CGImageDestinationCreateWithData(data,CFSTR("public.jpeg"),1,NULL);
+ if(!ctx||!img||!dst)runtime_fail("profile image encoder");CGImageDestinationAddImage(dst,img,NULL);if(!CGImageDestinationFinalize(dst))runtime_fail("profile image encoding");
+ profile_jpeg_size=(size_t)CFDataGetLength(data);profile_jpeg=malloc(profile_jpeg_size);if(!profile_jpeg)runtime_fail("profile image memory");memcpy(profile_jpeg,CFDataGetBytePtr(data),profile_jpeg_size);
+ CFRelease(dst);CFRelease(data);CGImageRelease(img);CGContextRelease(ctx);CGColorSpaceRelease(cs);
+}
+static uint32_t profile_image(uint64_t *size,void *buf,uint64_t cap,const Uid *uid){
+ static pthread_once_t once=PTHREAD_ONCE_INIT;initialize();if(!size||!same(uid))return 0x7c67;pthread_once(&once,make_profile_jpeg);
+ *size=profile_jpeg_size;if(buf){if(cap<profile_jpeg_size)return 0x7c67;memcpy(buf,profile_jpeg,profile_jpeg_size);}return 0;
+}
+/* The port is offline: no network service account (NSA). Asking whether one is available answers no; the calls that
+   need one stop the runtime with their name, so an online path shows up instead of misbehaving. */
+static uint32_t nsa_available(unsigned char *out,const UserHandle *handle){if(!out)runtime_fail("account NSA pointer");lock_acquire();bool ok=valid(handle);lock_release();if(!ok)runtime_fail("invalid account handle");*out=0;return 0;}
+static uint32_t nsa_needed(void){runtime_fail("network service account requested (online feature, not supported offline)");}
 void runtime_account_uid(uint64_t out[2]){initialize();out[0]=local.lo;out[1]=local.hi;}
 void *runtime_account_override(const char *name){
  static const struct{const char *name;void *fn;} entries[]={
  {"_ZN2nn7account10InitializeEv",initialize},{"_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE",preselected},
  {"_ZN2nn7account9CloseUserERKNS0_10UserHandleE",close_user},{"_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE",user_id},
- {"_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE",existence},{"_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE",nickname}};
+ {"_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE",existence},{"_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE",nickname},
+ {"_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE",open_user},{"_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi",list_users},
+ {"_ZN2nn7account18ListQualifiedUsersEPiPNS0_3UidEi",list_users},{"_ZN2nn7account20PromoteQualificationERKNS0_3UidE",promote},
+ {"_ZN2nn7account16LoadProfileImageEPmPvmRKNS0_3UidE",profile_image},
+ {"_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE",nsa_available},
+ {"_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE",nsa_needed},
+ {"_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE",nsa_needed},
+ {"_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE",nsa_needed},
+ {"_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10UserHandleE",nsa_needed},
+ {"_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE",nsa_needed}};
  for(unsigned i=0;i<sizeof(entries)/sizeof(*entries);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;return NULL;
 }

@@ -19,6 +19,7 @@
 #define HANDLE_BASE 0x100000000ULL
 
 static int root_fd = -1;
+static char root_path[2048];
 static char mount_name[64];
 static int handle_fd[NH];
 static uint64_t handle_size[NH];
@@ -30,6 +31,8 @@ void runtime_fs_init(void) {
     if (root_fd >= 0) return;
     const char *dir = getenv("ACNH_ROMFS");
     if (!dir || !*dir) dir = "extracted/romfs";
+    if (strlen(dir) >= sizeof root_path) runtime_fail("RomFS folder path too long");
+    strcpy(root_path, dir);
     root_fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (root_fd < 0) { fprintf(stderr, "[acnh] RomFS folder %s missing (set ACNH_ROMFS)\n", dir); runtime_fail("RomFS folder missing"); }
     struct stat st;
@@ -135,6 +138,16 @@ unsigned runtime_romfs_entry_type(int *out, const char *path) {
     if (S_ISREG(st.st_mode)) { *out = 1; return 0; }
     if (S_ISDIR(st.st_mode)) { *out = 0; return 0; }
     return NOT_FOUND;
+}
+/* The host folder behind a RomFS directory, for fs_host.c's directory listing. NOT_FOUND unless it is a directory. */
+unsigned runtime_romfs_host_directory(const char *path, char *out, size_t size) {
+    int type = -1;
+    unsigned r = runtime_romfs_entry_type(&type, path);
+    if (r) return r;
+    if (type != 0) return NOT_FOUND;
+    const char *p = rom_path(path);
+    if (snprintf(out, size, "%s/%s", root_path, p ? p : "") >= (int)size) return INVALID;
+    return 0;
 }
 int runtime_romfs_owns(const char *path) { size_t n = strlen(mount_name); return n && path && !strncmp(path, mount_name, n) && path[n] == ':'; }
 int runtime_romfs_handle(uint64_t h) { return h > HANDLE_BASE && h < HANDLE_BASE + NH; }

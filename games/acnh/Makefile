@@ -4,7 +4,8 @@
 TP := ../totk/third_party
 GFX_SRC := $(wildcard $(TP)/d2r_gfx/gfx/nvn/*.c $(TP)/d2r_gfx/gfx/nvn/*.m $(TP)/d2r_gfx/gfx/nvn/*.S $(TP)/d2r_gfx/gfx/tex/*.c $(TP)/d2r_gfx/gfx/tex/*.m)
 GFX_OBJECTS := $(patsubst $(TP)/%,build/gfx/%.o,$(GFX_SRC))
-GFX_FLAGS := -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TP)/d2r_gfx/gfx/nvn/include
+# NVN API 53.313: what ACNH 2.0.6 (SDK 10.9) checks for; TOTK builds keep 55.15.
+GFX_FLAGS := -DNVN_API_MAJOR=53 -DNVN_API_MINOR=313 -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TP)/d2r_gfx/gfx/nvn/include
 NATIVE_OPT ?= -O2
 PY := .venv/bin/python
 
@@ -28,10 +29,6 @@ tables: build/runtime_tables.h
 build/runtime_tables.h: scripts/prepare_runtime.py analysis/rewrite-validation.json
 	"$(PY)" scripts/prepare_runtime.py
 
-# N1 placeholder: the system fonts are replaced in N2; until then any use stops with a clear message.
-build/shared_fonts_config.h:
-	@mkdir -p build
-	printf '#define SHARED_FONT_COUNT 6\n#define SHARED_FONT_ROWS {"",0,0,""},{"",0,0,""},{"",0,0,""},{"",0,0,""},{"",0,0,""},{"",0,0,""}\n' > $@
 
 build/gfx/%.c.o: $(TP)/%.c
 	@mkdir -p $(dir $@)
@@ -43,7 +40,7 @@ build/gfx/%.S.o: $(TP)/%.S
 	@mkdir -p $(dir $@)
 	xcrun clang -c $< -o $@
 
-build/acnh-native: $(RUNTIME_SRC) $(RUNTIME_HDR) build/runtime_tables.h build/shared_fonts_config.h $(GFX_OBJECTS) Makefile
+build/acnh-native: $(RUNTIME_SRC) $(RUNTIME_HDR) build/runtime_tables.h $(GFX_OBJECTS) Makefile
 	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -I$(TP)/d2r_gfx/gfx/nvn/include \
 	    -Iruntime -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include \
 	    $(RUNTIME_SRC) $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a \
@@ -52,12 +49,36 @@ build/acnh-native: $(RUNTIME_SRC) $(RUNTIME_HDR) build/runtime_tables.h build/sh
 	    -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController \
 	    -framework CoreHaptics -framework IOKit -framework CloudKit -o "$@"
 
+# Shader translation (Maxwell -> SPIR-V -> MSL): TOTK's prebuilt Ryujinx-based translator (checked against its SHA-256)
+# and SPIRV-Cross at the commit build_app.py pins, built with clang. Both stay local (tooling/, build/).
+SPIRV_CROSS_COMMIT := aa217aeb6c9f0ace7a0ab233b28807edf45eb165
+SPIRV_CROSS_SRC := main spirv_cfg spirv_cpp spirv_cross spirv_cross_parsed_ir spirv_cross_util spirv_glsl spirv_hlsl spirv_msl spirv_parser spirv_reflect
+.PHONY: shader-tools
+shader-tools: build/spirv-cross/spirv-cross build/shader-service/totk_xlate
+tooling/SPIRV-Cross/.pinned:
+	rm -rf tooling/SPIRV-Cross && mkdir -p tooling
+	git clone -q https://github.com/KhronosGroup/SPIRV-Cross.git tooling/SPIRV-Cross
+	git -C tooling/SPIRV-Cross checkout -q $(SPIRV_CROSS_COMMIT)
+	touch $@
+build/spirv-cross/obj/%.o: tooling/SPIRV-Cross/.pinned
+	@mkdir -p $(dir $@)
+	xcrun clang++ -O3 -DNDEBUG -std=c++11 -arch arm64 -Wno-deprecated-declarations -c tooling/SPIRV-Cross/$*.cpp -o $@
+build/spirv-cross/spirv-cross: $(patsubst %,build/spirv-cross/obj/%.o,$(SPIRV_CROSS_SRC))
+	xcrun clang++ -arch arm64 $^ -o $@
+build/shader-service/totk_xlate: ../totk/prebuilt/macos-arm64/totk_xlate ../totk/prebuilt/macos-arm64/totk_xlate.sha256
+	test "$$(shasum -a 256 $< | cut -d' ' -f1)" = "$$(cat $<.sha256)"
+	@mkdir -p $(dir $@)
+	cp $< $@ && chmod +x $@
+
 # Headless boot until nnMain is entered (TOTK_VERIFY_STARTUP: the runtime exits there with a JSON line)
 verify-startup: build/acnh-native
 	TOTK_VERIFY_STARTUP=1 TOTK_HEADLESS=1 build/acnh-native rewritten boot
 
-boot: build/acnh-native
+boot: build/acnh-native shader-tools
 	build/acnh-native rewritten boot
 
 clean:
 	rm -rf build
+
+# rebuild the shared graphics objects when this Makefile (and so GFX_FLAGS) changes
+$(GFX_OBJECTS): Makefile

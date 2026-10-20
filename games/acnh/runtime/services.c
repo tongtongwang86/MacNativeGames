@@ -1,5 +1,6 @@
 /* Horizon services reached by the current TOTK startup. Unknown operations fail. */
 #include "runtime.h"
+#include "game_version.h"
 #include <TargetConditionals.h>
 #include "ipc.h"
 #include <mach/mach.h>
@@ -206,6 +207,20 @@ void runtime_guest_resident(uint64_t *resident,uint64_t *dirty,uint64_t *compres
  region_pages(ALIAS_START,ALIAS_START+ALIAS_SIZE,resident,dirty,compressed);
 }
 static void host_diag_init(void) { fprintf(stderr,"[totk] native diagnostics initialized\n"); }
+/* ACNH's oe calls beyond TOTK's. Region: ACNH_REGION (0 Japan, 1 USA, 2 Europe, 3 Australia, 4 China, 5 Korea,
+   6 Taiwan), default 1. The exit-request section has nothing to hold off: exit requests come from the window. */
+static int region_code(void) { const char *r=getenv("ACNH_REGION"); int v=r&&*r?atoi(r):1; if(v<0||v>6)runtime_fail("ACNH_REGION must be 0..6"); return v; }
+static void pseudo_device_id(uint8_t *uuid) { if(!uuid)runtime_fail("pseudo device id pointer"); static const uint8_t id[16]={0x61,0x63,0x6e,0x68,0x2d,0x6d,0x61,0x63,0x2d,0x6e,0x61,0x74,0x69,0x76,0x65,0x01}; memcpy(uuid,id,16); }
+static void exit_section(void) {}
+static bool inactivity_extended(void) { return false; }
+/* nn::settings language codes (ISettingsServer::MakeLanguageCode answered locally, no set: session). */
+static uint64_t language_code_make(int language) {
+ static const char *const codes[]={"ja","en-US","fr","de","it","es","zh-CN","ko","nl","pt","ru","zh-TW","en-GB","fr-CA","es-419","zh-Hans","zh-Hant","pt-BR"};
+ if(language<0||language>=(int)(sizeof codes/sizeof *codes)){fprintf(stderr,"[acnh] settings language %d\n",language);runtime_fail("unknown settings language");}
+ uint64_t v=0;memcpy(&v,codes[language],strlen(codes[language]));return v;
+}
+static bool language_code_equal(const uint64_t *code,const int *language) { if(!code||!language)runtime_fail("language comparison pointer"); return *code==language_code_make(*language); }
+static bool language_equal_code(const int *language,const uint64_t *code) { return language_code_equal(code,language); }
 static void host_oe_init(void) { fprintf(stderr,"[totk] application environment: local macOS process\n"); }
 static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: no DLC\n"); }
 static int host_aoc_count(void) { return 0; }
@@ -286,6 +301,7 @@ void *runtime_observer(const char *name) {
  {"_ZN2nn2os21AllocateAddressRegionEPmm",observed_region},{"_ZN2nn2os19AllocateMemoryPagesEmm",observed_pages},{"nnosInitialize",observed_os_init},{"nninitInitializeSdkModule",observed_sdk_init},{"nninitStartup",observed_startup},{"nnMain",observed_main}};
  for(size_t i=0;i<sizeof(entries)/sizeof(entries[0]);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;return NULL;
 }
+void *runtime_acnh_override(const char *name);   /* acnh_offline.c */
 void *runtime_override(const char *name) {
  static const struct {const char *name;void *fn;} entries[]={
   {"_ZN2nn2oe18GetDesiredLanguageEv",desired_language},
@@ -293,11 +309,17 @@ void *runtime_override(const char *name) {
   {"_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE",cpu_boost},{"_ZN2nn2oe16GetOperationModeEv",operation_mode},{"_ZN2nn2oe18GetPerformanceModeEv",performance_mode},
   {"_ZN2nn2oe20SetFocusHandlingModeENS0_17FocusHandlingModeE",focus_mode},{"_ZN2nn2oe20GetCurrentFocusStateEv",focus_state},
   {"_ZN2nn2oe28SetResumeNotificationEnabledEb",resume_enabled},{"_ZN2nn2oe42SetOperationModeChangedNotificationEnabledEb",operation_enabled},{"_ZN2nn2oe44SetPerformanceModeChangedNotificationEnabledEb",performance_enabled},
+  {"_ZN2nn2oe13GetRegionCodeEv",region_code},{"_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE",pseudo_device_id},
+  {"_ZN2nn2oe31EnterExitRequestHandlingSectionEv",exit_section},{"_ZN2nn2oe31LeaveExitRequestHandlingSectionEv",exit_section},
+  {"_ZN2nn2oe37IsUserInactivityDetectionTimeExtendedEv",inactivity_extended},
+  {"_ZN2nn8settings12LanguageCode4MakeENS0_8LanguageE",language_code_make},
+  {"_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE",language_code_equal},{"_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE",language_equal_code},
   {"nndiagStartup",host_diag_init},{"_ZN2nn2oe10InitializeEv",host_oe_init},{"_ZN2nn3aoc10InitializeEv",host_aoc_init},
   {"_ZN2nn3aoc17CountAddOnContentEv",host_aoc_count},{"_ZN2nn3aoc16ListAddOnContentEPiii",host_aoc_list},
   {"_ZN2nn3err26InitializeContextWriterApiEv",host_error_init},{"_ZN2nn2fs24InitializeForApplicationEv",host_fs_init},
   {"_ZN2nn4pctl10InitializeEv",host_pctl_init},{"_ZN2nn4diag34InitializeApplicationAbortObserverEv",host_abort_init}};
  for(size_t i=0;i<sizeof(entries)/sizeof(entries[0]);i++)if(!strcmp(name,entries[i].name))return entries[i].fn;
+ void *acnh=runtime_acnh_override(name);if(acnh)return acnh;
  void *input=runtime_input_override(name);if(input)return input;void *font=runtime_font_override(name);if(font)return font;void *codec=runtime_codec_override(name);if(codec)return codec;void *movie=runtime_movie_override(name);if(movie)return movie;void *clock=runtime_time_override(name);if(clock)return clock;void *applet=runtime_applet_override(name);if(applet)return applet;void *swkbd=runtime_swkbd_override(name);if(swkbd)return swkbd;void *account=runtime_account_override(name);if(account)return account;void *fs=runtime_fs_override(name);if(fs)return fs;void *front=runtime_front_override(name);return front?front:runtime_gfx_override(name);
 }
 void runtime_core_checkpoint(void);
@@ -327,7 +349,7 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   case 11:arc4random_buf(&value,8);break;
   case 12:value=ASLR_START;break;case 13:value=ASLR_SIZE;break;
   case 14:value=STACK_START;break;case 15:value=STACK_SIZE;break;
-  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=0x0100f2c0115b6000ULL;break;
+  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=ACNH_TITLE_ID;break;
   case 20:value=(uintptr_t)user_exception_context;break;   /* UserExceptionContextAddress: SDK stores e.g. the dying-message region at +0x1c0 */case 23:value=1;break;
   /* AliasRegionExtraSize (18.0.0+): our alias reservation contains no
    * kernel-owned extension outside the range reported by ids 2 and 3. */

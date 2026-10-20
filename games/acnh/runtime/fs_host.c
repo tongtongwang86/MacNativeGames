@@ -26,7 +26,8 @@
 #define R_INVALID_PATH 0x2ee602u
 #define R_OPEN_MODE 0x307402u
 #define R_APPEND_REQUIRED 0x2f5e02u
-#define TOTK_APPLICATION_ID 0x0100f2c0115b6000ULL
+#include "game_version.h"
+#define TOTK_APPLICATION_ID ACNH_TITLE_ID
 enum { M_FREE, M_SAVE, M_TEMP, M_CACHE };
 enum { OPEN_READ = 1, OPEN_WRITE = 2, OPEN_APPEND = 4 };
 #define FILE_BASE 0x200000000ULL
@@ -41,7 +42,7 @@ static Mount mounts[16];
 static File files[NFILES];
 static Dir dirs[NDIRS];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-static char profile[1024], save_root[1024];
+static char profile[1024], save_root[1024], device_root[1024];
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 
 static void need(int c, const char *m) { if (!c) runtime_fail(m); }
@@ -75,6 +76,8 @@ static void init(void) {
     snprintf(p, sizeof p, "%s/save", profile); make_dir(p);
     need(snprintf(save_root, sizeof save_root, "%s/save/%016llx%016llx", profile, (unsigned long long)uid[1], (unsigned long long)uid[0]) < (int)sizeof save_root, "save path");
     make_dir(save_root);                                   /* launcher-style EnsureSaveData */
+    need(snprintf(device_root, sizeof device_root, "%s/save/device", profile) < (int)sizeof device_root, "device save path");
+    make_dir(device_root);                                 /* ACNH keeps its island in the device save (type 3) */
     snprintf(p, sizeof p, "%s/temp", profile); remove_tree(p); make_dir(p);
     snprintf(p, sizeof p, "%s/cache", profile); make_dir(p);
     fprintf(stderr, "[totk] host save storage: %s\n", save_root);
@@ -138,6 +141,27 @@ static unsigned mount_save_ro(const char *name, uint64_t application, const uint
     if (!save_exists(application, uid)) return R_TARGET_NOT_FOUND;
     return mount_add(name, M_SAVE, save_root);
 }
+/* ---------- device save data (ACNH) ----------
+   One directory, written in place like the user save above; the sizes the game asks for and extends to are kept in
+   <profile>/save/device.size (two int64s). The default is ACNH 2.0.6's 0x6f00000 data + 0x6f00000 journal. */
+static unsigned mount_device_save(const char *name) { ready(); return mount_add(name, M_SAVE, device_root); }
+static void device_size_path(char *out, size_t cap) { snprintf(out, cap, "%s/save/device.size", profile); }
+static unsigned device_save_size(int64_t *size, int64_t *journal) {
+    ready(); if (!size || !journal) return R_INVALID_ARGUMENT;
+    int64_t v[2] = {0x6f00000, 0x6f00000}; char p[1100]; device_size_path(p, sizeof p);
+    FILE *f = fopen(p, "rb"); if (f) { if (fread(v, sizeof v, 1, f) != 1) runtime_fail("corrupt device save size record"); fclose(f); }
+    *size = v[0]; *journal = v[1]; return 0;
+}
+static unsigned extend_device_save(int64_t size, int64_t journal) {
+    ready(); int64_t now[2]; device_save_size(&now[0], &now[1]);
+    if (size < now[0] || journal < now[1]) return R_INVALID_ARGUMENT;   /* save data only grows */
+    int64_t v[2] = {size, journal}; char p[1100], tmp[1100]; device_size_path(p, sizeof p); snprintf(tmp, sizeof tmp, "%s.new", p);
+    FILE *f = fopen(tmp, "wb"); need(f && fwrite(v, sizeof v, 1, f) == 1 && fflush(f) == 0 && fcntl(fileno(f), F_FULLFSYNC) == 0 && fclose(f) == 0, "write device save size record");
+    need(rename(tmp, p) == 0, "replace device save size record");
+    fprintf(stderr, "[acnh] device save extended to %#llx + %#llx journal\n", (unsigned long long)size, (unsigned long long)journal);
+    return 0;
+}
+static unsigned restore_flag(unsigned char *out, const char *name) { (void)name; if (!out) return R_INVALID_ARGUMENT; *out = 0; return 0; }
 static unsigned mount_temp(const char *name) { ready(); char p[1100]; snprintf(p, sizeof p, "%s/temp", profile); return mount_add(name, M_TEMP, p); }
 static void cache_dir(int index, char *out, size_t cap) { snprintf(out, cap, "%s/cache/%d", profile, index); }
 static unsigned create_cache(int index, int64_t size, int64_t journal) {
@@ -183,6 +207,13 @@ static unsigned commit(const char *name) {
     if (save && !(getenv("TOTK_PROBE_NEGATIVE") && atoi(getenv("TOTK_PROBE_NEGATIVE")) == 23)) atomic_store(&save_dirty, 0);   /* 23: probe-save's negative control */
     return 0;
 }
+
+static unsigned commit_many(const char *const *names, int n) {
+    if (n < 0 || (!names && n)) return R_INVALID_ARGUMENT;
+    for (int i = 0; i < n; i++) { unsigned r = commit(names[i]); if (r) return r; }
+    return 0;
+}
+static unsigned commit_option(const char *name, const void *option) { (void)option; return commit(name); }
 
 /* ---------- files ---------- */
 static File *file_of(uint64_t h, int *fd, int *mode) {
@@ -277,9 +308,28 @@ typedef struct { char name[769]; uint8_t pad0[3]; int8_t type; uint8_t pad1[3]; 
 _Static_assert(sizeof(DirectoryEntry) == 0x310, "nn::fs::DirectoryEntry");
 static unsigned create_directory(const char *path) { char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r; return mkdir(p, 0700) ? errno_result() : 0; }
 static unsigned delete_recursive(const char *path) { char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r; struct stat st; if (stat(p, &st)) return R_PATH_NOT_FOUND; return remove_tree(p) ? R_INVALID_ARGUMENT : 0; }
+static unsigned clean_recursive(const char *path) {   /* empties the directory, keeps it */
+    char p[1100]; unsigned r = save_change_path(path, p, sizeof p); if (r) return r;
+    DIR *d = opendir(p); if (!d) return errno_result();
+    struct dirent *e; int bad = 0; char child[2048];
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(child, sizeof child, "%s/%s", p, e->d_name);
+        bad |= e->d_type == DT_DIR ? remove_tree(child) : unlink(child);
+    }
+    closedir(d);
+    return bad ? R_INVALID_ARGUMENT : 0;
+}
+static unsigned rename_directory(const char *from, const char *to) {
+    char a[1100], b[1100]; unsigned r = save_change_path(from, a, sizeof a); if (r) return r;
+    if ((r = save_change_path(to, b, sizeof b))) return r;
+    struct stat st; if (stat(a, &st) || !S_ISDIR(st.st_mode)) return R_PATH_NOT_FOUND;
+    if (!stat(b, &st)) return R_ALREADY_EXISTS;
+    return rename(a, b) ? errno_result() : 0;
+}
 static unsigned open_directory(uint64_t *out, const char *path, int mode) {
-    if (runtime_romfs_owns(path)) { fprintf(stderr, "[totk] OpenDirectory on RomFS %s\n", path); runtime_fail("RomFS directory listing not implemented"); }
-    char p[1100]; unsigned r = host_path(path, p, sizeof p); if (r) return r; if (!out || mode < 1 || mode > 3) return R_INVALID_ARGUMENT;
+    char p[1100]; unsigned r = runtime_romfs_owns(path) ? runtime_romfs_host_directory(path, p, sizeof p) : host_path(path, p, sizeof p);   /* RomFS: the read-only extracted folder */
+    if (r) return r; if (!out || mode < 1 || mode > 3) return R_INVALID_ARGUMENT;
     DIR *d = opendir(p); if (!d) return errno_result();
     pthread_mutex_lock(&lock);
     for (int i = 0; i < NDIRS; i++) if (!dirs[i].dir) { dirs[i].dir = d; dirs[i].mode = mode; strcpy(dirs[i].path, p); *out = DIR_BASE + (uint64_t)i; pthread_mutex_unlock(&lock); return 0; }
@@ -350,6 +400,10 @@ void *runtime_fs_host_override(const char *name) {
         {"_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", read_directory},
         {"_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", close_directory},
         {"_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", mount_save},
+        {"_ZN2nn2fs19MountDeviceSaveDataEPKc", mount_device_save}, {"_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", device_save_size},
+        {"_ZN2nn2fs20ExtendDeviceSaveDataEll", extend_device_save}, {"_ZN2nn2fs22GetSaveDataRestoreFlagEPbPKc", restore_flag},
+        {"_ZN2nn2fs6CommitEPKPKci", commit_many}, {"_ZN2nn2fs6CommitEPKcRKNS0_12CommitOptionE", commit_option},
+        {"_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", clean_recursive}, {"_ZN2nn2fs15RenameDirectoryEPKcS2_", rename_directory},
         {"_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", mount_save_ro},
         {"_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", save_exists},
         {"_ZN2nn2fs21MountTemporaryStorageEPKc", mount_temp}, {"_ZN2nn2fs7UnmountEPKc", unmount}, {"_ZN2nn2fs6CommitEPKc", commit},
