@@ -95,9 +95,22 @@ static void friend_root(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     }
 }
 
+/* ---------- fsp-srv ----------
+   File access goes through host overrides of nn::fs (fs_host.c), but SDK code that wraps other storage (e.g.
+   nn::bcat::MountDeliveryCacheStorage) first asks the file system proxy whether access logging is on. Only that
+   query and the process registration are served here. */
+static void fsp_root(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
+    switch (rq->cmd) {
+    case 1: return;                                                    /* SetCurrentProcess */
+    case 1005: { uint32_t mode = 0; IPC_OUT(rs, mode); return; }      /* GetGlobalAccessLogMode: off */
+    default: ipc_unimplemented(s, rq);
+    }
+}
+
 __attribute__((constructor)) static void register_offline(void) {
     runtime_ipc_register("bcat:u", bcat_root, NULL, NULL);
     runtime_ipc_register("friend:u", friend_root, NULL, NULL);
+    runtime_ipc_register("fsp-srv", fsp_root, NULL, NULL);
 }
 
 /* ---------- nn::ngc::ProfanityFilter ---------- */

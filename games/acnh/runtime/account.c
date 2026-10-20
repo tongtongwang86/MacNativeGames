@@ -47,6 +47,11 @@ static uint32_t nickname(char *out,const Uid *uid){initialize();if(!out||!same(u
 static uint32_t open_user(UserHandle *out,const Uid *uid){if(!out||!uid)runtime_fail("account OpenUser pointer");initialize();if(!same(uid))return 0x7c67;
  lock_acquire();for(unsigned i=0;i<64;i++)if(!tokens[i]){tokens[i]=nextToken++;*out=(UserHandle){local,tokens[i]};lock_release();return 0;}lock_release();runtime_fail("account user handles exhausted");}
 static uint32_t list_users(int *count,Uid *out,int max){if(!count||(!out&&max>0))runtime_fail("account user list pointer");initialize();int n=0;if(max>0)out[n++]=local;for(int i=n;i<max;i++)out[i]=(Uid){0,0};*count=n;return 0;}
+/* Users with an open handle (the SDK's own list is never filled: OpenUser / TryOpenPreselectedUser are host ones). SDK code
+   such as nn::friends' user check calls this. */
+static uint32_t list_open_users(int *count,Uid *out,int max){if(!count||(!out&&max>0))runtime_fail("account open user list pointer");initialize();
+ lock_acquire();bool open=false;for(unsigned i=0;i<64;i++)if(tokens[i])open=true;lock_release();
+ int n=0;if(open&&max>0)out[n++]=local;for(int i=n;i<max;i++)out[i]=(Uid){0,0};*count=n;return 0;}
 static uint32_t promote(const Uid *uid){initialize();return same(uid)?0:0x7c67;}
 static uint8_t *profile_jpeg;static size_t profile_jpeg_size;
 static void make_profile_jpeg(void){
@@ -72,7 +77,7 @@ void *runtime_account_override(const char *name){
  {"_ZN2nn7account9CloseUserERKNS0_10UserHandleE",close_user},{"_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE",user_id},
  {"_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE",existence},{"_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE",nickname},
  {"_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE",open_user},{"_ZN2nn7account12ListAllUsersEPiPNS0_3UidEi",list_users},
- {"_ZN2nn7account18ListQualifiedUsersEPiPNS0_3UidEi",list_users},{"_ZN2nn7account20PromoteQualificationERKNS0_3UidE",promote},
+ {"_ZN2nn7account18ListQualifiedUsersEPiPNS0_3UidEi",list_users},{"_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi",list_open_users},{"_ZN2nn7account20PromoteQualificationERKNS0_3UidE",promote},
  {"_ZN2nn7account16LoadProfileImageEPmPvmRKNS0_3UidE",profile_image},
  {"_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE",nsa_available},
  {"_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE",nsa_needed},
