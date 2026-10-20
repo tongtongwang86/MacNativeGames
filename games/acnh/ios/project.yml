@@ -30,7 +30,7 @@ targets:
       - path: ../runtime/loader.c
         compilerFlags: "-Dmain=totk_host_main"
     info:
-      path: Sources/Info.plist
+      path: Gen/Info.plist   # a copy of Sources/Info.plist (build_ipa.py): xcodegen writes the properties below into it
       properties:
         CFBundleDisplayName: ${ACNH_APP_NAME}
         CFBundleName: ${ACNH_APP_NAME}

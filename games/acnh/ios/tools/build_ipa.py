@@ -57,6 +57,12 @@ def chain():
     return text.split('#define DMSH_CHAIN "', 1)[1].split('"', 1)[0]
 
 
+def write_shader_map(seed):
+    """The runtime opens the seed's shader_map.tsv in place (DM_NVN_SHMAP) and checks its first line, the format's name
+    (shared with TOTK); ACNH needs no entries in it. Written on every build, also when the device libraries are reused."""
+    (seed / 'shader_map.tsv').write_text('# TOTK control-code-sha256-v1\n')
+
+
 def make_seed(gen, logs, env):
     """The Mac's runtime shader cache as a seed (the files the importer accepts), compiled for the device."""
     ch = chain(); cache = GAME / f'build/shader-cache/rt-{ch}'
@@ -68,6 +74,7 @@ def make_seed(gen, logs, env):
     if manifest_path.is_file():
         old = json.loads(manifest_path.read_text())
         if old.get('ios_source_sha256') == source_hash and old.get('ios_metal_flags') == ' '.join(METAL_FLAGS):
+            write_shader_map(seed)
             print(f'shader seed: {shaders} shaders, device libraries up to date', flush=True)
             return seed, shaders
     if seed.exists(): shutil.rmtree(seed)
@@ -79,7 +86,7 @@ def make_seed(gen, logs, env):
     run([sys.executable, TOTK_TOOLS / 'compile_seed.py', seed, 'iphoneos'], GAME, logs / 'ios-shaders.log', env)
     m = json.loads(manifest_path.read_text()); m['ios_source_sha256'] = source_hash
     manifest_path.write_text(json.dumps(m, indent=2) + '\n')
-    (seed / 'shader_map.tsv').write_text('# ACNH control-code-sha256-v1\n')   # read in place (DM_NVN_SHMAP), not imported
+    write_shader_map(seed)
     print(f'shader seed: {shaders} shaders from the Mac cache, compiled for the device', flush=True)
     return seed, shaders
 
@@ -117,6 +124,7 @@ def main():
                                                       'CoreText', 'UniformTypeIdentifiers', 'CoreFoundation', 'AudioToolbox',
                                                       'GameController', 'CoreHaptics', 'AVFAudio', 'Security'])
     (gen / 'acnh.xcconfig').write_text(f'OTHER_LDFLAGS = $(inherited) {frameworks} Gen/deps/lib/libopus.a Gen/deps/lib/libvpx.a {flags}\n')
+    clone(ios / 'Sources/Info.plist', gen / 'Info.plist')   # xcodegen fills in the copy, the source stays as it is
     run(['xcodegen', 'generate', '--spec', 'project.yml'], ios, logs / 'xcodegen.log', env)
     derived = GAME / 'build/ios-derived'
     run(['xcodebuild', '-project', 'ACNHIOS.xcodeproj', '-scheme', 'ACNHIOS', '-configuration', 'Release', '-destination', 'generic/platform=iOS',
