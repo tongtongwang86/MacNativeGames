@@ -32,6 +32,7 @@ def main():
     p.add_argument('--tree',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     p.add_argument('--version',choices=['v0','v112','v121','v143'],required=True);p.add_argument('--logs',type=Path,required=True)
     p.add_argument('--app-name',default='Tears of the Kingdom');p.add_argument('--bundle-id',default='org.macnativegames.totk')
+    p.add_argument('--icon',type=Path,help='an Icon Composer .icon package for the app icon')
     a=p.parse_args(); tree=a.tree.resolve(); ios=tree/'ios';gen=ios/'Gen';logs=a.logs.resolve(); out=a.out.resolve()
     if out.suffix.lower()!='.ipa': raise RuntimeError('iOS output path must end in .ipa')
     env=dict(os.environ,DEVELOPER_DIR=developer_dir())
@@ -104,6 +105,14 @@ def main():
     # Carry the increased-memory-limit entitlement in the executable's ad-hoc signature so re-signing tools keep it;
     # the game's 3.2 GiB pool exceeds the default iOS footprint limit.
     run(['codesign','--force','--sign','-','--entitlements',ios/'Sources/TOTK.entitlements',app/'TOTK'],ios,logs/'ios-entitlements.log',env)
+    if a.icon:   # the player's own icon: compiled into the app (asset catalog and icon files) and named in Info.plist
+        import plistlib, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            src=Path(d)/'AppIcon.icon';shutil.copytree(a.icon,src);partial=Path(d)/'icon-info.plist'
+            run(['xcrun','actool',src,'--compile',app,'--platform','iphoneos','--minimum-deployment-target','26.0','--target-device','ipad',
+                 '--target-device','iphone','--app-icon','AppIcon','--output-partial-info-plist',partial],ios,logs/'icon-iphoneos.log',env)
+            info=plistlib.loads((app/'Info.plist').read_bytes());info.update(plistlib.loads(partial.read_bytes()))
+            (app/'Info.plist').write_bytes(plistlib.dumps(info,fmt=plistlib.FMT_BINARY))
     res=app/'GameData';res.mkdir(exist_ok=True)
     romfs=tree/f'extracted/{a.version}/romfs'
     copy_tree(romfs,res/'romfs')

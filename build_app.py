@@ -743,6 +743,19 @@ def copy_tree(src, dst):
             clone(p, dst / p.relative_to(src))
 
 
+def compile_icon(icon, dest, platform, logs):
+    """Compiles an Icon Composer .icon package into dest (asset catalog and, for macOS, AppIcon.icns) and returns the
+    Info.plist keys that name it. The package is copied as AppIcon.icon so the icon is always called AppIcon."""
+    import plistlib, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        src = Path(d) / 'AppIcon.icon'; shutil.copytree(icon, src)
+        partial = Path(d) / 'icon-info.plist'
+        devices = ['--target-device', 'ipad', '--target-device', 'iphone'] if platform == 'iphoneos' else []
+        run(['xcrun', 'actool', src, '--compile', dest, '--platform', platform, '--minimum-deployment-target', '26.0', *devices,
+             '--app-icon', 'AppIcon', '--output-partial-info-plist', partial], logs / f'icon-{platform}.log')
+        return plistlib.loads(partial.read_bytes())
+
+
 def sign_app(app, logs):
     # Seal the bundle, including Info.plist and game resources. Copied helper
     # executables keep their existing signatures and byte identity.
@@ -750,7 +763,7 @@ def sign_app(app, logs):
     run(['codesign', '--verify', '--deep', '--strict', app], logs / 'verify-app-signature.log')
 
 
-def step_app(tree, out, logs, *, version="v0"):
+def step_app(tree, out, logs, *, version="v0", icon=None):
     expected = VERSIONS[version]
     tmp = out.with_name(out.name + '.partial')
     if tmp.exists():
@@ -786,11 +799,12 @@ def step_app(tree, out, logs, *, version="v0"):
                 CFBundleVersion=str(expected['version'] + 1), LSMinimumSystemVersion='26.0', NSHighResolutionCapable=True,
                 LSApplicationCategoryType='public.app-category.action-games', LSSupportsGameMode=True,
                 GCSupportsControllerUserInteraction=True)
-    icon = tree / 'build/AppIcon.icns'
-    if icon.exists():
-        clone(icon, tmp / 'Contents/Resources/AppIcon.icns')
-        info['CFBundleIconFile'] = 'AppIcon'
     import plistlib
+    if icon:   # the player's own Icon Composer icon (--icon) instead of the game's
+        info.update(compile_icon(icon, tmp / 'Contents/Resources', 'macosx', logs))
+    elif (tree / 'build/AppIcon.icns').exists():
+        clone(tree / 'build/AppIcon.icns', tmp / 'Contents/Resources/AppIcon.icns')
+        info['CFBundleIconFile'] = 'AppIcon'
     (tmp / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     (tmp / 'Contents/PkgInfo').write_bytes(b'APPL????')
     sign_app(tmp, logs)  # A failed seal must not remove the previous working app.
@@ -806,8 +820,15 @@ def step_app(tree, out, logs, *, version="v0"):
             say('4/4 app: replacement is ready; waiting for the running game to close before updating it')
             notified = time.monotonic()
         time.sleep(2)
-    if out.exists():
-        shutil.rmtree(out)
+    for attempt in range(5):   # Finder can drop a .DS_Store into the old app while it is being removed
+        try:
+            if out.exists():
+                shutil.rmtree(out)
+            break
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(1)
     tmp.rename(out)
 
 
@@ -908,6 +929,7 @@ def parse_args(argv):
     ap.add_argument('-k', '--keys', type=Path, required=True, help='your prod.keys')
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
+    ap.add_argument('--icon', type=Path, help='an Icon Composer .icon package to use as the app icon instead of the game\'s own')
     ap.add_argument('--no-shader-reminder', action='store_true', help='iOS: do not install the Mac agent that asks, while an iPhone / iPad with the game is connected, to send the shaders the shared list lacks')
     fonts = ap.add_mutually_exclusive_group()
     fonts.add_argument('--firmware', type=Path, help='unpacked firmware NCA directory providing the six expected shared fonts (needed for NSP unless --shared-fonts or valid cached fonts are available)')
@@ -922,6 +944,10 @@ def main(argv):
         raise BuildError(f'no such file: {game}')
     if not keys.is_file():
         raise BuildError(f'no such file: {keys}')
+    if args.icon:
+        args.icon = args.icon.expanduser().resolve()
+        if args.icon.suffix != '.icon' or not (args.icon / 'icon.json').is_file():
+            raise BuildError(f'--icon needs an Icon Composer .icon package (with icon.json): {args.icon}')
     out = (args.out.expanduser().resolve() if args.out else game.parent / (f'{APP_NAME}.ipa' if args.platform=='ios' else f'{APP_NAME}.app'))
     work = (args.work.expanduser().resolve() if args.work else game.parent / 'TOTK_build')
     if out.suffix.lower() != ('.ipa' if args.platform=='ios' else '.app'):
@@ -986,7 +1012,8 @@ def main(argv):
     say(f'4/4 app: assembling {out}')
     if args.platform=='ios':
         run([py, 'ios/tools/build_ipa.py', '--tree', tree, '--out', out, '--version', version,
-             '--logs', logs, '--app-name', APP_NAME, '--bundle-id', BUNDLE_ID], logs/'build-ipa.log', cwd=tree, env=env)
+             '--logs', logs, '--app-name', APP_NAME, '--bundle-id', BUNDLE_ID, *(['--icon', args.icon] if args.icon else [])],
+            logs/'build-ipa.log', cwd=tree, env=env)
         if not args.no_shader_reminder:
             # The iOS app never asks during play; while the device is connected, this Mac asks to send the shaders the
             # shared list lacks (ios/tools/shader_contrib_watch.py). Not essential: a failure only says so.
@@ -997,7 +1024,7 @@ def main(argv):
             except BuildError as e:
                 say(f'   the Mac reminder for iPhone / iPad shader contributions was not installed: {e}')
     else:
-        step_app(tree, out, logs, version=version)
+        step_app(tree, out, logs, version=version, icon=args.icon)
     # Refresh an existing app's version, executable and signing identity before
     # the next Finder launch; the desktop alias keeps pointing to this bundle.
     if args.platform=='macos': run([LSREGISTER, '-f', out], logs / 'register-app.log')
