@@ -24,3 +24,10 @@ games/totk/tools/totk_xlate/obj/
 games/totk/tools/totk_xlate/bin/
 games/totk/scripts/shader_inventory/obj/
 games/totk/scripts/shader_inventory/bin/
+# ACNH (games/acnh): game-derived files never go in git (this fork is public)
+games/acnh/.venv
+games/acnh/build/
+games/acnh/rewritten/
+games/acnh/analysis/
+games/acnh/user-data/
+games/acnh/extracted
