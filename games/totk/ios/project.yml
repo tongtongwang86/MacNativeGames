@@ -19,6 +19,10 @@ targets:
       - path: ../third_party/d2r_gfx/gfx/nvn
       - path: ../third_party/d2r_gfx/gfx/tex
       - path: Gen/embed.S
+      - path: ../vendor/savesync
+        excludes:
+          - "tests/**"
+          - "*.md"
       - path: ../runtime/loader.c
         compilerFlags: "-Dmain=totk_host_main"
     info:

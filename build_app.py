@@ -242,7 +242,8 @@ def prepare_work(work, py, logs):
     # Match both directories AND symlinks to directories. A trailing slash
     # allows rsync -a to copy a tooling symlink from a development checkout.
     excludes = [f'--exclude=/{name}' for name in ('extracted', 'rewritten', 'build', 'analysis', '.venv', 'tooling', 'user-data')]
-    run(['rsync', '-a', *excludes, f'{GAME}/', f'{tree}/'], logs / 'sources.log')
+    # --copy-unsafe-links: vendor/ links to libraries kept at the repository's top (libs/), copied in as files.
+    run(['rsync', '-a', '--copy-unsafe-links', *excludes, f'{GAME}/', f'{tree}/'], logs / 'sources.log')
     tooling = tree / 'tooling'
     # Migrate a work folder made by the old copier before writing child links:
     # link(tooling/spirv-cross, ...) must not traverse into a shared checkout.

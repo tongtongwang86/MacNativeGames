@@ -9,6 +9,7 @@
 #include <math.h>
 #include "runtime.h"
 #import "touch_pad.h"
+#include "../../vendor/savesync/savesync.h"
 
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
@@ -91,6 +92,18 @@ void runtime_shortcut_help_toggle(void) {}
     if (![scene isKindOfClass:UIWindowScene.class]) return;
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     self.window.rootViewController = [TOTKGameController new]; [self.window makeKeyAndVisible];
+}
+/* Leaving the game: upload a save made in the last seconds now (savesync waits a few seconds after each commit), with
+   the time iOS gives a backgrounded app, before it is suspended. */
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+    (void)scene;
+    __block UIBackgroundTaskIdentifier task = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"savesync" expirationHandler:^{
+        [UIApplication.sharedApplication endBackgroundTask:task]; task = UIBackgroundTaskInvalid;
+    }];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        savesync_flush(20);
+        dispatch_async(dispatch_get_main_queue(), ^{ if (task != UIBackgroundTaskInvalid) { [UIApplication.sharedApplication endBackgroundTask:task]; task = UIBackgroundTaskInvalid; } });
+    });
 }
 @end
 

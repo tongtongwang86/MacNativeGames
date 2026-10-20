@@ -7,6 +7,8 @@
 #include "autoload.h"
 #include "runtime.h"
 #include "fs_host.h"
+#include "game_version.h"
+#include "../vendor/savesync/savesync.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -75,6 +77,9 @@ static void init(void) {
     snprintf(p, sizeof p, "%s/save", profile); make_dir(p);
     need(snprintf(save_root, sizeof save_root, "%s/save/%016llx%016llx", profile, (unsigned long long)uid[1], (unsigned long long)uid[0]) < (int)sizeof save_root, "save path");
     make_dir(save_root);                                   /* launcher-style EnsureSaveData */
+    /* iCloud save sync (vendor/savesync): before the game reads its saves; uploads after commits (below). */
+    savesync_start(&(savesync_config){.title_id = "0100F2C0115B6000", .game_version = TOTK_GAME_VERSION, .save_dir = save_root,
+                                      .state_dir = profile, .log_tag = "[totk]", .save_busy = runtime_fs_save_busy});
     snprintf(p, sizeof p, "%s/temp", profile); remove_tree(p); make_dir(p);
     snprintf(p, sizeof p, "%s/cache", profile); make_dir(p);
     fprintf(stderr, "[totk] host save storage: %s\n", save_root);
@@ -181,6 +186,7 @@ static unsigned commit(const char *name) {
     if (!found) return R_PATH_NOT_FOUND;
     for (int i = 0; i < NFILES; i++) { pthread_mutex_lock(&lock); int fd = files[i].fd; pthread_mutex_unlock(&lock); if (fd > 0) fcntl(fd, F_FULLFSYNC); }
     if (save && !(getenv("TOTK_PROBE_NEGATIVE") && atoi(getenv("TOTK_PROBE_NEGATIVE")) == 23)) atomic_store(&save_dirty, 0);   /* 23: probe-save's negative control */
+    if (save) savesync_committed();
     return 0;
 }
 
