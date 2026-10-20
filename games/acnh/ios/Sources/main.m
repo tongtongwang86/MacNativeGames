@@ -10,6 +10,7 @@
 #include <math.h>
 #include "runtime.h"
 #import "touch_pad.h"
+#include "../../vendor/savesync/savesync.h"
 
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
@@ -84,8 +85,33 @@ void runtime_shortcut_help_toggle(void) {}
     unsetenv("TOTK_AUTOLOAD");
     chdir(docs.fileSystemRepresentation);
     host_argv[0] = strdup("ACNH"); host_argv[1] = strdup(res.fileSystemRepresentation); host_argv[2] = strdup("boot");
-    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    self.window.rootViewController = [ACNHGameController new]; [self.window makeKeyAndVisible]; return YES;
+    return YES;
+}
+@end
+
+/* The window comes with the scene. Info.plist (project.yml) names this class in its UIApplicationSceneManifest, and with a
+   scene manifest a window the app delegate makes is in no scene and never on screen: until 2026-10-20 the game ran, played
+   its sound and drew into a layer nobody saw (the display link stopped calling back, "visibility unknown"). iOS 27 also
+   stops apps built with its SDK that do not adopt the UIScene life cycle. As games/totk/ios/Sources/main.m. */
+@interface ACNHScene : UIResponder <UIWindowSceneDelegate> @property(nonatomic,strong) UIWindow *window; @end
+@implementation ACNHScene
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
+    (void)session; (void)options;
+    if (![scene isKindOfClass:UIWindowScene.class]) return;
+    self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+    self.window.rootViewController = [ACNHGameController new]; [self.window makeKeyAndVisible];
+}
+/* Leaving the game: upload a save made in the last seconds now (savesync waits a few seconds after each commit), with
+   the time iOS gives a backgrounded app, before it is suspended. */
+- (void)sceneDidEnterBackground:(UIScene *)scene {
+    (void)scene;
+    __block UIBackgroundTaskIdentifier task = [UIApplication.sharedApplication beginBackgroundTaskWithName:@"savesync" expirationHandler:^{
+        [UIApplication.sharedApplication endBackgroundTask:task]; task = UIBackgroundTaskInvalid;
+    }];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        savesync_flush(20);
+        dispatch_async(dispatch_get_main_queue(), ^{ if (task != UIBackgroundTaskInvalid) { [UIApplication.sharedApplication endBackgroundTask:task]; task = UIBackgroundTaskInvalid; } });
+    });
 }
 @end
 
