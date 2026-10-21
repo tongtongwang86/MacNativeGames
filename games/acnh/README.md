@@ -113,13 +113,20 @@ entitlements (`libs/savesync/ARCHITECTURE.md`); the app carries the increased-me
 ## Mac app
 
 ```bash
-python3 scripts/install_mac_app.py --icloud-container iCloud.<your container>   # ~/Applications/Animal Crossing.app
+python3 scripts/install_mac_app.py --icloud-container iCloud.<your container> \
+    --profile tooling/mac.provisionprofile   # ~/Applications/Animal Crossing.app
 ```
 
 The app holds a launcher and your icon (`make icon` first); the game stays in this folder. The launcher sets what
 `make boot` sets, names the iCloud container SaveSync uses (the one the iPhone / iPad app is signed with), logs to
 `~/Library/Logs/MacNativeGames/acnh.log` and runs `build/acnh-native` in place of itself. Start the Mac app before the
 iPad's first start, so the island goes to iCloud first and the iPad takes it.
+
+macOS syncs the container only while an installed app is signed with it; without one, `brctl status iCloud.<id>`
+says "SYNC DISABLED (app not installed)" and nothing moves. `--profile` is a Mac provisioning profile for the iPad
+app's App ID that includes the container (in Xcode: a macOS app target with that bundle ID, iCloud Documents with the
+container, automatic signing; copy the built app's `Contents/embedded.provisionprofile`). The app is then signed with
+the container entitlements by your Apple Development certificate (`--sign` for another).
 
 ## Use
 
