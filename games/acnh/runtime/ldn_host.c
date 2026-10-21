@@ -171,7 +171,14 @@ static uint32_t scan(LdnNetworkInfo *out, int *count, int capacity, const LdnSca
     int n;
     { __attribute__((cleanup(runtime_core_back))) int away = runtime_core_away(); n = coop_lan_scan(found, 16, 400); }
     int k = 0;
-    for (int i = 0; i < n && k < capacity; i++) if (matches(&found[i], filter)) out[k++] = found[i];
+    static int alter = -1; if (alter < 0) alter = getenv("ACNH_COOP_TEST_ALTER_IDS") != NULL;
+    for (int i = 0; i < n && k < capacity; i++) if (matches(&found[i], filter)) {
+        out[k] = found[i];
+        /* diagnostic: two copies of one save advertise the visitor's own island and player IDs (ACNH's advertise data
+           +0x18 island ID, +0x34 player ID); change them to see whether the game hides "its own" island */
+        if (alter && out[k].ldn.advertise_data_size >= 0x38) { out[k].ldn.advertise_data[0x18] ^= 0x5a; out[k].ldn.advertise_data[0x34] ^= 0x5a; }
+        k++;
+    }
     pthread_mutex_lock(&lock); memcpy(last_scan, found, sizeof(LdnNetworkInfo) * (size_t)n); last_scan_count = n; pthread_mutex_unlock(&lock);
     if (count) *count = k;
     fprintf(stderr, "[ldn] scan: %d island(s) answering, %d returned\n", n, k);
@@ -217,6 +224,7 @@ static uint32_t get_network_info(LdnNetworkInfo *out) {
 }
 static uint32_t get_ipv4(uint32_t *ip, uint32_t *mask) {
     pthread_mutex_lock(&lock); uint32_t r = in_network() ? 0 : R_INVALID_STATE;
+    fprintf(stderr, "[ldn] GetIpv4Address -> %s node %d\n", r ? "not in a network" : "ok", self_node);
     if (!r) { if (ip) *ip = COOP_SUBNET | (uint32_t)(self_node + 1); if (mask) *mask = COOP_MASK; }
     pthread_mutex_unlock(&lock); return r;
 }

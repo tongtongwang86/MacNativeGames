@@ -119,6 +119,7 @@ static int bind_(int fd, const struct sockaddr_in *addr, uint32_t len) {
 static int get_sock_name(int fd, void *addr, uint32_t *len) {
     Sock *s = sock_of(fd); if (!s) return fail(EBADF);
     int self = coop_lan_self_node();
+    if (trace) fprintf(stderr, "[socket] getsockname fd=%d -> node %d port %u\n", fd, self, s->vport);
     virtual_sockaddr(addr, len, self >= 0 ? COOP_SUBNET | (uint32_t)(self + 1) : 0, s->vport);
     return 0;
 }
@@ -164,10 +165,13 @@ static long send_to(int fd, const void *buf, size_t n, int flags, const struct s
     uint32_t vip; uint16_t vport;
     if (addr && alen >= sizeof *addr) { vip = ntohl(addr->sin_addr.s_addr); vport = ntohs(addr->sin_port); }
     else if (s->has_peer) { vip = s->peer_ip; vport = s->peer_port; }
-    else return fail(EDESTADDRREQ);
+    else { if (trace) fprintf(stderr, "[socket] sendto fd=%d: no address\n", fd); return fail(EDESTADDRREQ); }
     if (n > 65536) return fail(EMSGSIZE);
     int self = coop_lan_self_node(), node = virtual_node(vip);
-    if (node == -2 || self < 0) return fail(ENETUNREACH);
+    if (node == -2 || self < 0) {
+        if (trace) fprintf(stderr, "[socket] sendto fd=%d %zu bytes to %u.%u.%u.%u:%u refused (outside the session)\n", fd, n, vip >> 24, (vip >> 16) & 255, (vip >> 8) & 255, vip & 255, vport);
+        return fail(ENETUNREACH);
+    }
     uint8_t *f = frame_buf(); f[0] = 'A'; f[1] = 'C'; f[2] = (uint8_t)self; f[3] = 0; f[4] = (uint8_t)(s->vport >> 8); f[5] = (uint8_t)s->vport;
     memcpy(f + HDR, buf, n);
     int sent = 0, tried = 0, err = 0;
@@ -177,7 +181,8 @@ static long send_to(int fd, const void *buf, size_t n, int flags, const struct s
         tried++;
         if (sendto(fd, f, n + HDR, flags, (struct sockaddr *)&real, sizeof real) >= 0) sent++; else err = errno;
     }
-    if (trace) fprintf(stderr, "[socket] sendto fd=%d %zu bytes to 10.114.0.%u:%u (%d/%d sent)\n", fd, n, vip & 0xff, vport, sent, tried);
+    if (trace) { const uint8_t *b = buf; fprintf(stderr, "[socket] sendto fd=%d %zu bytes to 10.114.0.%u:%u (%d/%d sent) %02x%02x%02x%02x %02x%02x%02x%02x\n", fd, n, vip & 0xff, vport, sent, tried,
+                 b[0], n > 1 ? b[1] : 0, n > 2 ? b[2] : 0, n > 3 ? b[3] : 0, n > 4 ? b[4] : 0, n > 5 ? b[5] : 0, n > 6 ? b[6] : 0, n > 7 ? b[7] : 0); }
     if (node >= 0 && !tried) return fail(EHOSTUNREACH);
     if (tried && !sent) return fail(err);
     return (long)n;
@@ -201,7 +206,8 @@ static long recv_from(int fd, void *buf, size_t n, int flags, void *addr, uint32
         memcpy(buf, f + HDR, k);
         uint32_t vip = COOP_SUBNET | (uint32_t)(f[2] + 1); uint16_t vport = (uint16_t)(f[4] << 8 | f[5]);
         virtual_sockaddr(addr, alen, vip, vport);
-        if (trace) fprintf(stderr, "[socket] recvfrom fd=%d %zu bytes from 10.114.0.%u:%u\n", fd, k, vip & 0xff, vport);
+        if (trace) { const uint8_t *b = buf; fprintf(stderr, "[socket] recvfrom fd=%d %zu bytes from 10.114.0.%u:%u %02x%02x%02x%02x %02x%02x%02x%02x\n", fd, k, vip & 0xff, vport,
+                 b[0], k > 1 ? b[1] : 0, k > 2 ? b[2] : 0, k > 3 ? b[3] : 0, k > 4 ? b[4] : 0, k > 5 ? b[5] : 0, k > 6 ? b[6] : 0, k > 7 ? b[7] : 0); }
         return (long)k;
     }
 }

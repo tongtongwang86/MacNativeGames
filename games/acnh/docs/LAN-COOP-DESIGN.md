@@ -372,3 +372,17 @@ J1 belongs to stage L2 (it replaces the manual `ACNH_LDN_PEER`); J2 is its own s
 
 Test setup: profiles are copies of the island in the scratch folder with `SAVESYNC=0`; the user's own save and app are
 not touched (the test binary is `build/acnh-coop`).
+
+### 8.1 First two-copy session (2026-10-21, the user drove both windows)
+
+- Host (copy A) opened the gate; the visitor (copy B, a **clone of the same save**) found the island at once
+  ("1 island answering, 1 returned") but the game showed **"there aren't any islands"**: its advertise data carries the
+  host's island ID (+0x18, `f7b800e3`, "iLand Pro") and player ID (+0x34), and a clone has the same IDs, so the game
+  hides "its own" island [confirmed by the next step].
+- With `ACNH_COOP_TEST_ALTER_IDS=1` (diagnostic: one byte of each ID changed in the visitor's scan results) the island
+  was listed and the visitor **joined over the port's layer** (node 1, 10.114.0.2). The host's pia then broadcast its
+  176-byte packets (header `32ab9864`), all received by the visitor, but the visitor's game never sent a packet and
+  left after the timeout. No send was refused by `socket_host.c` (every send is logged), so the visitor's game itself
+  discarded them, consistent with the IDs it joined with not matching the host's [expected].
+- **Next:** the visitor needs a save of its own (a new island in its profile, or another real save). Two clones also
+  share one player ID, which the arrival would trip over anyway.
