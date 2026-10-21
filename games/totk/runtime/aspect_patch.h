@@ -15,6 +15,15 @@
    main (+56, 0 = off), puts that instead. The stub keeps its scratch register on the stack, so no liveness is assumed.
    iPhone / iPad cannot write code at run time: the iOS export (TOTK_EXPORT_IOS) installs the stubs on the Mac, and the
    device checks them and writes the ratio on its data page, as for the render size.
+   Narrower than 16:9 (a 16:10 Mac screen, the iPad's 4:3, a tall window), the view keeps the 16:9 width and grows
+   taller (Vert+), as the ACNH port does; wider, it keeps its height and grows wider (Hor+). The camera's sead
+   PerspectiveProjection keeps fovy (+0xa0), its half's sine, cosine and tangent (+0xa4..+0xac) and the aspect (+0xb0);
+   the picture comes from the tangent, culling from the angle and its sine and cosine, so all four are widened where the
+   camera writes them (aspect_install_fov): the tangent's store after the game's tanf call branches to a stub that, while
+   a routine's address sits on the data page (+48, only for narrow ratios), calls it with the projection; the routine
+   scales the tangent by (16/9) / ratio and writes the matching angle, sine and cosine. The camera writes them anew every
+   frame from its own fovy, so nothing compounds. The UI keeps its 16:9 band (nvn_mtl.m uw_ui_squeeze_y).
+   TOTK_VERT_PLUS=0 keeps the old behaviour (the height, a narrower view).
    Not adjusted yet: HUD markers that follow objects in the world and pixel-snapped positions (5 more routines
    TOTK-Ultrawide widens in 1.2.1) sit off. */
 #pragma once
@@ -26,11 +35,14 @@
 #include <string.h>
 
 #define ASPECT_DATA_SLOT 56   /* the ratio's float on the data page after main; 0.0 = the game's own */
+#define ASPECT_FOV_SLOT 48   /* narrow windows: aspect_fov's address for the camera stubs; 0 = none */
 
 static _Atomic(uint32_t) *g_aspect_slot;   /* points into that page once the stubs are in */
 static float g_aspect_wide;               /* TOTK_ASPECT's fixed ratio; 0 = follow the window */
 static _Atomic int g_aspect_on;           /* key 4: the window's (or fixed) ratio instead of the game's 16:9 */
 static _Atomic(uint32_t) g_window_ratio;  /* the window's width / height as float bits, 0 until it is known */
+static _Atomic(uint64_t) *g_fov_slot;     /* that slot, once aspect_install_fov put its stubs in */
+static _Atomic(uint32_t) g_vscale;        /* (16/9) / ratio as float bits for narrow ratios, else 0 */
 
 /* TOTK_ASPECT as a ratio; 0 when unset, "auto" or "0". A malformed value stops the start. */
 static inline float aspect_requested(void) {
@@ -52,7 +64,10 @@ static float aspect_target(void) {
 }
 static void aspect_apply(void) {
     if (!g_aspect_slot) return;
-    float r = atomic_load(&g_aspect_on) ? aspect_target() : 0; uint32_t bits; memcpy(&bits, &r, 4);
+    float r = atomic_load(&g_aspect_on) ? aspect_target() : 0, k = r > 0 && r < 16.0f / 9 ? 16.0f / 9 / r : 0;
+    uint32_t bits, kbits; memcpy(&bits, &r, 4); memcpy(&kbits, &k, 4);
+    atomic_store(&g_vscale, kbits);
+    if (g_fov_slot) { extern void aspect_fov(uint8_t *proj); atomic_store(g_fov_slot, k ? (uint64_t)(uintptr_t)aspect_fov : 0); }
     atomic_store(g_aspect_slot, bits);
 }
 
@@ -69,6 +84,9 @@ void runtime_aspect_window(double w, double h) {
     atomic_store(&g_window_ratio, bits);
     aspect_apply();
 }
+
+/* Whether key 4's shape is on (the Settings window); 0 where the patch is not available. */
+int runtime_aspect_on(void) { return g_aspect_slot && atomic_load(&g_aspect_on); }
 
 /* Key 4 (runtime/input.c). Returns 0 where it is not available (other game versions). */
 int runtime_aspect_toggle(void) {
@@ -136,4 +154,62 @@ static inline void aspect_install(Module *m, const char *version, const uint64_t
     char fixed[32]; snprintf(fixed, sizeof fixed, "%.4f", g_aspect_wide);
     fprintf(stderr, "[totk] %s aspect: key 4 switches 16:9 / %s (TOTK_ASPECT), starts %s; %u camera site(s), stubs +%#llx\n",
             version, g_aspect_wide ? fixed : "the window's shape", atomic_load(&g_aspect_on) ? "on" : "at 16:9", nsite, (unsigned long long)stub_off);
+}
+
+/* Called from the camera stubs (guest code, on its thread) with the projection just given its fovy: widen it for the
+   taller view. A leaf with no locks; the tangent at +0xac is the game's own, fresh from its tanf. */
+#include <math.h>
+void aspect_fov(uint8_t *proj) {
+    uint32_t kb = atomic_load(&g_vscale); float k; memcpy(&k, &kb, 4); if (!(k > 1)) return;
+    float t; memcpy(&t, proj + 0xac, 4); if (!(t > 0)) return;
+    t *= k; float c = 1 / sqrtf(1 + t * t), v[4] = {2 * atanf(t), t * c, c, t};   /* fovy, sin, cos, tan of fovy / 2 */
+    memcpy(proj + 0xa0, v, sizeof v);
+}
+static inline uint32_t aspect_adrp_x16(uint64_t at, uint64_t data_off) {
+    int64_t pages = (int64_t)(data_off >> 12) - (int64_t)(at >> 12);   /* the module base is page aligned */
+    if (pages < -(1 << 20) || pages >= (1 << 20)) runtime_fail("aspect patch: data page out of ADRP range");
+    uint32_t imm = (uint32_t)pages & 0x1fffff;
+    return 0x90000000u | ((imm & 3) << 29) | ((imm >> 2) << 5) | 16;
+}
+#define ASPECT_FOV_STUB 32   /* bytes per camera site */
+/* Vert+ (the comment at the top). sites: the camera's tangent store, str s0, [x<p>, #0xac], right after its tanf call,
+   so only callee-saved registers are live (x0, x16 and x30 are free). Each stub:
+       str s0, [x<p>, #0xac];  adrp x16, <data page>;  ldr x16, [x16, #48];  cbz x16, 1f
+       mov x0, x<p>;  blr x16                                                         aspect_fov(projection)
+   1:  b <after the store>
+   Called after aspect_install. */
+static inline void aspect_install_fov(Module *m, const char *version, const uint64_t *sites, unsigned nsite, uint64_t stub_off, uint64_t data_off) {
+    if (!g_aspect_slot) return;
+    const char *off = getenv("TOTK_VERT_PLUS"); if (off && !strcmp(off, "0")) { fprintf(stderr, "[totk] %s aspect: narrow windows keep the height (TOTK_VERT_PLUS=0)\n", version); return; }
+    uint64_t page_end = (m->text_end + 0x3fff) & ~0x3fffULL;
+    if (stub_off < m->text_end || stub_off + ASPECT_FOV_STUB * nsite > page_end) runtime_fail("aspect patch: no room in main's text padding for the camera stubs");
+    if (data_off + ASPECT_FOV_SLOT + 8 > m->size) runtime_fail("aspect patch: no data page after main");
+#if !TARGET_OS_IPHONE
+    for (unsigned i = 0; i < ASPECT_FOV_STUB * nsite; i++) if (m->base[stub_off + i]) runtime_fail("aspect patch: text padding in use");
+#endif
+    for (unsigned i = 0; i < nsite; i++) {
+        uint64_t s = stub_off + ASPECT_FOV_STUB * i;
+#if TARGET_OS_IPHONE
+        uint32_t ins, site; memcpy(&site, m->base + sites[i], 4); memcpy(&ins, m->base + s, 4);
+        if (site != aspect_branch(sites[i], s)) { fprintf(stderr, "[totk] %s aspect: the taller view is not in this build's code\n", version); return; }
+#else
+        uint32_t ins; memcpy(&ins, m->base + sites[i], 4);
+#endif
+        if ((ins & 0xfffffc1fu) != 0xbd00ac00u) runtime_fail("aspect patch: the camera's tangent store does not match this game version");
+        unsigned p = (ins >> 5) & 31;
+        uint32_t w[ASPECT_FOV_STUB / 4] = {ins, aspect_adrp_x16(s + 4, data_off), 0xf9401a10u /* ldr x16, [x16, #48] */,
+            0xb4000070u /* cbz x16, +12 */, 0xaa0003e0u | (p << 16) /* mov x0, x<p> */, 0xd63f0200u /* blr x16 */,
+            aspect_branch(s + 24, sites[i] + 4), 0};
+#if TARGET_OS_IPHONE
+        if (memcmp(m->base + s, w, sizeof w)) runtime_fail("aspect patch: embedded camera stub does not match");
+#else
+        memcpy(m->base + s, w, sizeof w);
+        uint32_t jump = aspect_branch(sites[i], s);
+        memcpy(m->base + sites[i], &jump, 4);
+#endif
+    }
+    g_fov_slot = (_Atomic(uint64_t) *)(void *)(m->base + data_off + ASPECT_FOV_SLOT);
+    aspect_apply();
+    fprintf(stderr, "[totk] %s aspect: narrow windows keep the 16:9 width and grow taller; %u camera fovy site(s), stubs +%#llx\n",
+            version, nsite, (unsigned long long)stub_off);
 }

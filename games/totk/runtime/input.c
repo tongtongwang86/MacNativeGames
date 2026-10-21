@@ -2,6 +2,7 @@
 #include "runtime.h"
 #include "autoload.h"
 #include "world_survey.h"
+#include "../vendor/gamesettings/gamesettings.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +11,10 @@
 typedef struct{int64_t sampling;uint64_t buttons;int32_t lx,ly,rx,ry;uint32_t attributes,pad;} NpadState;
 _Static_assert(sizeof(NpadState)==40,"Npad full-key ABI");
 static pthread_mutex_t inputLock=PTHREAD_MUTEX_INITIALIZER;
-static unsigned char keys[128];static uint64_t pending;
+/* keys: scripted and auto-load presses, read with the fixed table below (button()); user_keys: the window's keys, read
+   with the player's bindings (vendor/gamesettings, the Settings window), so a script's presses mean the same whatever
+   the bindings are. */
+static unsigned char keys[128],user_keys[128];static uint64_t pending;
 static uint32_t styles=1;static bool enabled,allowed=true;static int holdType;
 static int64_t sample;static uint64_t padSeen;
 /* F/T/H/G map the D-pad left/up/right/down, keeping both analog-stick mappings independent. */
@@ -32,13 +36,18 @@ static void user_input(const char *what){
    off -> 30+30 -> half the refresh rate -> uncapped (totk_mfx.m). Key 3 (key code 20) cycles 2K modes:
    MetalFX 2K -> native 2K -> off (runtime_output_mode_cycle). Held-key repeats do not cycle. */
 enum { KEY_INTERP_TOGGLE = 19, KEY_OUTPUT_MODE_CYCLE = 20, KEY_ASPECT_TOGGLE = 21 };   /* 21: key 4, ultrawide on / off (aspect_patch.h) */
-void runtime_input_key_synthetic(unsigned code,int down){if(code>=128)return;pthread_mutex_lock(&inputLock);int press=down&&!keys[code];if(down&&!keys[code])pending|=button(code);keys[code]=(unsigned char)!!down;pthread_mutex_unlock(&inputLock);
+static uint64_t bound_button(unsigned code){unsigned char one[128]={0};one[code]=1;return gamesettings_buttons(one);}
+static void key_event(unsigned code,int down,int user){if(code>=128)return;unsigned char *k=user?user_keys:keys;pthread_mutex_lock(&inputLock);int press=down&&!k[code];if(press)pending|=user?bound_button(code):button(code);k[code]=(unsigned char)!!down;pthread_mutex_unlock(&inputLock);
+ int shortcut=1;
  if(press&&code==18){extern void runtime_shortcut_help_toggle(void);runtime_shortcut_help_toggle();}
- if(press&&code==KEY_INTERP_TOGGLE){extern void dm_gfx_set_flag(const char *name,int v);dm_gfx_set_flag("mfx_interp",-1);}
- if(press&&code==KEY_OUTPUT_MODE_CYCLE)runtime_output_mode_cycle();
- if(press&&code==KEY_ASPECT_TOGGLE)runtime_aspect_toggle();}
-void runtime_input_key(unsigned code,int down){if(down&&code<128)user_input("keyboard");runtime_input_key_synthetic(code,down);}
-void runtime_input_clear(void){pthread_mutex_lock(&inputLock);memset(keys,0,sizeof(keys));pending=0;pthread_mutex_unlock(&inputLock);runtime_gamepad_clear();}
+ else if(press&&code==KEY_INTERP_TOGGLE){extern void dm_gfx_set_flag(const char *name,int v);dm_gfx_set_flag("mfx_interp",-1);}
+ else if(press&&code==KEY_OUTPUT_MODE_CYCLE)runtime_output_mode_cycle();
+ else if(press&&code==KEY_ASPECT_TOGGLE)runtime_aspect_toggle();
+ else shortcut=0;
+ if(shortcut)gamesettings_note_graphics_changed();}   /* the Settings window's graphics follow the 1-4 keys and are kept */
+void runtime_input_key_synthetic(unsigned code,int down){key_event(code,down,0);}
+void runtime_input_key(unsigned code,int down){if(down&&code<128)user_input("keyboard");key_event(code,down,1);}
+void runtime_input_clear(void){pthread_mutex_lock(&inputLock);memset(keys,0,sizeof(keys));memset(user_keys,0,sizeof(user_keys));pending=0;pthread_mutex_unlock(&inputLock);runtime_gamepad_clear();}
 static void initialize(void){pthread_mutex_lock(&inputLock);enabled=true;pthread_mutex_unlock(&inputLock);fprintf(stderr,"[totk] native keyboard controller initialized\n");}
 /* Docked: one full-key controller as player 1 (id 0, style bit 0). Handheld (TOTK_OPERATION_MODE=handheld, the iPhone):
    the same input is the handheld controller (id 0x20, style bit 1, joy-cons attached) and player 1 is not connected;
@@ -57,8 +66,9 @@ static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_st
 static int full_states(NpadState *out,int max,const uint32_t *id){return pad_states(out,max,id,1);}
 static int handheld_states(NpadState *out,int max,const uint32_t *id){return pad_states(out,max,id,2);}
 static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_style){if(max<=0)return 0;if(id)input_log(want_style==2?"handheld state":"full-key state",*id);if(!out||!id)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);NpadState state={.sampling=++sample};if(enabled&&allowed&&*id==pad_id()&&want_style==pad_style()&&(styles&want_style)){
- state.attributes=1;for(unsigned i=0;i<128;i++)if(keys[i])state.buttons|=button(i);state.buttons|=pending;pending=0;
+ state.attributes=1;for(unsigned i=0;i<128;i++)if(keys[i])state.buttons|=button(i);state.buttons|=gamesettings_buttons(user_keys);state.buttons|=pending;pending=0;
  state.lx=32767*((int)keys[2]-(int)keys[0]);state.ly=32767*((int)keys[13]-(int)keys[1]);state.rx=32767*((int)keys[124]-(int)keys[123]);state.ry=32767*((int)keys[126]-(int)keys[125]);
+ {int32_t ulx,uly,urx,ury;gamesettings_sticks(user_keys,&ulx,&uly,&urx,&ury);if(ulx)state.lx=ulx;if(uly)state.ly=uly;if(urx)state.rx=urx;if(ury)state.ry=ury;}
  RuntimeGamepadState pad;runtime_gamepad_read(&pad);state.buttons|=pad.buttons;
  if(pad.buttons&~padSeen||abs(pad.lx)>16384||abs(pad.ly)>16384||abs(pad.rx)>16384||abs(pad.ry)>16384)user_input("controller");padSeen=pad.buttons;
  if(abs(pad.lx)>abs(state.lx))state.lx=pad.lx;if(abs(pad.ly)>abs(state.ly))state.ly=pad.ly;

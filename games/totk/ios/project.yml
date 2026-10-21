@@ -19,6 +19,12 @@ targets:
       - path: ../third_party/d2r_gfx/gfx/nvn
       - path: ../third_party/d2r_gfx/gfx/tex
       - path: Gen/embed.S
+      - path: ../vendor/gamesettings
+        excludes:
+          - "*.md"
+          - "tests/**"
+          - "tools/**"
+          - "assets/**"
       - path: ../vendor/savesync
         excludes:
           - "tests/**"

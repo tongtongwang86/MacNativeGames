@@ -9,6 +9,7 @@
 #include "fs_host.h"
 #include "game_version.h"
 #include "../vendor/savesync/savesync.h"
+#include "../vendor/gamesettings/gamesettings.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -80,6 +81,7 @@ static void init(void) {
     /* iCloud save sync (vendor/savesync): before the game reads its saves; uploads after commits (below). */
     savesync_start(&(savesync_config){.title_id = "0100F2C0115B6000", .game_version = TOTK_GAME_VERSION, .save_dir = save_root,
                                       .state_dir = profile, .log_tag = "[totk]", .save_busy = runtime_fs_save_busy});
+    gamesettings_set_save_folders(save_root, savesync_cloud_folder());   /* the Settings window's Saves tab */
     snprintf(p, sizeof p, "%s/temp", profile); remove_tree(p); make_dir(p);
     snprintf(p, sizeof p, "%s/cache", profile); make_dir(p);
     fprintf(stderr, "[totk] host save storage: %s\n", save_root);

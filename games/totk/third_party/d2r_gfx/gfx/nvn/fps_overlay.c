@@ -194,7 +194,7 @@ int hud_snapshot(int line, char *out, size_t n, int *highlight) {
 int shader_overlay_enabled(void) {
     static int on = -1;
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-    const int def = 0;   // the phone translates nothing (misses go to shader-requests/)
+    const int def = 1;   // the phone translates nothing: its "new shaders" are the misses written to shader-requests/
 #else
     const int def = 1;
 #endif
@@ -205,6 +205,7 @@ int shader_overlay_enabled(void) {
 void shader_overlay_text(char *out, size_t n, uint64_t fresh, int64_t total, uint64_t pipelines) {
     char t[16];
     (void)pipelines;   // user 2026-10-17: the pipeline count is not shown
+    if (!total) { snprintf(out, n, TOTK_UI("新着色器 %llu", "New shaders %llu"), (unsigned long long)(fresh > 99999 ? 99999 : fresh)); return; }   // the phone: no cache of its own to count
     if (total < 0) snprintf(t, sizeof t, "--"); else snprintf(t, sizeof t, "%lld", (long long)(total > 999999 ? 999999 : total));
     snprintf(out, n, TOTK_UI("新着色器 %llu / 总计 %s", "New shaders %llu / total %s"), (unsigned long long)(fresh > 99999 ? 99999 : fresh), t);
 }

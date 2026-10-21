@@ -48,7 +48,9 @@ def main():
     # Export the final code after all verified runtime patches have been applied, then embed it in executable segments.
     host=tree/('build/totk-native' if a.version=='v0' else f'build/totk-native-{a.version}')
     rewritten=tree/f'rewritten/{a.version}'; modules=gen/'modules';modules.mkdir(exist_ok=True)
-    e=dict(env,TOTK_EXPORT_IOS=str(modules))
+    # TOTK_RENDER_RES: the export embeds the render-resolution patch (its size is only a placeholder); the phone writes the
+    # size the Settings sheet chose (Render resolution) on the data page at each start.
+    e=dict(env,TOTK_EXPORT_IOS=str(modules),TOTK_RENDER_RES='1280x720')
     run([host,rewritten,'export-ios'],tree,logs/'export-ios.log',e)
     flags=subprocess.check_output([sys.executable,ios/'tools/gen_embed.py',rewritten,gen/'embed.S','--text-dir',modules,'main','subsdk0','sdk'],text=True,env=env).strip()
     # The app's sources use version-specific patch and generated runtime tables.
@@ -94,7 +96,7 @@ def main():
     # Generate the app project with resolved identity and the embedded-segment linker flags.
     env.update(TOTK_APP_NAME=a.app_name,TOTK_BUNDLE_ID=a.bundle_id)
     xcconfig=gen/'totk.xcconfig'
-    frameworks=' '.join('-framework '+x for x in ['UIKit','Metal','MetalFX','Foundation','QuartzCore','ImageIO','CoreGraphics','CoreText','UniformTypeIdentifiers','CoreFoundation','AudioToolbox','GameController','AVFAudio','Security'])
+    frameworks=' '.join('-framework '+x for x in ['UIKit','Metal','MetalFX','Foundation','QuartzCore','ImageIO','CoreGraphics','CoreText','UniformTypeIdentifiers','CoreFoundation','AudioToolbox','GameController','CoreHaptics','CoreMotion','AVFAudio','Security'])
     xcconfig.write_text(f'OTHER_LDFLAGS = $(inherited) {frameworks} Gen/deps/lib/libopus.a Gen/deps/lib/libvpx.a {flags}\n')
     run(['xcodegen','generate','--spec','project.generated.yml'],ios,logs/'xcodegen.log',env)
     derived=tree/'build/ios-derived';run(['xcodebuild','-project','TOTKIOS.xcodeproj','-scheme','TOTKIOS','-configuration','Release',

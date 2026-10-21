@@ -255,6 +255,9 @@ static void sync_once(BOOL at_start) {
     }
 }
 
+const char *savesync_cloud_folder(void) {   /* kept: the folder does not change once found */
+    static char *path; if (!path && cloud_dir) path = strdup(cloud_dir.fileSystemRepresentation); return path;
+}
 static void flush_at_exit(void) { savesync_flush(10); }
 int savesync_start(const savesync_config *config) {
     @autoreleasepool {

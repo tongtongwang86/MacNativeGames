@@ -30,6 +30,8 @@ int savesync_start(const savesync_config *config);
 void savesync_committed(void);
 /* Upload now if there is something to upload, waiting up to timeout_s seconds (app going to the background, quit). */
 void savesync_flush(double timeout_s);
+/* The game's folder in iCloud (SaveSync/<title id>), NULL when syncing is off. */
+const char *savesync_cloud_folder(void);
 
 /* ---- the decision, exposed for tests and tools ---- */
 typedef enum {
