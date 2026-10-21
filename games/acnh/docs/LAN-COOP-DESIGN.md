@@ -1,0 +1,294 @@
+# LAN co-op on one island: design
+
+> **Status:** design only, written 2026-10-21. No code changed, no game started, no save touched.
+> It builds on [MULTIPLAYER-EDITING-PLAN.md](MULTIPLAYER-EDITING-PLAN.md) (called "the plan" below: its section
+> numbers are written "plan 2.1" and so on). Statements are marked **[confirmed]** (read from this repository, the 3.0.0
+> image `rewritten/main.patched.bin`, its romfs or the live save folder) or **[expected]** (from knowledge of the game
+> or the SDK, still to be checked). Addresses are offsets in `main.patched.bin`, which is laid out flat (file offset =
+> offset from main's base; text ends at 0x3f05ab0).
+
+## 0. The goal
+
+> "play on one island, edit the land and all of the single player function concurrently on LAN"
+
+Several copies of the port (Macs and the iPad) on one network, all on **one island at the same time**. Every player
+can do what the island's owner can do alone: terraform, lay paths, build and move houses, bridges and inclines, place
+and move furniture and items outside, decorate, shop, donate to the museum, deal with residents, craft. The island
+stays consistent for everyone and is **saved once**.
+
+Short version of the recommendation (section 3): use the game's own local play for presence and for everything it
+already replicates, keep the host's save authoritative, and add a small **edit-replication channel in the runtime**
+that re-runs the game's own edit functions on every copy, in an order the host decides. Lifting the visitor
+restrictions alone is not enough, and syncing whole islands at the save level cannot give "together".
+
+---
+
+## 1. What the game's local play already does
+
+### 1.1 Session and transport
+
+| Claim | Status |
+|---|---|
+| Local play goes `nn::ldn` → pia `local` (Ldn*Job) → pia `mesh` → pia `transport` (Reliable, BroadcastReliable, StreamBroadcastReliable, Unreliable) → pia `clone::EventProtocol` / `ClockProtocol`. Pia, PiaLocal, PiaLan, PiaClone, PiaCommon are all **5.31.5**; NEX is 4.6.11. | **confirmed** (RTTI `_ZTSN2nn3pia…`, SDK MW strings at 0x4722d8f–0x4722e43) |
+| Pia **clone** is linked only for `EventProtocol`, `EventMessageData/Header` and `ClockProtocol`; none of pia's replicated-object classes (`CloneElement`, `ReliableCloneElement` …) has RTTI. So game state is **not** replicated as shared objects: the game sends its own **event messages** and keeps a shared clock. | confirmed (absence of RTTI); "not used" is **expected** (classes without virtuals would leave no RTTI) |
+| **pia `lan`** (UDP LAN matchmaking: `LanNetworkFactory`, `LanMatchCreateSessionJob`, …) is also linked. If the game can be pointed at it, local play would run over plain sockets with no `nn::ldn` at all. | confirmed (RTTI); whether any game path reaches it is **expected-unlikely** (a retail game normally selects only Ldn and Nex) |
+| Game-side managers: `NetSystemMgr` (with `NetSystemMgr::Catalog pack`), `NetMultiPlayMgr`, `NetStageMgr`, `NetTransportMgr`, `NetStatusMgr`, `NetFramework::preSceneCalc/postSceneCalc`, `PlayerNetMove`, `NpcNetTurn`, `MultiPlaySession`, `MultiPlayStatus`. | confirmed (strings, each referenced from code, e.g. `NetMultiPlayMgr` at 0x1c43a6c, `NetTransportMgr` at 0x1baa914) |
+| `NetFramework::preSceneCalc` / `postSceneCalc` are the per-frame network steps around the scene update: the natural place for a runtime hook that applies remote edits at a safe point. | names confirmed; that they run on the main thread once per frame is **expected** |
+
+### 1.2 Arrival, departure and saving: everyone commits together
+
+The session state machine has explicit **two-phase commit** states [confirmed, strings referenced from code]:
+`State::cHostDataMatching` (0x27b953c), `cHostSaveSync`, `cHostSyncCommit` (0x1ce534c), `cHostSyncRollback`
+(0x1ce53a0), `cHostWaitOthersSave`, `cVisitSaveSync` (0x1cc1b40), `cVisitSaveSyncWait`, `cVisitCommit`,
+`cVisitWaitCommit`, `cRollback`, `cRollbackHost`, `cRollbackVisitor`, `IsAfterRollback`, plus `cHostAutoSave` /
+`cVisitorAutoSave` and `AutoSaveMgr::VisitorSetupDecision`.
+
+So, **[expected, consistent with the states and DIALOG_Msg 805 "save data will be reverted"]**:
+
+- At every arrival and departure all players save, and either all commit or all roll back to the previous save.
+- The **host saves the island** (`main.dat`); each visitor saves **only their own data** (their `personal.dat` inside
+  *their own* island's save: pockets, bells, miles, recipes, catalog).
+- `cHostDataMatching` is where the arriving visitor receives the host's island. From then on **every copy holds a
+  full copy of the host island in memory** and simulates it; the session keeps those copies in step with event
+  messages. This is the property section 3 builds on.
+
+### 1.3 What travels live today [expected, from game knowledge; to be confirmed by stage L3]
+
+- Player position and animation (`PlayerNetMove`), emotes, chat, tool actions.
+- The **item layer**: dropping, picking up, fruit, flowers, weeds, shells, buried items, holes.
+- Trees and other field objects changed by tools (chopping, shaking, digging up, planting where allowed).
+- NPC (resident) movement and conversation turns (`NpcNetTurn`): the host runs the residents, visitors see them.
+- Shops on the host's island: visitors can buy and sell at Nook's Cranny and Able Sisters (the shops' stock is the
+  host's).
+- The catalog (`NetSystemMgr::Catalog pack`: items seen by visitors get catalogued).
+
+### 1.4 What it blocks, and how the blocks are written
+
+The full table is plan 2.1 (host side, H1–H19) and plan 2.2 (visitor side, V1–V7). New from this analysis:
+
+| Finding | Status |
+|---|---|
+| The block reasons are **named error kinds** in code, not only message ids: `FenceBuildError_PlayingNet` (0x2389ea8), `FtrOperateError_ExistsVisitor` (0x22dda78), `FtrIndoorOperateError_ExistsVisitor` (0x22dd838, 0x23262dc, 0x2328c7c), `FtrPickupError_ExistsVisitor` (0x22c1630, …), `RugPickupError_ExistsOtherP`, `WallFtrPickupError_ExistsOtherP`, `CeilingFtrPickupError_ExistsOtherP` (around 0x2326xxx–0x2328xxx), `Towel_ExistVisitor` (0x2224378), `ChkGateOpen` (0x23231b8), `EquipDustClothWithGateOpen` (0x2322bec). The code copies the name into a fixed string when it picks the error, so the **branch just before each copy is the check**. | confirmed (strings and references); "the branch before is the check" is **expected** |
+| Two kinds of furniture block exist: **"a visitor exists"** (a global rule: not while company is here) and **"another player is on it"** (`…ExistsOtherP`: someone stands on the rug, under the ceiling item). Only the first kind is a policy to lift; the second protects consistency and **must stay**. | names confirmed; the meaning is **expected** |
+| `IsExistVisitor` is a serialized status field (0x24b24d4, written next to the bool at +0xc of a status struct), so "visitors present" is one flag many checks read. | confirmed (reference); its readers **expected** |
+| Terraforming, fences and furniture placement share **one edit state machine**: `EditState::cMultiDrag` (registered at 0x13c1dc8), `cFencePut` (0x13c2210), `cLandMakingPut` (state 0x14, registered at 0x13c2308 with handlers 0x13e0aac / 0x13e0b24 / 0x13e0b28 from the table at 0x4abc0a0). Also `cLandMakingWait`, `cLandMakingCleanUp`, `cFenceWait`, `cTrans`, `cDrop`, `cRotate180`, `cRemake`. | confirmed |
+| `FieldLandMakingError.bcsv` (18 terraforming errors) has no multiplayer row: the multiplayer refusal sits outside the terraforming tables (plan 2.3). | confirmed (plan) |
+
+### 1.5 What local play cannot give, whatever is patched
+
+- **Visitors are not residents.** A visitor's house, house interior, storage, residence (Nook Miles+ for the island,
+  island evaluation credit) live on *their own* island. On the host island they have no house to decorate.
+  The island save has slots `Villager0`–`Villager7` for up to 8 resident players [confirmed: the live save has
+  `save/device/Villager0/personal.dat` 477,760 bytes and `main.dat` 10,161,808 bytes; the 8-slot limit is
+  **expected** from game knowledge].
+- **Structural edits have no message** [expected, plan 4.1]: terrain height, water, cliffs, paths, fences,
+  building positions, bridges and inclines. Live messages exist only for the item layer and field objects.
+- **Representative-only actions.** On a single console, only the Resident Representative gets the Island Designer
+  app and Tom Nook's island projects [expected]. Lifting the visitor checks therefore also has to lift the
+  "representative" checks for co-op players.
+
+---
+
+## 2. Architectures
+
+### 2.1 (A) The game's local play, restrictions lifted
+
+Implement `nn::ldn` / `nn::socket` / `nifm` by name (plan 1.2–1.3), then patch the checks (plan 3, 5).
+
+| | |
+|---|---|
+| **Works** | Seeing each other, moving, chat, items, trees, shops, residents' AI and time (host runs both), the game's own save commit. Everything the game already replicates stays exactly right. |
+| **Breaks** | Anything without a live message: a lifted terraform/fence/building check changes only the editor's copy. The others see the old island until they re-join; collision differs meanwhile (items placed on a spot only one side thinks is valid can be refused or misplaced). A visitor's structural edit is not in the host's save, so it is **lost** at the next commit. |
+| **Who saves** | The host (island) and each visitor (own player data). Unchanged from the game. |
+| **Same tile** | Item layer: the game already arbitrates (host decides). Structural: undefined, last local edit wins on each copy separately. |
+| **Effort / risk** | Transport ~2–3 weeks; check patches cheap (one-word patches). Low technical risk, but it **meets the goal only for the item layer**. |
+
+### 2.2 (B) Runtime island-state sync between single-player islands
+
+Each player runs a normal single-player game on a copy of the same island. The runtime watches world state (memory
+or the save image), diffs it, sends the diff, and the others write it in and reload.
+
+| | |
+|---|---|
+| **Works** | Every single-player function works for every player (they are all "the owner"), no visitor checks at all. |
+| **Breaks** | **No presence**: the game never draws the other players; making them visible means writing avatar replication from scratch. **Residents and time diverge**: each copy runs its own villagers, weather, RNG, shop stock, daily events; reconciling them is a merge of two different islands. **Reload cost**: applying a terrain diff needs a field reload (seconds, a loading screen) per change. **Conflicts**: two edits to the same acre must be merged at byte level in a 10 MB encrypted, versioned structure whose layout (NHSE) is known only for save files, not for live memory. **Saving**: whose `main.dat` wins at the end? |
+| **Effort / risk** | Months; high risk; result is "taking turns on a shared island, synced every few seconds", not playing together. |
+
+### 2.3 (C) Hybrid: local play + edit replication by the runtime (recommended)
+
+Use (A) for the session, presence and everything already replicated. For each **structural edit kind**, hook the
+game's own *apply* function (the code that runs when the edit is committed: the end of `EditState::cLandMakingPut`,
+`cFencePut`, the building placement, …). On every copy the hook turns the call into a **record** (edit kind +
+arguments: tile coordinates, kind, rotation, item id) and the runtime sends it over the side channel that
+`ldn_lan.c` already has (plan 1.3: one TCP connection per station).
+
+- **Host-sequenced.** A visitor's hook does *not* apply locally: it sends the record to the host. The host checks it
+  with the game's own validity checks (the code that produces `FieldLandMakingError` rows, `FenceBuildError_*`), applies
+  it, appends it to its ordered log, and sends it to **all** copies including the sender, which then apply it. On a
+  LAN the round trip is a few milliseconds, so the visitor sees no lag worth hiding.
+- **Applied at a safe point.** Remote records are applied in the hook on `NetFramework::preSceneCalc` (main thread,
+  once per frame), never from the network thread.
+- **Same code, same data.** Every copy holds the same island (section 1.2) and runs the same game code, so calling
+  the same apply function with the same arguments, in the same order, yields the same result, including the terrain
+  mesh rebuild the game does for its own edits.
+- **Saved once.** Only the host's `main.dat` is the island; since every edit is applied on the host, the game's own
+  commit saves it. Visitors' copies are thrown away at departure, as in the real game.
+- **Fallback per kind:** if an edit kind cannot be replayed safely, the host sends a "re-sync" instead: the visitor
+  goes through the game's own departure and arrival (plan 4.3 B), which re-copies the island in `cHostDataMatching`.
+
+| | |
+|---|---|
+| **Works** | Everything in (A), plus terraforming, paths, water, cliffs, fences, bridges/inclines, building moves, outdoor furniture by any player, saved once by the host. |
+| **Breaks / open** | Effects of an apply function on *player-local* state (the editing player's animation, UI, tool durability) must not be replayed on other copies: the hook must sit below the UI, at the world-state write. Tom Nook projects and resident move-ins are multi-day state machines in `main.dat`; they need the "request" step replicated, and the overnight completion then runs on the host and reaches visitors at the next arrival. Visitors still have no house on this island (decision D4). |
+| **Same tile** | Solved by the host's order: the second edit is validated against the island *after* the first one and refused with the game's own error if it no longer fits. Item layer stays with the game's arbitration. A structural edit on a tile where an item lies is checked by the game's own rule on the host. |
+| **Residents and time** | The host's clock and residents, as in the real game. Nothing new to sync. |
+| **Effort / risk** | (A) plus ~1–2 weeks per edit kind for finding the apply function and its arguments, then little code each (a record struct, a hook, a replay call). The risk is concentrated in one question (does replaying the apply function leave the copies identical?), and it is **tested per kind** with a memory comparison (stage L5), so a failure stops one kind, not the project. |
+
+### 2.4 Other variants considered
+
+- **(D) Edits only on the host, visitors re-sync by re-joining** (plan 4.3 A+B). The cheapest version of C; it is
+  stage L5a below and the permanent fallback per kind. 20–40 s per re-join makes it unpleasant as the main mode.
+- **(E) Send changed save blocks mid-session** (plan 4.3 D): needs the live in-memory layout and a field reload entry
+  point. More fragile than replaying functions, and slower to see. Kept only as a fallback for kinds C cannot do.
+- **(F) Co-op players as real residents** (a `VillagerN` slot each on the host's island). This is the only way they get
+  a house, storage and resident status *on this island*. It is orthogonal to A/C and affects how a visitor identifies
+  itself at arrival; see decision D4.
+
+---
+
+## 3. Recommendation and roadmap
+
+**Recommended: (C), built in stages so that (A) and (D) fall out on the way and each stage is useful alone.**
+
+Rules for every stage:
+
+- Every patch is a row `{offset, original word, patched word, group, what}` checked before writing (plan 5.1), under
+  `ACNH_MP_EDIT=0|host|full` (plan 5.2); default off until the stage's check passes.
+- Every run is on **test profiles** (`TOTK_PROFILE_DIR=user-data-coop-host`, `user-data-coop-b`), never on
+  `user-data/save` or anything SaveSync uploads. SaveSync stays off in those profiles.
+- Two copies at once on one Mac only after decision D1.
+
+### L0. Tooling (static, no game)
+
+- **Work:** move the MSBT dumper and the xref finder into `scripts/` (`msbt_dump.py`, `xref.py`; the plan's copies
+  were left in an earlier session's notes folder, not in the repository), add `scripts/mp_sites.py` that lists the error-name references in
+  1.4 with the branch before each, and a patch-overlap checker against SpeedFix, aspect and `rewritten/main.sites.tsv`.
+- **Result:** a generated `docs/mp-sites.tsv` (site, original word, error name, condition).
+- **Verify:** reproduces every address in section 1.4 of this document.
+- **Stop if:** none (pure static).
+
+### L1. One copy hosts local play (Mac)
+
+- **Work:** `runtime/ldn_host.c` (access-point half of the 25 `nn::ldn` imports), `runtime/socket_host.c` (UDP/TCP
+  core, errno map, virtual 10.114.0.n subnet), `runtime/nifm.c` (local network mode accepted, internet still refused),
+  `runtime/ldn_lan.c` (UDP 11452 scan reply). Wire them in `loader.c` `relocate()` through `runtime_override(name)` as
+  `applet_host.c` does for `nn::nfp`. Add a Python client `scripts/ldn_scan.py`.
+- **Result:** in the test profile, Dodo offers "Via local play", the gate opens and closes; `ldn_scan.py` on the
+  same Mac (and on the iPad's network) lists the island's name from the advertise data.
+- **Verify:** log shows AccessPointCreated; no `ipc_unimplemented`; gate closes cleanly and the game saves; a
+  reload of the test profile works.
+- **Stop / switch if:** pia insists on an ldn security mode or a call the name replacement cannot satisfy (then
+  look at serving `ldn:u` over IPC instead, plan 1.2), or nifm's local-mode path needs IPC states we cannot fake.
+
+### L2. Two copies see each other (first co-op session, game rules unchanged)
+
+- **Work:** station half of `ldn_host.c`, the TCP control channel in `ldn_lan.c`, address mapping for two copies on
+  one host (port stride), `ACNH_LDN_PEER` for the iPad later. Second test island for the visitor (decision D2).
+  Two-slot mode in `game_slot.c` if D1 = yes.
+- **Result:** the visitor lands on the host island; both see each other walk; the visitor drops a piece of furniture
+  outside, the host picks it up; chat works; the visitor leaves; both save.
+- **Verify:** after the session restart both test profiles: the host island has the item where the host put it;
+  the visitor's pockets match. Arrival and departure commits succeed both ways; a forced quit of the visitor
+  mid-session produces the game's own rollback (DIALOG_Msg 805) on the host and nothing worse.
+- **Stop / switch if:** joining fails inside pia's crypto (`PacketReader::BeginDispatch decrypting failed`) and the
+  key material comes from a service we cannot answer; or the session is unstable on loopback. Mac + iPad is the
+  fallback path if two copies on one Mac misbehave.
+
+### L3. Inventory of messages and apply functions (static + probes)
+
+- **Work:** log size and first 16 bytes of every pia `EventProtocol` send/receive (plan 4.2) while doing each allowed
+  action. Statically, from the `EditState` table at 0x13c1dc8–0x13c2338, find the commit point of `cLandMakingPut`,
+  `cFencePut`, `cDrop`/`cTrans`/`cRotate180` (furniture outside), and from the Tom Nook EventFlow actions, the
+  building move/bridge/incline request functions. For each: arguments and which `main.dat` layer it writes.
+- **Result:** `docs/mp-edits.md`: per edit kind, "carried by the game" or "needs replication", and the apply function
+  with its signature.
+- **Verify:** `ACNH_SITE_PROBE` on each candidate apply function counts exactly one hit per edit in a single-copy
+  session (Island Designer on the host, gate closed).
+- **Go / no-go:** if the edit kinds have a clean apply function (arguments only, world-state writes only), go to L5
+  with (C). If they are tangled with UI and player state, use (D) for those kinds.
+
+### L4. Visitors do what an owner does on the item layer (tier 1)
+
+- **Work:** patch group `tier1`: Best Friend tools for visitors (V1–V3), Decorating Mode with visitors (H4), the
+  `…ExistsVisitor` furniture blocks, planting near others (H5). Keep every `…ExistsOtherP` block.
+- **Result:** a visitor places and moves furniture outside with Decorating Mode; the host sees it live; after a
+  departure commit and a reload of the host's profile, it is still there.
+- **Verify:** compare item layers of the host's saved `main.dat` and the visitor's in-memory copy (NHSE offsets);
+  equal.
+- **Stop if:** a visitor-placed item appears on the host but not in the saved island (the game replicated it as a
+  visual only); then route furniture placement through the L5 channel too.
+
+### L5. Structural edits by the host, live for visitors
+
+- **L5a (fallback first):** lift H1/H2/H6/H7 for the host (patch group `host-edit`) and, after each structural edit,
+  the host runtime triggers a re-join of each visitor. **Result:** host terraforms, the visitor sees it after the
+  re-join with matching collision.
+- **L5b (replication):** the edit channel in `runtime/coop_edits.c` (record format, host log, apply hook in
+  `NetFramework::preSceneCalc`), one kind at a time: paths → terrain height → water → fences → bridges/inclines →
+  building moves. **Result:** host lays a path; the visitor sees it appear within a frame or two and can walk it.
+- **Verify, per kind:** after a scripted sequence of 50 edits, dump the terrain/structure blocks of the island from
+  both copies' memory and compare: identical. Then departure commit, reload, compare with the saved `main.dat`.
+- **Stop if:** a kind's memory differs after replay and the difference cannot be traced to player-local state within
+  a few days: leave that kind on L5a.
+
+### L6. Visitors make structural edits (the goal)
+
+- **Work:** visitor-side patches (V5: Island Designer and permits on another island, representative-only checks), and
+  the hook in "request" mode on visitors (send to the host instead of applying).
+- **Result:** a visitor terraforms the host island; host and other visitors see it live; it is in the host's save.
+- **Verify:** the L5b comparison with the edits coming from a visitor; plus two players editing the same tile within
+  the same second: one edit wins, the other gets the game's own error, copies stay identical.
+- **Stop if:** the visitor's Island Designer UI depends on its own island's data in ways that break on the host's
+  (map size, permits stored in `personal.dat`); then keep visitor terraforming as "ask the host" (a request queue
+  shown to the host).
+
+### L7. The rest of single-player, by kind (tier 2)
+
+Museum donations (H13), Tom Nook services and building plots (H7, H8), Resetti reset (H9), custom designs and
+Nook Shopping (H10, H11), hotel (H17). Each is a request/record through the L5 channel or a lifted check, verified the
+same way (identical state on both copies, saved once). Each player's own progress (miles, recipes, catalog, museum
+credit) stays in their own `personal.dat`.
+
+### L8. iPad
+
+`Info.plist` local-network keys, Bonjour (`_acnh-ldn._udp`) or `ACNH_LDN_PEER`, patch groups baked in by
+`build_ipa.py --mp-edit=<level>` (iOS cannot patch at run time; plan 5.2). **Result:** Mac host, iPad visitor, the
+L4–L6 checks again; then iPad host.
+
+### L9. Optional: co-op players as residents (decision D4)
+
+Only if wanted: each co-op player gets a `VillagerN` slot and a house on the host island, and arrives as that
+resident. Large: it changes how the game identifies a visitor at arrival, and needs its own design once L6 works.
+
+---
+
+## 4. Decisions for the user
+
+| # | Question | Options | Recommendation |
+|---|---|---|---|
+| D1 (plan 5.4.1) | **Two games at once on this Mac** for testing from L2 on. `game_slot.c` allows one game because exhausted memory panicked the kernel four times on 2026-10-12. | (a) add an explicit two-slot test mode, (b) test only Mac + iPad / second Mac | **(a)**, as an opt-in test mode (`TOTK_GAME_SLOT_PAIR=1`, taken by one wrapper for both copies), with a memory check before the second copy starts. This Mac reports 96 GB; the panic happened under memory exhaustion, so measure one copy's peak first. Iterating on one Mac is several times faster than deploying to the iPad, and the iPad's IPA must be rebuilt for every patch change. |
+| D2 (plan 5.4.2) | **Which save the visitor uses** | (a) a new game in a test profile, clock moved forward with `TOTK_TIME_OFFSET`, (b) a second imported island | **(a)** for testing: a fresh island past day 2 is enough to fly and cannot damage a real save. For actual play, each co-op player keeps their own island; it only holds their character (see D4). |
+| D3 (plan 5.4.3) | **Ryujinx / ldn_mitm compatibility** | (a) yes, (b) no, port ↔ port only | **(b)** now, keeping the packet layout of the public LAN protocol so (a) stays possible. Compatibility only works on 3.0.0 and needs testing against Ryujinx; it does not help the goal. |
+| D4 (new) | **Are co-op players visitors or residents?** | (a) visitors from their own small island, (b) residents of the host island (L9) | **(a)** first. Everything in the goal except "my own house on this island" works as visitors once L6 is done; (b) is a separate project. |
+| D5 (new) | **Who hosts** | (a) always the Mac that owns the island save (SaveSync's copy), (b) any device | **(a)**. Only the host's save is the island; the iPad can host later by the same rule, but never two devices with the same island at once (SaveSync would see two writers). |
+| D6 (new) | **Scope of "everything"** | (a) all of L4–L7, (b) stop after L6 (items + terraforming + building moves) | **(b)** as the first target; L7 items one at a time by what the user misses most. |
+
+## 5. Risks in one place
+
+1. **Pia join needs something we cannot provide** (L1/L2): the only blocker for every option except (B). Known early
+   and cheaply.
+2. **Replaying apply functions is not deterministic** (L5b): caught per kind by the memory comparison; fallback (D).
+3. **The game's commit fails with modified checks** (L4–L6): visible as rollbacks; the test profiles make it harmless.
+4. **Memory with two copies** (D1): measured before the two-slot mode is enabled.
+5. **A 3.x update** moves every address: all patches check their original word, so the runtime fails loudly instead
+   of corrupting code (plan 5.1).
