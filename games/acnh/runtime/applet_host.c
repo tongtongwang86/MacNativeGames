@@ -70,6 +70,10 @@ static int nfp_device_state(const void *h) { (void)h; return 0; }
 static void show_error(uint32_t result) {
     fprintf(stderr, "[totk] game error dialog: %04u-%04u (result %#x)\n", 2000 + (result & 0x1ff), (result >> 9) & 0x1fff, result);
 }
+/* nn::err::ErrorCode {category, number}, passed in x0: the game's own error code (local play shows these) */
+static void show_error_code(uint64_t code) {
+    fprintf(stderr, "[totk] game error dialog: %04u-%04u\n", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32));
+}
 
 void *runtime_applet_override(const char *name) {
     static const struct { const char *name; void *fn; } map[] = {
@@ -97,6 +101,7 @@ void *runtime_applet_override(const char *name) {
         {"_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", nfp_no_device},
         {"_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", nfp_no_device},
         {"_ZN2nn3err9ShowErrorENS_6ResultE", show_error},
+        {"_ZN2nn3err9ShowErrorENS0_9ErrorCodeE", show_error_code},
     };
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (!strcmp(name, map[i].name)) return map[i].fn;
     return NULL;

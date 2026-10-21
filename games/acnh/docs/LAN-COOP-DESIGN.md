@@ -386,3 +386,18 @@ not touched (the test binary is `build/acnh-coop`).
   discarded them, consistent with the IDs it joined with not matching the host's [expected].
 - **Next:** the visitor needs a save of its own (a new island in its profile, or another real save). Two clones also
   share one player ID, which the arrival would trip over anyway.
+
+### 8.2 Visitor with its own identity (2026-10-21)
+
+- `scripts/acnh_save_reid.py` gave the visitor's **test copy** its own island ID, player ID and island name ("iLand
+  Two"): it decrypts each `.dat` with `scripts/acnh_save_crypt.py`, finds the Murmur3 checksum regions
+  (`acnh_save_regions.c`: 19 regions cover all of `main.dat` in 3.0.0, 2 in `personal.dat`), replaces the IDs, rewrites
+  the checksums and re-encrypts. The game loads it, and the host's island is then listed without any trick.
+- The join still stops in pia: the visitor receives the host's broadcasts (96 packets, header `32ab9864 89`) and never
+  sends one; none of pia's packet-drop branches runs (`ACNH_SITE_PROBE=1a7c7c,1a7e44,1a8018`: crypto parameters,
+  decryption, invalid packet: all 0); the host never sends the new node a unicast packet; after the timeout the game
+  shows **error 2618-0502** (now logged by an `nn::err::ShowError(ErrorCode)` replacement instead of crashing).
+- **Next (static, no flights needed):** follow pia's receive path from `RecvFrom` (main+0xe0xxx socket wrapper) to the
+  dispatcher, and the host's reaction to `nn::ldn` state changes (`LdnBackgroundProcessJob`, the node list it reads),
+  to see which check both sides fail. Candidates: the NodeInfo fields pia matches (MAC, version, the station's own
+  entry), or a packet source check before `PacketReader::BeginDispatch`.
