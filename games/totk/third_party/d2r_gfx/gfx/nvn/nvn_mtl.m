@@ -458,6 +458,8 @@ static _Atomic uint64_t g_last_sub_ns;
 // The private spin buffer never supplies game data.
 static _Atomic int g_ka_target_us = 1000;
 static _Atomic uint64_t g_ka_n, g_ka_us, g_ka_max_us;   // spin kernels completed, their summed / longest GPU time (us)
+int mtl_keepalive_get_us(void) { return atomic_load(&g_ka_target_us); }
+void mtl_keepalive_set_us(int us) { atomic_store(&g_ka_target_us, us); }
 void mtl_keepalive_stats(uint64_t v[3]) { v[0] = atomic_load(&g_ka_n); v[1] = atomic_load(&g_ka_us); v[2] = atomic_exchange(&g_ka_max_us, 0); }
 static void keepalive_start(void) {
     static int started; const char *e = getenv("TOTK_GPU_KEEPALIVE");
@@ -691,8 +693,12 @@ void mtl_pool_del(const void *mem) {
     if (hi > lo) stor_drop_range(lo, hi);   // TOTK: storage-shared textures of this pool
 }
 
+static pidx_mru g_pool_mru;                      // TOTK: recently found pools (nvn_pool_index.h); g_mu
+_Atomic int g_pool_mru_on = -1;                  // TOTK_POOL_MRU=0 / "flag pool_mru 0" (A/B): binary search every time
 static pidx_ent *pool_query(uintptr_t addr, uint64_t len) { // caller holds g_mu
-    if (!pool_query_on()) return pidx_find_mut(&g_pools, addr, len);
+    int mru = atomic_load_explicit(&g_pool_mru_on, memory_order_relaxed);
+    if (mru < 0) { const char *e = getenv("TOTK_POOL_MRU"); mru = !(e && !strcmp(e, "0")); atomic_store(&g_pool_mru_on, mru); }
+    if (!pool_query_on()) return mru ? pidx_find_mru(&g_pools, &g_pool_mru, g_pool_queries.epoch, addr, len) : pidx_find_mut(&g_pools, addr, len);
     pidx_ent *p = pidx_find_cached(&g_pools, &g_pool_queries, addr, len);
     if (atomic_load_explicit(&g_pool_query_check, memory_order_relaxed)) {
         if (p != pidx_find_mut(&g_pools, addr, len)) MDIE("pool query cache disagrees at %#llx+%#llx", (unsigned long long)addr, (unsigned long long)len);
@@ -825,7 +831,7 @@ static uint64_t g_usnap_index_hits, g_usnap_index_misses, g_usnap_index_verified
 static int g_usnap_index_negative;
 static int usnap_index_on(void) {
     int v=atomic_load(&g_usnap_index_on);
-    if(v<0){const char *e=getenv("TOTK_USNAP_INDEX");v=e && atoi(e);atomic_store(&g_usnap_index_on,v);}
+    if(v<0){const char *e=getenv("TOTK_USNAP_INDEX");v=!(e && !atoi(e));atomic_store(&g_usnap_index_on,v);}
     return v;
 }
 static void usnap_copy_one(usnap_t *c);
@@ -1014,7 +1020,8 @@ void mtl_sub_begin(void) {
     g_fc_t[0] += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - g_fc_begin0;
 }
 
-static void rp_end(void);
+static void rp_end_at(int line);
+#define rp_end() rp_end_at(__LINE__)
 extern int g_frz_on; static int g_frz_state;   // 世界冻结：本帧锁存的状态（0 正常 / 1 完整帧 / 2 冻结帧），见 frz_op 上方的说明 | World freeze: the state latched for this frame (0 normal / 1 full frame / 2 frozen frame), see the note above frz_op
 // DM_NVN_PASSGPU_SERIAL=1（测量用）：主命令缓冲上每建一个编码器前编「发信号 n+1 → 等信号 n+1」——信号要等此前全部工作完成才发出，
 // 后面的编码器因此等前一个彻底跑完才开始；TBDR 上通道不再流水重叠，DM_NVN_PASSGPU 的逐通道起止跨度即该通道独占耗时（整帧总时长偏大，只看相对开销）
@@ -1049,9 +1056,10 @@ static inline void m4_end(id e) {
    the previous pass's fragment work instead of waiting for it. MEASUREMENT ONLY until the vertex-stage hazard scan (1) exists:
    a vertex shader sampling a texture rendered just before would read it too early. 0 (default): full barriers both ways.
    Dropping every barrier (TOTK_BARRIER_START=0 END=0, races) took the frame from 11.82 to 10.66 ms at the Lookout fixture. */
+_Atomic int g_bar_narrow = -1;   // "flag bar_narrow <0|2>" (measurement)
 static int bar_narrow(void) {
-    static int v = -1;
-    if (v < 0) { const char *e = getenv("TOTK_BARRIER_NARROW"); v = e ? atoi(e) : 0;
+    int v = atomic_load_explicit(&g_bar_narrow, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("TOTK_BARRIER_NARROW"); v = e ? atoi(e) : 0; atomic_store(&g_bar_narrow, v);
         if (v) MLOG("【实验】TOTK_BARRIER_NARROW=%d：渲染通道之间只按片元阶段排序（顶点阶段可与上一通道的片元重叠）%s", v, v == 2 ? "，不查顶点阶段依赖，只供测量" : ""); }
     return v;
 }
@@ -1147,11 +1155,17 @@ static nvn_arg_address_cache g_arg_addresses;
 static _Atomic int g_arg_bind_cache_on = -1;
 static int g_arg_bind_cache_negative;
 static uint64_t g_arg_bind_sets, g_arg_bind_skips;
+/* TOTK (2026-10-21): default on, with TOTK_USNAP_INDEX, TOTK_TEXTURE_PLAN, TOTK_DRV_CACHE and TOTK_POOL_MRU (=0 turns each
+   off; flags arg_bind_cache / usnap_index / texture_plan / drv_cache / pool_mru). M2 Max, Great Sky Island, MetalFX 2K,
+   interleaved 5 s windows: replay CPU per frame 9.97 -> 9.33 ms with all five, frame 16.47 -> 15.79 ms; leaving one out
+   costs 0.54 (arg_bind_cache), 0.21 (usnap_index), 0.20 (pool_mru), 0.16 (texture_plan), 0.09 ms (drv_cache). A run with
+   every _CHECK mode on (arg_epoch, tex_slots, texture_plan, drv_cache, usnap_index, shadow_index) found no mismatch.
+   arg_epoch, tex_slots and shadow_index measured no gain and stay off. */
 static int arg_bind_cache_on(void) {
     int value = atomic_load_explicit(&g_arg_bind_cache_on, memory_order_relaxed);
     if (value < 0) {
         const char *env = getenv("TOTK_ARG_BIND_CACHE");
-        int initial = env && atoi(env), expected = -1;
+        int initial = !(env && !atoi(env)), expected = -1;
         atomic_compare_exchange_strong(&g_arg_bind_cache_on, &expected, initial);
         value = atomic_load_explicit(&g_arg_bind_cache_on, memory_order_relaxed);
     }
@@ -2218,7 +2232,7 @@ static _Atomic int g_anom_requested = -1;
 static uint64_t g_texture_plan_total, g_texture_plan_selected, g_texture_plan_verified;
 static int texture_plan_on(void) {
     int v = atomic_load(&g_texture_plan_on);
-    if (v < 0) { const char *e = getenv("TOTK_TEXTURE_PLAN"); v = e && atoi(e); atomic_store(&g_texture_plan_on, v);
+    if (v < 0) { const char *e = getenv("TOTK_TEXTURE_PLAN"); v = !(e && !atoi(e)); atomic_store(&g_texture_plan_on, v);
         e = getenv("TOTK_TEXTURE_PLAN_CHECK"); atomic_store(&g_texture_plan_check, e && atoi(e)); }
     return v;
 }
@@ -2274,12 +2288,14 @@ static uint64_t g_wb_done, g_wb_skip_cpu, g_wb_skip_fmt, g_wb_bytes;
 void dm_gfx_querylog_next(long n) { long f = (long)atomic_load(&g_cur_frame); atomic_store(&g_ql_until, f + (n > 0 ? n : 1)); MLOG("[query] logging occlusion queries until frame %ld", f + n); }
 static void driver_cache_set(int v);
 static void driver_cache_check_set(int v);
-/* TOTK: render-target feedback pass split (draw). TOTK_RT_FEEDBACK / "flag rt_feedback": 0 off, 1 every feedback read
-   (correct, but 8-10 ms more GPU time near water on an M4 Pro: about 200 splits a frame), 2 (default) the layered-surface
-   case only. TOTK_RT_FEEDBACK_BITS / "flag rt_feedback_bits" (decimal): attachments that can split (bit i = colour i,
-   bit 8 = depth / stencil), default 1 = colour target 0. */
+/* TOTK: render-target feedback pass split (draw). TOTK_RT_FEEDBACK / "flag rt_feedback": 0 off, 4 (default) where the game
+   put a barrier between the write and the read, 1 every feedback read (150-200 splits a frame near water, 6-8 ms more GPU
+   time), 2 the earlier layered-surface heuristic (TOTK_RT_FEEDBACK_BITS / "flag rt_feedback_bits", decimal: attachments it
+   can split for, bit i = colour i, bit 8 = depth / stencil, default 1 = colour target 0). "flag fbstat 1" logs and resets
+   the counts below. */
 static _Atomic int g_rt_feedback_on = -1; static _Atomic int g_rt_feedback_bits = -1; static uint64_t g_rt_feedback_splits;
-static int rt_feedback_on(void) { int v = atomic_load(&g_rt_feedback_on); if (v < 0) { const char *e = getenv("TOTK_RT_FEEDBACK"); v = e ? atoi(e) : 2; atomic_store(&g_rt_feedback_on, v); } return v; }
+static uint64_t g_fbs[8];   // fbstat: barriers, full barriers, feedback-read draws, of those fenced, unfenced only, splits, reads of an attachment load-cleared at the pass start, frames
+static int rt_feedback_on(void) { int v = atomic_load(&g_rt_feedback_on); if (v < 0) { const char *e = getenv("TOTK_RT_FEEDBACK"); v = e ? atoi(e) : 4; atomic_store(&g_rt_feedback_on, v); } return v; }
 static uint32_t rt_feedback_bits(void) { int v = atomic_load(&g_rt_feedback_bits); if (v < 0) { const char *e = getenv("TOTK_RT_FEEDBACK_BITS"); v = e ? atoi(e) & 0x1ff : 1; atomic_store(&g_rt_feedback_bits, v); } return (uint32_t)v; }
 // One shader class can be hidden for geometry fault isolation without restarting.
 // Diagnostic only: measurements with this enabled are never valid performance results.
@@ -2289,6 +2305,7 @@ static int diag_shader_prefix_matches(const char *key, uint64_t value) {
     char prefix[17]; snprintf(prefix, sizeof prefix, "%016llx", (unsigned long long)value);
     return key && !strncmp(key, prefix, 16);
 }
+static _Atomic int g_totk_udc; static uint64_t g_udc_saved_bytes;   // TOTK: defined with the store path (totk_udc_on)
 void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "arg_epoch")) { (void)arg_epoch_on(); atomic_store(&g_arg_epoch_on, v != 0); MLOG("[flag] arg_epoch = %d", v != 0); return; }
     if (!strcmp(name, "arg_epoch_check")) { (void)arg_epoch_on(); atomic_store(&g_arg_epoch_check, v != 0); MLOG("[flag] arg_epoch_check = %d verified=%llu extra=%llu", v != 0, (unsigned long long)atomic_load(&g_arg_epoch_verified), (unsigned long long)atomic_load(&g_arg_epoch_extra)); return; }
@@ -2296,7 +2313,12 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "tex_slots_check")) { (void)tex_slots_on(); atomic_store(&g_tex_slots_check, v != 0); MLOG("[flag] tex_slots_check = %d verified=%llu hits=%llu", v != 0, (unsigned long long)atomic_load(&g_tex_slots_verified), (unsigned long long)atomic_load(&g_tex_slots_hits)); return; }
     if (!strcmp(name, "render_stream")) { atomic_store(&g_rs_on, v != 0); MLOG("[flag] render_stream = %d (next render pass)", v != 0); return; }
     if (!strcmp(name, "rt_feedback_bits")) { atomic_store(&g_rt_feedback_bits, v & 0x1ff); MLOG("[flag] rt_feedback_bits = %#x", v & 0x1ff); return; }
+    if (!strcmp(name, "fbstat")) { MLOG("[fbstat] barriers %llu (order fragments + invalidate texture %llu), feedback-read draws %llu: fenced %llu, unfenced only %llu, reading a load-cleared attachment %llu; splits %llu; frames %llu",
+        (unsigned long long)g_fbs[0], (unsigned long long)g_fbs[1], (unsigned long long)g_fbs[2], (unsigned long long)g_fbs[3], (unsigned long long)g_fbs[4], (unsigned long long)g_fbs[6], (unsigned long long)g_fbs[5], (unsigned long long)atomic_load(&g_cur_frame) - g_fbs[7]); if (v) { memset(g_fbs, 0, sizeof g_fbs); g_fbs[7] = (uint64_t)atomic_load(&g_cur_frame); } return; }
     if (!strcmp(name, "rt_feedback")) { (void)rt_feedback_on(); atomic_store(&g_rt_feedback_on, v); MLOG("[flag] rt_feedback = %d (%llu splits so far)", v, (unsigned long long)g_rt_feedback_splits); return; }
+    if (!strcmp(name, "bar_narrow")) { extern _Atomic int g_bar_narrow; atomic_store(&g_bar_narrow, v == 2 ? 2 : 0); MLOG("[flag] bar_narrow = %d (measurement)", v == 2 ? 2 : 0); return; }
+    if (!strcmp(name, "pool_mru")) { extern _Atomic int g_pool_mru_on; atomic_store(&g_pool_mru_on, v != 0); MLOG("[flag] pool_mru = %d", v != 0); return; }
+    if (!strcmp(name, "unwritten_dc")) { atomic_store(&g_totk_udc, v != 0); MLOG("[flag] unwritten_dc = %d (%.1f MB not written back so far)", v != 0, g_udc_saved_bytes / 1e6); return; }
     if (!strcmp(name, "cube_merge")) { atomic_store(&g_cg_on, v != 0); MLOG("[flag] cube_merge = %d", v != 0); return; }
     if (!strcmp(name, "skip_invisible")) { skv_set(v); return; }
     if (!strcmp(name, "mfx_upscale")) { mfxup_set(v < 0 ? !mfxup_enabled() : v); return; }   // TOTK_MFX_UPSCALE at run time (manual key 3 picture mode)
@@ -3807,6 +3829,19 @@ static int g_udc_ab = -1, g_udc_ab_on;
 // Attachments this pass did not write (depth / stencil test only, color write mask 0, etc.) get their write-back changed to DontCare: the content is already in memory, saving one full write-back.
 // On by default: on Mac, same-process on / off screenshots follow the same distribution as the null control; on A19 Pro, private Depth32F_S8 / RGBA8 read back after DontCare differ in 0 places.
 // DM_NVN_UNWRITTEN_DC=0 turns it off (for equivalence comparison)
+/* TOTK: unwritten-attachment DontCare in the default (conservative, DM_NVN_TBDR off) store path. An attachment the pass
+   loaded and did not write (no draw with a colour mask / fragment output for it, no depth / stencil write, no image
+   write, no replay clear quad) is stored with DontCare: its memory already holds exactly those bytes, so the write-back
+   only costs bandwidth. The render-target-feedback splits (mode 4) end the G-buffer pass 8-11 times a frame on the
+   Great Sky Island, and each reopened pass writes all six 1600x896 targets back although most segments write two or
+   three of them. Same rule as udc_on's D2R path (DontCare after load: 0 differing pixels read back on Apple GPUs,
+   DM_UDC_SELFTEST). TOTK_UNWRITTEN_DC=0 or "flag unwritten_dc 0" turns it off. */
+static _Atomic int g_totk_udc = -1;
+static int totk_udc_on(void) {
+    int v = atomic_load_explicit(&g_totk_udc, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("TOTK_UNWRITTEN_DC"); v = !(e && !strcmp(e, "0")); atomic_store(&g_totk_udc, v); }
+    return v;
+}
 static int udc_on(void) {
     if (g_udc_ab < 0) { const char *e = getenv("DM_NVN_UNWRITTEN_DC"); g_udc_ab = !(e && !strcmp(e, "0"));
         const char *a = getenv("DM_NVN_UDC_AB"); if (a && !strcmp(a, "1")) { g_udc_ab = 0; g_udc_ab_on = 0; } }
@@ -4074,8 +4109,15 @@ static uint8_t g_nt_pass_clear[8]; static MTLClearColor g_nt_pass_cc[8]; static 
 /* TOTK: attachments of the open pass written since it began (bit i = colour i, bit 8 = depth / stencil): load-clears and
    draws with a colour mask / depth or stencil write. A later draw that samples one of them ends the pass first (draw). */
 static uint32_t g_pass_wrote, g_pass_fbw; static void *g_pass_fbprog;   // fbw: of those, written by draws that themselves sampled attachments (fbprog: the last such program)
+/* TOTK: the game's own barriers inside a pass. g_bar_seq counts nvnCommandBufferBarrier calls that order fragments and invalidate
+   the texture cache; g_wseq[i] is the barrier count when attachment i (8 = depth / stencil) was first written in the open pass
+   (UINT32_MAX = not written). A write is "fenced" for a later draw when a barrier came between them: on the Switch that draw is
+   meant to see it; an unfenced write is a race there too (diagnostic "fbstat", mode 4 splits only for fenced reads). */
+static uint32_t g_bar_seq = 1, g_clr_seq, g_wseq[9], g_pass_clr;   // pass_clr: attachments the open pass load-cleared (their memory still holds older contents)
+static uint32_t pass_fenced(void) { uint32_t m = 0; for (int i = 0; i < 9; i++) if (g_wseq[i] < g_bar_seq) m |= 1u << i; return m; }
 static const char *nan_trace_prefix(void);
-static void rp_end(void) { if (g_enc) {
+static void rp_end_at(int line) { if (g_enc) {
+    PD("Z %llu pass ends at nvn_mtl.m:%d", g_stat_pass, line);
     ghost_flush();
     if (enc_label_on() && !g_rs_active) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // 帧内序号：同一趟每帧同名，表里才能按名归并 | Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
@@ -4387,6 +4429,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
         PD("P %llu c%d ser=%llu fmt=%lu %lux%lu ms%lu lv%lu sl%lu %s clear=%g,%g,%g,%g mem=%p", g_stat_pass + 1, i, R.rt.color[i]->serial, (unsigned long)c.texture.pixelFormat,
            (unsigned long)c.texture.width, (unsigned long)c.texture.height, (unsigned long)c.texture.sampleCount, (unsigned long)c.level, (unsigned long)c.slice,
            c.loadAction == MTLLoadActionClear ? "clear" : c.loadAction == MTLLoadActionDontCare ? "dontcare" : "load", R.cc[i].red, R.cc[i].green, R.cc[i].blue, R.cc[i].alpha  , (void *)R.rt.color[i]->mem);
+        PD("U %llu c%d usage=%#lx view=%d base_usage=%#lx opt=%d", g_stat_pass + 1, i, (unsigned long)c.texture.usage, c.texture.parentTexture != nil, (unsigned long)(c.texture.parentTexture ?: c.texture).usage, (int)(c.texture.parentTexture ?: c.texture).allowGPUOptimizedContents);
     }
     {   // 深度与模板平面分开记（合一格式 5 字节 = 深度 4 + 模板 1；只挂一项时只记那一项） | Depth and stencil planes are counted separately (combined format 5 bytes = depth 4 + stencil 1; when only one is attached only that one is counted)
         id<MTLTexture> dt = pd.depthAttachment.texture, stt = pd.stencilAttachment.texture;
@@ -4417,6 +4460,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
     memcpy(g_nt_pass_clear, R.clear_c, sizeof g_nt_pass_clear); memcpy(g_nt_pass_cc, R.cc, sizeof g_nt_pass_cc); g_nt_pass_draws = 0;
     g_pass_wrote = R.clear_d || R.clear_s ? 1u << 8 : 0; for (int i = 0; i < 8; i++) if (R.clear_c[i]) g_pass_wrote |= 1u << i;
     g_pass_fbw = 0; g_pass_fbprog = NULL;
+    for (int i = 0; i < 9; i++) g_wseq[i] = g_pass_wrote >> i & 1 ? g_clr_seq : UINT32_MAX;
+    g_pass_clr = g_pass_wrote;
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
     {   // 通道信息（口径同原先每次绘制现取：颜色取各附件基贴图格式，采样数取最后一个颜色附件、有深度则取深度） | Pass info (same convention as the former per-draw fetch: colors take each attachment's base texture format; sample count takes the last color attachment, or depth if there is depth)
         uint64_t ser = g_pass.serial + 1; memset(&g_pass, 0, sizeof g_pass); g_pass.serial = ser;
@@ -4772,16 +4817,36 @@ static MTLCompileOptions *totk_precise_opts(void) {
    memory pressure in the middle of a compile (iPad, 2026-10-18: "Compilation failed due to an interrupted connection:
    XPC_ERROR_CONNECTION_INTERRUPTED" while the shader warm-up was running); it restarts on the next request, so such a
    failure is retried instead of being taken as a broken shader. */
-static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
+/* TOTK_RELAXED_MATH=<key prefix>[,<key prefix>...] | all (measurement): those translated shaders are compiled with
+   MTLMathModeRelaxed (reassociation / contraction, inf and NaN still honoured) instead of the safe math above, bypassing the
+   prebuilt library. Only for timing and picture comparisons of single heavy shaders. */
+static MTLCompileOptions *totk_relaxed_opts(void) {
+    static MTLCompileOptions *o; static dispatch_once_t once;
+    dispatch_once(&once, ^{ MTLCompileOptions *x = [MTLCompileOptions new];
+        if (@available(macOS 15.0, *)) x.mathMode = MTLMathModeRelaxed; else x.fastMathEnabled = YES;
+        o = x; });
+    return o;
+}
+static int totk_relaxed_key(NSString *pc) {
+    const char *e = getenv("TOTK_RELAXED_MATH"); if (!e || !*e) return 0;
+    if (!strcmp(e, "all")) return 1;
+    const char *k = pc.UTF8String;
+    for (const char *p = e; *p;) { const char *c = strchr(p, ','); size_t n = c ? (size_t)(c - p) : strlen(p);
+        if (n && !strncmp(k, p, n)) return 1;
+        if (!c) break; p = c + 1; }
+    return 0;
+}
+static id<MTLLibrary> totk_msl_library_opts(NSString *src, MTLCompileOptions *opts, NSError **err) {
     NSError *e = nil;
     for (int attempt = 1;; attempt++) {
-        id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e];
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:opts error:&e];
         BOOL interrupted = !lib && [e.localizedDescription containsString:@"XPC_ERROR_CONNECTION_INTERRUPTED"];
         if (lib || !interrupted || attempt == 4) { if (err) *err = e; return lib; }
         MLOG("【红】着色器编译服务连接中断（第 %d 次），%d ms 后重试", attempt, attempt * 100);
         usleep((useconds_t)attempt * 100000);
     }
 }
+static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) { return totk_msl_library_opts(src, totk_precise_opts(), err); }
 /* TOTK (2026-10-15): which words of the NVN driver constant segments c0 / c2 a translated shader reads, scanned from its MSL
    at load (spirv-cross names them <stage>p_c0 / <stage>p_c2: vp_, fp_, cp_). The translation-time scan
    (scripts/shader_service.py drv_reads) matched only fragment shaders (fp_c0) until 2026-10-15, so every vertex and compute
@@ -4883,10 +4948,14 @@ static NvShader *shader_load(NSString *pc, int stage) {
 #endif
         if (!lib) { NSData *raw = [NSData dataWithContentsOfFile:rt_src options:0 error:&e];
 #if !TARGET_OS_IPHONE
-                    if (raw && (lib = shader_lib_prebuilt(raw))) atomic_fetch_add(&g_rt_prebuilt, 1);
+                    int relaxed = totk_relaxed_key(pc);
+                    if (raw && !relaxed && (lib = shader_lib_prebuilt(raw))) atomic_fetch_add(&g_rt_prebuilt, 1);
+#else
+                    int relaxed = 0;
 #endif
                     NSString *src = raw && !lib ? [[NSString alloc] initWithData:raw encoding:NSUTF8StringEncoding] : nil;
-                    if (src) { lib = totk_msl_library(src, &e); atomic_fetch_add(&g_rt_compiled, 1); } }
+                    if (src) { lib = totk_msl_library_opts(src, relaxed ? totk_relaxed_opts() : totk_precise_opts(), &e); atomic_fetch_add(&g_rt_compiled, 1);
+                               if (relaxed) MLOG("TOTK_RELAXED_MATH: %s compiled with relaxed math", pc.UTF8String); } }
     } else lib = lib_from_file(lp, &e);
     if (rt) { uint64_t pre = atomic_load(&g_rt_prebuilt), com = atomic_load(&g_rt_compiled);
               if ((pre + com) % 200 == 1) MLOG("着色器库：预编译加载 %llu 个，现编 %llu 个", (unsigned long long)pre, (unsigned long long)com); }
@@ -6792,7 +6861,7 @@ static void driver_cache_check_set(int v) { atomic_store(&g_driver_cache_check, 
 static void driver_cache_set(int v) { atomic_store(&g_driver_cache_on, v != 0); MLOG("[flag] drv_cache = %d", v != 0); }
 static int driver_cache_on(void) {
     int v = atomic_load(&g_driver_cache_on);
-    if (v < 0) { const char *e = getenv("TOTK_DRV_CACHE"); v = e && !strcmp(e, "1"); atomic_store(&g_driver_cache_on, v); }
+    if (v < 0) { const char *e = getenv("TOTK_DRV_CACHE"); v = !(e && !strcmp(e, "0")); atomic_store(&g_driver_cache_on, v); }
     return v;
 }
 static void driver_bank_fill(uint8_t *d, int bank, int stage) {
@@ -7344,9 +7413,12 @@ static uint64_t lay_gpu(int offset) {   // GPU address of the constant `offset` 
 void mtl_layer_stats(uint64_t v[4]) { v[0] = g_stat_pass; v[1] = g_lay.passes; v[2] = g_lay.merges; v[3] = g_lay.refused; }
 static void sd_finish(void) {
     if (!g_nsd) return;
-    if (!tbdr_on()) {   // 优化全关：一律写回 | All optimizations off: always write back
-        for (int i = 0; i < g_nsd; i++) { sd_att *t = &g_sd[i];
-            enc_r_store(g_enc, t->depth, MTLStoreActionStore, (NSUInteger)t->idx); }
+    if (!tbdr_on()) {   // 优化全关：一律写回（TOTK：只把读入后没写过的附件改 DontCare，见 totk_udc_on） | All optimizations off: always write back (TOTK: except loaded, unwritten attachments, see totk_udc_on)
+        int udc = totk_udc_on();
+        for (int i = 0; i < g_nsd; i++) { sd_att *t = &g_sd[i]; int dead = udc && t->load && !t->wrote;
+            enc_r_store(g_enc, t->depth, dead ? MTLStoreActionDontCare : MTLStoreActionStore, (NSUInteger)t->idx);
+            if (dead) { g_bw_store -= t->bytes; g_udc_saved_bytes += t->bytes; }
+            PD("Z %llu %s ser=%llu %s", g_stat_pass, t->depth == 1 ? "d" : t->depth == 2 ? "s" : "c", (unsigned long long)t->ser, dead ? "dontcare (loaded, unwritten)" : "store"); }
         g_nsd = 0; return; }
     uint8_t nst[9];
     if (sdx_decide(nst)) { for (int i = 0; i < g_nsd; i++) if (nst[i] == 2) g_sd[i].state = 2; else sd_need(&g_sd[i], nst[i] >> 2); }
@@ -8826,6 +8898,7 @@ static void widen_indices_gpu(const p_draw_idx *di) {
 // full-target triangle that writes only that attachment's masked channels inside the scissor (depth/stencil untouched).
 static void clear_quad_core(id<MTL4RenderCommandEncoder> en, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples,
                             NSUInteger tw, NSUInteger th, int index, int mask, const float rgba[4], MTLScissorRect sc) {
+    for (int i = 0; i < g_nsd; i++) { g_sd[i].wrote = 1; g_sd[i].wwhy = 6; }   // TOTK: a replay clear quad writes the pass's attachments (unwritten DontCare must keep them)
     static NSMutableDictionary<NSString *, id<MTLRenderPipelineState>> *cache; static id<MTLDepthStencilState> dss; static id<MTLLibrary> libs[8];
     if (!cache) {
         cache = [NSMutableDictionary dictionary];
@@ -9667,16 +9740,25 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
        bits it tests) and blends over what is already there - the river over the pool drawn just before it. On the tile
        GPU an open pass keeps those writes in tile memory, so the reads returned the targets as they were when the pass
        began: where the river crosses the pool it showed the bare riverbed, a hard-edged see-through patch.
-       Ending the pass lands the stores (the next encoder's start barrier orders them). Splitting for every feedback read
-       (mode 1) also catches the G-buffer layer draws, which read the albedo / normal / depth targets: about 200 splits a
-       frame and 8-10 ms more GPU time near water, with no visible change in still scenes. Mode 2 splits only where the
-       read attachment (rt_feedback_bits, default colour target 0) was written by an earlier feedback-reading draw of
-       another program in this pass: about 6 splits a frame at the river, 0.2 ms. */
+       Ending the pass lands the stores (the next encoder's start barrier orders them).
+       Mode 4 splits only where the game itself ordered the read after the write: a fragment-ordering, texture-invalidating
+       barrier came after the attachment's first write in this pass (pass_fenced). Measured on the Great Sky Island
+       (M2 Max, 2026-10-20): 160-260 feedback reads a frame, all but 5-11 of them unfenced - the G-buffer grass / foliage
+       layers read the normal / albedo targets the earlier layers of the same pass wrote, with no barrier in between, so
+       on the Switch too they get whatever the texture cache holds and the game does not depend on it. None of them reads
+       an attachment its own pass load-cleared, so a read that misses the open pass's writes still sees this frame's
+       targets as the pass began, never an older frame (no ghosting in motion). The fenced ones are the water surfaces and
+       the layered leaf-litter decal (fcd1a8d9, a barrier between its layers): 5-10 splits a frame, 0.2-0.3 ms; splitting
+       for every read (mode 1) costs 6-8 ms and changes nothing visible. Serving the fenced reads from tile memory
+       (programmable blending) would save at most those 0.2-0.3 ms, so it is not done. */
     uint32_t fb_rd = rt_feedback_on() && !g_fz.active && !g_defer_replaying && !g_cg.replaying ? draw_sampled_rt_mask(pr) : 0;
     if (g_enc && fb_rd) {
         int mode = rt_feedback_on();
-        uint32_t fb = fb_rd & (mode == 1 ? g_pass_wrote : (__bridge void *)pr != g_pass_fbprog ? g_pass_fbw & rt_feedback_bits() : 0);
-        if (fb) { g_rt_feedback_splits++;
+        uint32_t fen = pass_fenced();
+        if (fb_rd & g_pass_wrote) { g_fbs[2]++; g_fbs[fb_rd & fen ? 3 : 4]++; if (fb_rd & g_pass_clr) g_fbs[6]++;
+            PD("W %llu fs=%.16s rd=%#x wrote=%#x fenced=%#x fbw=%#x same_prog=%d", g_stat_pass, pr && pr->sh[1] ? pr->sh[1]->key : "-", fb_rd, g_pass_wrote, fen, g_pass_fbw, (__bridge void *)pr == g_pass_fbprog); }
+        uint32_t fb = fb_rd & (mode == 1 ? g_pass_wrote : mode == 4 ? fen : (__bridge void *)pr != g_pass_fbprog ? g_pass_fbw & rt_feedback_bits() : 0);
+        if (fb) { g_rt_feedback_splits++; g_fbs[5]++;
             static int once; if (!once++) MLOG("render-target feedback: a draw samples attachments 0x%x written earlier in its pass (fs %.16s), the pass ends before it (first in pass %llu)", fb, pr && pr->sh[1] ? pr->sh[1]->key : "-", g_stat_pass);
             PD("M %llu draw samples attachments 0x%x written earlier in the pass: split", g_stat_pass, fb); rp_end(); } }
     static id<MTLFunction> fz_fn;   // 合并通道后一个通道本次绘制的特化片元函数（nil = 用原版本） | Specialized fragment function for this draw of the later pass in a merged render pass (nil = use the original version)
@@ -9890,6 +9972,7 @@ frz_plain:;
     g_stat_draw++;
     { uint32_t w = R.rt.depth && (S.ds.dw || S.ds.st) ? 1u << 8 : 0;
       for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && (S.chmask.mask >> (4 * i) & 0xf)) w |= 1u << i;
+      for (int i = 0; i < 9; i++) if ((w >> i & 1) && g_wseq[i] == UINT32_MAX) g_wseq[i] = g_bar_seq;
       g_pass_wrote |= w; if (fb_rd) { g_pass_fbw |= w; g_pass_fbprog = (__bridge void *)pr; } }
     { static int tg; if (!tg) { tg = 1; const char *e = getenv("DM_TEST_GHOST"); float v[8];   // 测试开关 DM_TEST_GHOST=px,py,gx,gy,gw,gh,cx,cy（归一化；按下点、格网、跟手图中心）：不经前端直接开跟手图（Mac 宿主截图验证用） | Test switch DM_TEST_GHOST=px,py,gx,gy,gw,gh,cx,cy (normalized; press point, grid, center of the drag-follow image): turns on the drag-follow image directly without going through the front end (for Mac host screenshot verification)
         if (e && sscanf(e, "%f,%f,%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) mtl_ui_ghost(1, v[0], v[1], &v[2], v[6], v[7]); } }
@@ -10719,10 +10802,13 @@ void mtl_exec(const uint8_t *p) {
                    attachment) and in the clear ops still end the continued pass where needed. TOTK_RT_CONTINUE=0 turns it off. */
                 static int rt_cont = -1; if (rt_cont < 0) { const char *e = getenv("TOTK_RT_CONTINUE"); rt_cont = !(e && !strcmp(e, "0")); }
                 if (g_enc && g_enc_mode != 1 && !pend && R.has_rt && (tbdr_on() || rt_cont) && rt_same(&R.rt, r)) { g_rt_merged = 1; if (!g_rt_merge_n++) MLOG("同目标续用：首例 通道 %llu", g_stat_pass); PD("M %llu 同目标续用通道", g_stat_pass); R.rt = *r; break; }
+                if (passdump() && g_enc) { char b[160]; int o = 0; for (int i = 0; i < r->n && i < 8 && o < 140; i++) o += snprintf(b + o, sizeof b - o, " c%d=%llu", i, r->color[i] ? (unsigned long long)r->color[i]->serial : 0ull);
+                    PD("S %llu set_rt ends pass: mode=%d pend=%d same=%d n=%d->%d d=%llu->%llu%s", g_stat_pass, g_enc_mode, pend, R.has_rt && rt_same(&R.rt, r), R.rt.n, r->n,
+                       R.rt.depth ? (unsigned long long)R.rt.depth->serial : 0ull, r->depth ? (unsigned long long)r->depth->serial : 0ull, b); }
                 rp_flush(); R.rt = *r; R.has_rt = 1; break;
             }
             case OP_CLEAR_COLOR: {
-                const p_clear_color *c = a;
+                const p_clear_color *c = a; g_clr_seq = g_bar_seq;
                 if (atomic_load(&g_draw_log) > 0 && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index])
                     MLOG("[uw] F%llu pass %llu clear c%d ser %llu %ux%u fmt %#x mask %#x rgba %g %g %g %g%s", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, c->index,
                          (unsigned long long)R.rt.color[c->index]->serial, R.rt.color[c->index]->d.width, R.rt.color[c->index]->d.height, R.rt.color[c->index]->d.format, c->mask,
@@ -10735,7 +10821,7 @@ void mtl_exec(const uint8_t *p) {
                 break;
             }
             case OP_CLEAR_DS: {
-                const p_clear_ds *c = a;
+                const p_clear_ds *c = a; g_clr_seq = g_bar_seq;
                 if (S.render_disabled) { g_draw_skip[12]++; PD("E clear ds skipped: rendering disabled"); break; }   // TOTK
                 if (g_rt_merged) rp_end();
                 if (!R.rt.depth || (!c->depth_mask && !(c->stencil_mask & 255))) break;
@@ -10757,7 +10843,10 @@ void mtl_exec(const uint8_t *p) {
             case OP_COPY_T2T: copy_t2t(a); break;
             case OP_CLEAR_TEX: clear_tex(a); break;
             case OP_DISPATCH: dispatch(a); break;
-            case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: break;
+            case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); g_fbs[0]++;
+                if ((bits & NVN_BARRIER_INVALIDATE_TEXTURE_BIT) && (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) { g_bar_seq++; g_fbs[1]++; }
+                PD("B %llu barrier %#x enc=%d", g_stat_pass, bits, g_enc != nil); break; }
+            case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: break;
             default: break;
         }
         p += h.size;
