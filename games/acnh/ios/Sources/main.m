@@ -18,8 +18,9 @@ uint64_t dm_nvn_frame_count(void);
 int mfx_enabled(void);
 void dm_gfx_set_flag(const char *name, int v);
 
-/* The Settings sheet on iPhone / iPad (vendor/gamesettings): picture shape, frame interpolation, motion controls (the
-   device's own gyro, device_motion.m, or a controller's) and the FPS overlay; keyboard bindings and the save folders. */
+/* The Settings sheet on iPhone / iPad (vendor/gamesettings): picture shape, render resolution, upscaling, frame
+   interpolation, motion controls (the device's own gyro, device_motion.m, or a controller's) and the FPS overlay;
+   keyboard bindings and the save folders. */
 static int shape_get(void) { return runtime_aspect_on() ? 0 : 1; }
 static void shape_set(int v) { if (shape_get() != v) runtime_aspect_toggle(); }
 static int upscale_get(void) { return runtime_ios_full_resolution(); }
@@ -28,6 +29,17 @@ static int interp_get(void) { return mfx_enabled(); }
 static void interp_set(int v) { dm_gfx_set_flag("mfx_interp", v); }
 static int motion_get(void) { return runtime_device_motion_enabled(); }
 static void motion_set(int v) { runtime_hid_feedback_flag("gyro", !!v); runtime_device_motion_enable(v); }   /* off: the game sees a pad lying still */
+/* Render resolution: the 3D scene's size (the UI keeps the game's 720p), read once at start (TOTK_RENDER_RES, before the
+   game thread; runtime/acnh_patches.c render_install), so a change takes effect at the next start; kept in NSUserDefaults
+   for that and in the Settings like the rest. 480p is 864x486, exactly 16:9 like the game's own sizes. */
+static const char *const render_sizes[] = {"864x486", "960x540", "1280x720", "1600x900", "1920x1080"};
+static const char *const render_choices[] = {"480p", "540p", "720p (the game's)", "900p", "1080p"};
+static int render_get(void) {
+    NSString *v = [NSUserDefaults.standardUserDefaults stringForKey:@"ACNHRenderRes"];
+    for (int i = 0; i < 5; i++) if ([v isEqualToString:@(render_sizes[i])]) return i;
+    return 2;
+}
+static void render_set(int v) { if (v >= 0 && v < 5) [NSUserDefaults.standardUserDefaults setObject:@(render_sizes[v]) forKey:@"ACNHRenderRes"]; }
 static int overlay_get(void) { return fps_overlay_hints_enabled(); }
 static void overlay_set(int v) { if (overlay_get() != v) fps_overlay_toggle_hints(); }
 static const char *const shape_choices[] = {"The screen's shape", "16:9 (the game's own)"};
@@ -37,6 +49,7 @@ static const char *const motion_choices[] = {"Off", "On"};
 static const char *const overlay_choices[] = {"Hidden", "Shown"};
 static const gamesettings_choice graphics_settings[] = {
     {"shape", "Picture shape", shape_choices, 2, shape_get, shape_set, "The camera fills the screen without black bars; the HUD keeps its shape in the middle."},
+    {"render", "Render resolution", render_choices, 5, render_get, render_set, "The 3D scene's size; the HUD stays sharp. Lower runs faster; MetalFX upscaling sharpens it. Takes effect the next time the game starts."},
     {"upscale", "Upscaling", upscale_choices, 2, upscale_get, upscale_set, "MetalFX scales the 720p picture to the screen's own pixels; uses more GPU time and battery."},
     {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60)."},
     {"motion", "Motion controls", motion_choices, 2, motion_get, motion_set, "Tilt and turn the device (or a controller with a gyro, such as a DualSense) where the game uses motion."},
@@ -120,6 +133,7 @@ static BOOL forward_presses(NSSet<UIPress *> *presses, int down) {
     if ([fm fileExistsAtPath:uid]) setenv("ACNH_ACCOUNT_UID_FILE", uid.fileSystemRepresentation, 1);
     setenv("ACNH_SPEEDFIX_DIR",[res stringByAppendingPathComponent:@"speedfix"].fileSystemRepresentation,1);   /* 60 FPS SpeedFix, when the build had it */
     setenv("TOTK_OPERATION_MODE","handheld",1);
+    { int r = render_get(); setenv("TOTK_RENDER_RES", render_sizes[r], 1); }   /* the Settings sheet's Render resolution */
     /* System fonts: the console's own dump when the build found one (GameData/shared-fonts), else the font the Mac
        build bundled (GameData/font.ttc / .ttf; iOS keeps its system fonts out of the app's reach). */
     setenv("ACNH_SHARED_FONTS",[res stringByAppendingPathComponent:@"shared-fonts"].fileSystemRepresentation,1);

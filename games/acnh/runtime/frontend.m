@@ -211,12 +211,12 @@ static int shape_get(void){return runtime_aspect_on()?0:1;}
 static void shape_set(int v){if(shape_get()!=v)runtime_aspect_toggle();}
 static int overlay_get(void){return fps_overlay_hints_enabled();}
 static void overlay_set(int v){if(overlay_get()!=v)runtime_shortcut_help_toggle();}
-static const char *const picture_choices[]={"1080p","MetalFX (upscaled to the window)"};
+static const char *picture_choices[16]={"1080p","MetalFX"};   /* filled from runtime_output_mode_name before the settings start */
 static const char *const interp_choices[]={"Off","30 + 30","Half the refresh rate","Unlimited"};
 static const char *const shape_choices[]={"The window's shape","16:9 (the game's own)"};
 static const char *const overlay_choices[]={"Hidden","Shown"};
-static const gamesettings_choice graphics_settings[]={
- {"picture","Picture",picture_choices,2,picture_get,picture_set,"The game draws 1080p; MetalFX upscales it to the window instead of plain scaling. Key 3."},
+static gamesettings_choice graphics_settings[]={
+ {"picture","Picture",picture_choices,2,picture_get,picture_set,"The size the game draws its picture and UI at (720p to 1440p, switched while playing); MetalFX upscales 1080p to the window instead. Key 3."},
  {"interpolation","Frame interpolation",interp_choices,4,interp_get,interp_set,"MetalFX generates in-between frames. Key 2."},
  {"shape","Picture shape",shape_choices,2,shape_get,shape_set,"The camera follows the window as you resize it or go full screen. Key 4."},
  {"overlay","FPS and shortcut overlay",overlay_choices,2,overlay_get,overlay_set,"Key 1."},
@@ -232,6 +232,7 @@ static void front_install_menu(void){
  NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("退出 Tears of the Kingdom","Quit Tears of the Kingdom")) action:@selector(performClose:) keyEquivalent:@"q"];
  quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
  [appMenu addItem:quit];gamesettings_add_menu_item(appMenu);NSApp.mainMenu=menu;
+  {int n=runtime_output_mode_count();if(n>16)n=16;for(int i=0;i<n;i++)picture_choices[i]=runtime_output_mode_name(i);if(n)graphics_settings[0].nchoices=(unsigned)n;}
   gamesettings_start(&settings_config);   /* keyboard bindings and graphics, this Mac's copy or iCloud's */
 }
 static void *guest_main(void *callback){@autoreleasepool{((void(*)(void))callback)();}return NULL;}

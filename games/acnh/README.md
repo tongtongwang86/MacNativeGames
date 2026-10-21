@@ -67,6 +67,17 @@ window's shape changes mid-game (full screen, a resize, key 4) the host fits it 
 panels that reach the layout's edge (backdrops, the black around the screen wipe's circle) are extended to the window's
 edge (`uw_acnh_refit` in `nvn_mtl.m`; `ACNH_UI_FIT=0` turns both off).
 
+## Resolution
+
+ACNH has its own size table (540p to 2160p) and picks 1080p docked, 720p handheld, once for the 3D scene and once for the
+output (the canvas the UI is composed in). `acnh_patches.c` lets the host choose each:
+- Mac: key 3 and the Settings window's Picture switch 1080p, MetalFX (1080p upscaled to the window), 1440p, 720p and 900p
+  while playing, through the game's own "operation mode changed" re-layout. Room for 1440p is made at start (a 2560x1440
+  swapchain, larger cSys / cGfx root heaps and render-target pools, about 150 MiB more memory); 4K ran out of
+  render-target memory. `ACNH_OUTPUT_RES=0` keeps the game's own 1080p.
+- iPhone / iPad: Settings > Render resolution (480p to 1080p) sets the 3D scene's size at the next start
+  (`TOTK_RENDER_RES`); the UI stays at the game's 720p. The iOS export embeds the patch; the device writes the size.
+
 ## 60 FPS
 
 ```bash

@@ -201,6 +201,107 @@ static void site_probe(Module *m, uint64_t stub_off, uint64_t data_off) {
     fprintf(stderr, "[acnh] site probe on %u instruction(s)\n", probe_n);
 }
 
+/* Sizes (3.0.0). ACNH has its own size table, main+0x4075708: {w, h} floats for 540p, 720p, 900p, 1080p, 1440p and 2160p.
+   main+0x1527acc (a virtual function, run at start and when the operation mode changes) picks entry 3 docked and 1
+   handheld and stores the index twice:
+     main+0x1527af4  csinc w9, w9, wzr, ne        (index = docked ? 3 : 1)
+     main+0x1527af8  str   w9, [x8, #0x2e0]       the scene's render size: the 3D scene is drawn at it, then scaled to the
+                                                 canvas (the function also writes that scale, size / canvas, for the renderer)
+     main+0x1527afc  str   w9, [x10, #0x2e4]      the output: the canvas the UI and the scene are composed in, the window crop
+   Each of the two can be replaced through a 4-byte slot on the data page after main (index + 1, 0 = the game's own); the
+   instruction branches to a stub in main's text padding (after the aspect stubs) that loads it. x12 is free there (a leaf
+   function); x8, x10 and x11 are live.
+     output (Mac):  csinc w9, w9, wzr, ne; adrp x12, <data>; ldr w12, [x12, #OUTPUT_SLOT]; cbz w12, 1f; sub w9, w12, #1; 1: b +0x1527af8
+     render:        adrp x12, <data>; ldr w12, [x12, #RENDER_SLOT]; cbnz w12, 1f; add w12, w9, #1; 1: sub w12, w12, #1;
+                    str w12, [x8, #0x2e0]; b +0x1527afc
+   The output stub keeps w9, so the render size follows the output unless the render slot says otherwise. */
+#define SIZE_TABLE 0x4075708u
+#define OUTPUT_SITE 0x1527af4u
+#define RENDER_SITE 0x1527af8u
+#define OUTPUT_SLOT 120
+#define RENDER_SLOT 124
+#define SIZE_STUBS 64   /* bytes after the aspect stubs: the render stub (+0), the output stub (+32) */
+static _Atomic(uint32_t) *output_slot;   /* set once the output patch is in (Mac) */
+static const unsigned game_sizes[6][2] = {{960, 540}, {1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+static uint32_t adrp_x12(uint64_t at, uint64_t page_off) { return (adrp_x10(at, page_off) & ~31u) | 12; }
+
+/* Render resolution (TOTK_RENDER_RES=<w>x<h>, the iPhone / iPad Settings sheet's Render resolution; read at start): the
+   3D scene's size, the UI keeps the output's. A size of the table is its index; another (480p) replaces entry 0 (540p,
+   which no output mode uses) and takes index 0. The stub is always in main (harmless with the slot at 0), so the iOS
+   export embeds it; the device checks it and writes the slot. Unset = the game's own. */
+static void render_install(Module *m, uint64_t s, uint64_t data_off) {
+    uint32_t stub[7] = {adrp_x12(s, data_off), 0xb9400000u | ((RENDER_SLOT / 4) << 10) | (12 << 5) | 12, 0x35000000u | (2 << 5) | 12,
+                        0x1100052cu /* add w12, w9, #1 */, 0x5100058cu /* sub w12, w12, #1 */, 0xb902e10cu /* str w12, [x8, #0x2e0] */,
+                        aspect_branch(s + 24, RENDER_SITE + 4)};
+    uint32_t jump = aspect_branch(RENDER_SITE, s), have; memcpy(&have, m->base + RENDER_SITE, 4);
+#if TARGET_OS_IPHONE
+    if (have == 0xb902e109u) { fprintf(stderr, "[acnh] render resolution: the game's own (not in this build's code)\n"); return; }
+    if (have != jump || memcmp(m->base + s, stub, sizeof stub)) runtime_fail("render resolution: embedded stub does not match");
+#else
+    if (have != 0xb902e109u) runtime_fail("render resolution patch: main does not match 3.0.0 (main+0x1527af8)");
+    for (unsigned b = 0; b < sizeof stub; b++) if (m->base[s + b]) runtime_fail("render resolution patch: text padding in use");
+    memcpy(m->base + s, stub, sizeof stub); memcpy(m->base + RENDER_SITE, &jump, 4);
+#endif
+    const char *e = getenv("TOTK_RENDER_RES"); unsigned w, h; char rest;
+    if (!e || !*e || !strcmp(e, "0")) return;
+    if (sscanf(e, "%ux%u%c", &w, &h, &rest) != 2 || w < 64 || h < 64 || w > 3840 || h > 2160) runtime_fail("TOTK_RENDER_RES must be <width>x<height>");
+    int index = -1;
+    for (int i = 0; i < 6; i++) if (game_sizes[i][0] == w && game_sizes[i][1] == h) index = i;
+    if (index < 0) { float v[2] = {(float)w, (float)h}; memcpy(m->base + SIZE_TABLE, v, sizeof v); index = 0; }
+    *(volatile uint32_t *)(void *)(m->base + data_off + RENDER_SLOT) = (uint32_t)index + 1;
+    fprintf(stderr, "[acnh] render resolution: scene %ux%u (size index %d), stub +%#llx\n", w, h, index, (unsigned long long)s);
+}
+
+/* Output size (Mac: key 3 and the Settings window's Picture, while the game runs). The output index is the game's own
+   switch between docked 1080p and handheld 720p, so it works for every size of the table up to the memory made for it.
+   The host writes the slot and posts "operation mode changed" (oe message 30; the mode stays docked): the game runs
+   main+0x1527acc again and lays out its canvas, UI and crop at the new size (checked 1080p -> 720p -> 900p -> 1080p).
+   Sizes above 1080p need room made at start, once, for the largest one (OUTPUT_W x OUTPUT_H):
+     main+0x5cdcc0  mov x8, #0x780; movk x8, #0x438, lsl #32   the framework's display size: the swapchain (3 textures,
+                                                               +18.5 MiB at 1440p, from root heap "cSys")
+     main+0x404c638 0xa8df000                                  cSys, the first of ACNH's six root heaps (cSys, cGfx, cRes,
+                                                               cSnd, cScene, then cOthers = the rest); 10 MiB were left: +48 MiB
+     main+0x5c9b90  mov w10, #0x4c00000                        gsys's two render-target pools (76 MiB each, from root heap
+                                                               "cGfx"): 128 MiB, else a 1440p target gets no memory (null
+                                                               texture, main+0x3847ca0)
+     main+0x404c640 0x9900000                                  cGfx: + what the two pools grow by
+   The application pool grows by what this takes (runtime_output_res_extra_bytes, services.c), so cOthers, which holds
+   AppStaticHeap (2016 MiB), keeps its size. 4K ran out of render-target memory even with 448 MiB pools: 1440p is the top.
+   ACNH_OUTPUT_RES=0 keeps the game's own 1080p (Picture: 1080p / MetalFX). Not on iOS and not in the iOS export. */
+#define OUTPUT_W 2560u
+#define OUTPUT_H 1440u
+#define CSYS_EXTRA (48ull << 20)
+#define RT_POOL (128u << 20)
+#define RT_POOL_GAME (76u << 20)
+#define CGFX_EXTRA (2ull * (RT_POOL - RT_POOL_GAME))
+static int output_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("ACNH_OUTPUT_RES"); v = !TARGET_OS_IPHONE && !getenv("TOTK_EXPORT_IOS") && !(e && !strcmp(e, "0")); }
+    return v;
+}
+int runtime_output_res(unsigned *w, unsigned *h) { if (!output_enabled()) return 0; *w = OUTPUT_W; *h = OUTPUT_H; return 1; }
+uint64_t runtime_output_res_extra_bytes(void) { return output_enabled() ? CSYS_EXTRA + CGFX_EXTRA : 0; }
+#if !TARGET_OS_IPHONE
+static void output_install(Module *m, uint64_t s, uint64_t data_off) {
+    if (!output_enabled()) { fprintf(stderr, "[acnh] output: the game's own 1920x1080 (ACNH_OUTPUT_RES=0 or iOS export)\n"); return; }
+    uint32_t w[4]; uint64_t roots[2];
+    memcpy(w, m->base + OUTPUT_SITE, 4); memcpy(w + 1, m->base + 0x5cdcc0, 8); memcpy(w + 3, m->base + 0x5c9b90, 4); memcpy(roots, m->base + 0x404c638, 16);
+    if (w[0] != 0x1a9f1529u || w[1] != 0xd280f008u || w[2] != 0xf2c08708u || w[3] != 0x52a0980au || roots[0] != 0xa8df000 || roots[1] != 0x9900000)
+        runtime_fail("output patch: main does not match 3.0.0");
+    uint32_t stub[6] = {0x1a9f1529u, adrp_x12(s + 4, data_off), 0xb9400000u | ((OUTPUT_SLOT / 4) << 10) | (12 << 5) | 12,
+                        0x34000000u | (2 << 5) | 12, 0x51000589u /* sub w9, w12, #1 */, aspect_branch(s + 20, OUTPUT_SITE + 4)};
+    for (unsigned b = 0; b < sizeof stub; b++) if (m->base[s + b]) runtime_fail("output patch: text padding in use");
+    memcpy(m->base + s, stub, sizeof stub);
+    uint32_t jump = aspect_branch(OUTPUT_SITE, s); memcpy(m->base + OUTPUT_SITE, &jump, 4);
+    uint32_t swap[2] = {0xd2800008u | (OUTPUT_W << 5), 0xf2c00008u | (OUTPUT_H << 5)}; memcpy(m->base + 0x5cdcc0, swap, 8);
+    uint32_t pool = 0x52a0000au | ((RT_POOL >> 16) << 5); memcpy(m->base + 0x5c9b90, &pool, 4);
+    roots[0] += CSYS_EXTRA; roots[1] += CGFX_EXTRA; memcpy(m->base + 0x404c638, roots, 16);
+    output_slot = (_Atomic(uint32_t) *)(void *)(m->base + data_off + OUTPUT_SLOT);
+    fprintf(stderr, "[acnh] output: swapchain %ux%u, starts at the game's 1920x1080; key 3 / Picture switch sizes up to it; stub +%#llx\n",
+            OUTPUT_W, OUTPUT_H, (unsigned long long)s);
+}
+#endif
+
 void runtime_game_patches(Module *m) {
     /* Frame pacing: ACNH advances its simulation once per frame and asks for present interval 2, i.e. every second
        60 Hz vblank = 30 fps on the console. The graphics layer otherwise paces by the Mac display's refresh rate
@@ -211,30 +312,41 @@ void runtime_game_patches(Module *m) {
     speedfix_apply(m);   /* before the aspect stubs, which check their own words */
     /* Stubs go to main's text padding: 432 zero bytes between text_end and read-only data (ro_off). */
     aspect_install_reads(m, (m->text_end + 15) & ~15ULL, (m->file_size + 0x3fff) & ~0x3fffULL);
+    render_install(m, ASPECT_STUBS_END(m), (m->file_size + 0x3fff) & ~0x3fffULL);
 #if !TARGET_OS_IPHONE
-    site_probe(m, ASPECT_STUBS_END(m), (m->file_size + 0x3fff) & ~0x3fffULL);
+    output_install(m, ASPECT_STUBS_END(m) + 32, (m->file_size + 0x3fff) & ~0x3fffULL);
+    site_probe(m, ASPECT_STUBS_END(m) + SIZE_STUBS, (m->file_size + 0x3fff) & ~0x3fffULL);
 #endif
 }
 
-/* TOTK's frame-step and output-resolution patches have no ACNH counterpart: report "unavailable". */
+/* TOTK's frame-step patch has no ACNH counterpart. */
 void runtime_frame_step_pin(double ms) { (void)ms; }
 void runtime_frame_step_update(uint64_t now_ns) { (void)now_ns; }
-int runtime_output_res(unsigned *w, unsigned *h) { (void)w; (void)h; return 0; }
-uint64_t runtime_output_res_extra_bytes(void) { return 0; }
-/* Picture modes (key 3, the Settings window's Picture): ACNH's output stays 1920x1080 (no output-size patch yet), shown
-   either as it is (the present scales it to the window) or upscaled to the window by MetalFX (the renderer's output stage,
-   which runs only with MetalFX upscaling on, hence both flags). */
+/* Picture modes (key 3, the Settings window's Picture), in TOTK's order so that a saved choice means the same: a size of
+   the game's table (output_install), shown as it is (the present scales it to the window) or, at 1080p, upscaled to the
+   window by MetalFX (the renderer's output stage, which runs only with MetalFX upscaling on, hence both flags). Without the
+   output patch only the first two. */
 extern void dm_gfx_set_flag(const char *name, int value);
 extern int mfxup_output_enabled(void);
-static const char *const output_modes[] = {"1080p", "MetalFX"};
-int runtime_output_mode_count(void) { return 2; }
-const char *runtime_output_mode_name(int k) { return k >= 0 && k < 2 ? output_modes[k] : ""; }
-int runtime_output_mode_get(void) { return mfxup_output_enabled() ? 1 : 0; }
+typedef struct { int index, mfx; const char *name; } OutputMode;   /* index: the game's size table */
+static const OutputMode output_modes[] = {{3, 0, "1080p"}, {3, 1, "MetalFX"}, {4, 0, "1440p"}, {1, 0, "720p"}, {2, 0, "900p"}};
+#define OUTPUT_NMODE (int)(sizeof output_modes / sizeof *output_modes)
+static int output_index(void) { uint32_t v = output_slot ? atomic_load(output_slot) : 0; return v ? (int)v - 1 : 3; }
+int runtime_output_mode_count(void) { return output_enabled() ? OUTPUT_NMODE : 2; }   /* known before the patch is in */
+const char *runtime_output_mode_name(int k) { return k >= 0 && k < runtime_output_mode_count() ? output_modes[k].name : ""; }
+int runtime_output_mode_get(void) {
+    int index = output_index(), mfx = mfxup_output_enabled() != 0;
+    for (int k = 0; k < runtime_output_mode_count(); k++) if (output_modes[k].index == index && output_modes[k].mfx == mfx) return k;
+    for (int k = 0; k < runtime_output_mode_count(); k++) if (output_modes[k].index == index) return k;
+    return -1;
+}
 int runtime_output_mode_set(int k) {
-    if (k < 0 || k > 1) return 0;
-    dm_gfx_set_flag("mfx_output", k); dm_gfx_set_flag("mfx_upscale", k);
-    fprintf(stderr, "[acnh] picture: %s\n", output_modes[k]);
+    if (k < 0 || k >= runtime_output_mode_count()) return 0;
+    const OutputMode *o = &output_modes[k];
+    if (output_slot && output_index() != o->index) { atomic_store(output_slot, (uint32_t)o->index + 1); runtime_oe_push_message(30); }
+    dm_gfx_set_flag("mfx_output", o->mfx); dm_gfx_set_flag("mfx_upscale", o->mfx);
+    fprintf(stderr, "[acnh] picture: %s\n", o->name);
     return 1;
 }
-int runtime_output_mode_cycle(void) { return runtime_output_mode_set((runtime_output_mode_get() + 1) % 2); }
-uint64_t runtime_output_size_current(void) { return 1920ull | (1080ull << 32); }
+int runtime_output_mode_cycle(void) { return runtime_output_mode_set((runtime_output_mode_get() + 1) % runtime_output_mode_count()); }
+uint64_t runtime_output_size_current(void) { int i = output_index(); return game_sizes[i][0] | ((uint64_t)game_sizes[i][1] << 32); }
