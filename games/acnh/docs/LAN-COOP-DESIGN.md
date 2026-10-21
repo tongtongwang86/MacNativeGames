@@ -360,3 +360,15 @@ J1 belongs to stage L2 (it replaces the manual `ACNH_LDN_PEER`); J2 is its own s
 4. **Memory with two copies** (D1): measured before the two-slot mode is enabled.
 5. **A 3.x update** moves every address: all patches check their original word, so the runtime fails loudly instead
    of corrupting code (plan 5.1).
+
+## 8. Progress (2026-10-21)
+
+| Piece | State |
+|---|---|
+| `runtime/ldn_host.c` (25 `nn::ldn` functions by name), `runtime/socket_host.c` (`nn::socket` by name: Linux errno numbers, virtual 10.114.0.x addresses, 6-byte datagram header), `runtime/coop_lan.c` (discovery on UDP 11452 + offset over every interface's broadcast, loopback and typed addresses; TCP join / node table), `nifm.c` local network mode, `friend:u` 10700-10703, `csrng` | Written. `tests/coop_loopback.c` passes: discovery, join as node 1, ping / broadcast pong, leave. |
+| **L1 in the game** (one copy, test profile) | **Passed**: Orville → "I want visitors" → "Fling 'em open" creates the network (`[coop] Hosting iLand Pro: 1 of 8 players, port 11452`). The "I wanna fly" path scans (0 islands when nobody hosts). Found and fixed on the way: `friend:u` 10700, `csrng`, the state-change event the game destroys at `nn::ldn::Finalize`. |
+| Two copies (`TOTK_GAME_SLOT_PAIR=a/b`, `ACNH_COOP_PORT_OFFSET=100`) | Slot rules tested (a third game waits, a lone `b` is refused). Both copies ran together (~2 GB resident each), but the session test is **not done yet**: the second window was closed, and the first then stopped in the renderer ("encode stage did not drain in 2 s", two games on one GPU), not in network code. |
+| Island browser UI (section 7) | Back end only (`coop_browser_*`, `<profile>/coop-islands.txt`, `ACNH_COOP_PEERS`); the Settings section is not written. |
+
+Test setup: profiles are copies of the island in the scratch folder with `SAVESYNC=0`; the user's own save and app are
+not touched (the test binary is `build/acnh-coop`).

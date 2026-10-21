@@ -76,3 +76,28 @@ static void nifm_root(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     else ipc_unimplemented(s, rq);
 }
 __attribute__((constructor)) static void register_nifm(void) { runtime_ipc_register("nifm:u", nifm_root, NULL, NULL); }
+
+/* ---------- nn::nifm by name: local network mode for Local Play (coop.h) ----------
+   The game asks for a local network with SetLocalNetworkMode(true) before it opens the airport gate or searches for
+   islands. In that mode the request is accepted at once and the network is "available"; outside it every call goes to
+   the SDK's own client and so to nifm:u above (no internet). */
+static int local_mode, local_available;
+static void *original(const char *name) { void *p = runtime_symbol(name); if (!p) runtime_fail("nifm original missing"); return p; }
+static void set_local_network_mode(_Bool on) {
+    ((void (*)(_Bool))original("_ZN2nn4nifm19SetLocalNetworkModeEb"))(on);
+    if (on != local_mode) fprintf(stderr, "[nifm] local network mode %s\n", on ? "on" : "off");
+    local_mode = on; if (!on) local_available = 0;
+}
+static void submit_request(void) { if (local_mode) local_available = 1; else ((void (*)(void))original("_ZN2nn4nifm20SubmitNetworkRequestEv"))(); }
+static void submit_request_and_wait(void) { if (local_mode) local_available = 1; else ((void (*)(void))original("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv"))(); }
+static void cancel_request(void) { if (local_mode) local_available = 0; else ((void (*)(void))original("_ZN2nn4nifm20CancelNetworkRequestEv"))(); }
+static _Bool network_available(void) { return local_mode ? local_available : ((_Bool (*)(void))original("_ZN2nn4nifm18IsNetworkAvailableEv"))(); }
+static _Bool request_on_hold(void) { return local_mode ? 0 : ((_Bool (*)(void))original("_ZN2nn4nifm22IsNetworkRequestOnHoldEv"))(); }
+void *runtime_nifm_override(const char *name) {
+    static const struct { const char *name; void *fn; } map[] = {
+        {"_ZN2nn4nifm19SetLocalNetworkModeEb", set_local_network_mode}, {"_ZN2nn4nifm20SubmitNetworkRequestEv", submit_request},
+        {"_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", submit_request_and_wait}, {"_ZN2nn4nifm20CancelNetworkRequestEv", cancel_request},
+        {"_ZN2nn4nifm18IsNetworkAvailableEv", network_available}, {"_ZN2nn4nifm22IsNetworkRequestOnHoldEv", request_on_hold}};
+    for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (!strcmp(name, map[i].name)) return map[i].fn;
+    return NULL;
+}

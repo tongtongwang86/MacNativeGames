@@ -9,6 +9,7 @@
 #include "ipc.h"
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define RESULT(module, description) ((uint32_t)(module) | ((uint32_t)(description) << 9))
@@ -73,6 +74,15 @@ static void friend_service(IpcSession *s, const IpcRequest *rq, IpcResponse *rs)
     case 0: rs->copy[rs->ncopy++] = event_readable(false); return;   /* GetCompletionEvent */
     case 10100: case 10101: case 10102: case 10400: case 20102:      /* friend / blocked lists: empty */
         out_zero(rs, 4); return;
+    case 10700: case 10701: {   /* GetPlayHistoryRegistrationKey(...WithNetworkServiceAccountId): local play swaps these */
+        if (!rq->nc || rq->c[0].size < 0x40) runtime_fail("friend GetPlayHistoryRegistrationKey buffer");
+        static uint8_t key[0x40];
+        if (!key[0]) { key[0] = 1; key[1] = 1; arc4random_buf(key + 8, sizeof key - 8); }   /* one key per run */
+        memcpy(ipc_guest(rq->c[0].addr, sizeof key), key, sizeof key);
+        rs->xout[rs->nxout++] = (IpcBuffer){rq->c[0].addr, sizeof key, 0};
+        return;
+    }
+    case 10702: case 10703:   /* AddPlayHistory: the islands met in local play are not kept */
     case 1: case 10110: case 10120: case 10121: case 10200: case 10211: case 10600: case 10601: case 10610:
     case 20401: case 20701: case 20800: case 20801: case 20900: case 30100: case 30101: case 30110:
         return;   /* Cancel, presence, play sessions, play history, receipts: accepted */
@@ -107,7 +117,18 @@ static void fsp_root(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     }
 }
 
+/* ---------- csrng: random bytes (pia's session keys for local play) ---------- */
+static void csrng_root(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
+    if (rq->cmd != 0) { ipc_unimplemented(s, rq); return; }   /* GetRandomBytes -> B buffer */
+    for (unsigned i = 0; i < rq->nb; i++) if (rq->b[i].size) arc4random_buf(ipc_guest(rq->b[i].addr, rq->b[i].size), rq->b[i].size);
+    for (unsigned i = 0; i < rq->nc; i++) if (rq->c[i].size) {
+        arc4random_buf(ipc_guest(rq->c[i].addr, rq->c[i].size), rq->c[i].size);
+        rs->xout[rs->nxout++] = (IpcBuffer){rq->c[i].addr, rq->c[i].size, 0};
+    }
+}
+
 __attribute__((constructor)) static void register_offline(void) {
+    runtime_ipc_register("csrng", csrng_root, NULL, NULL);
     runtime_ipc_register("bcat:u", bcat_root, NULL, NULL);
     runtime_ipc_register("friend:u", friend_root, NULL, NULL);
     runtime_ipc_register("fsp-srv", fsp_root, NULL, NULL);

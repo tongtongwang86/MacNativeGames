@@ -599,6 +599,11 @@ void hle_bind_system_event(void *ev, int autoclear) {      // 必须在客体线
     g_se[g_nse].ev = ev; g_se[g_nse++].wh = wh;
     pthread_mutex_unlock(&g_se_lock);
 }
+void hle_unbind_system_event(void *ev) {   // the game destroys the event (nn::ldn::Finalize): forget its write handle | 游戏销毁了事件：忘掉写端
+    pthread_mutex_lock(&g_se_lock);
+    for (int i = 0; i < g_nse; i++) if (g_se[i].ev == ev) { g_se[i] = g_se[--g_nse]; break; }
+    pthread_mutex_unlock(&g_se_lock);
+}
 void hle_signal_system_event(void *ev) {   // 未绑定的按手动清除即时绑定（只能在客体线程上发生） | An unbound one is bound on the spot as manual-clear (can only happen on a guest thread)
     pthread_mutex_lock(&g_se_lock); uint32_t wh = se_find(ev); pthread_mutex_unlock(&g_se_lock);
     if (!wh) { hle_bind_system_event(ev, 0); pthread_mutex_lock(&g_se_lock); wh = se_find(ev); pthread_mutex_unlock(&g_se_lock); }

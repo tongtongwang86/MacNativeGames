@@ -16,6 +16,10 @@
      user-request       the user's game while it waits for the slot
      preempted/<token>  written just before a holder is stopped for the user
      history.log        one line per acquire / start / preempt / exit
+   Local-play tests (docs/LAN-COOP-DESIGN.md, the user's decision D1 of 2026-10-21) may run exactly two games:
+   TOTK_GAME_SLOT_PAIR=a takes the slot as usual and marks it "pair=1"; TOTK_GAME_SLOT_PAIR=b then runs beside it
+   (only while that game lives) under lock-pair, so a third game still waits. A user's game stopping the pair's first
+   game also stops the second (pair-holder).
    The slot directory is TOTK_GAME_SLOT_DIR, else analysis/game-slot next to this binary's build/ directory; every
    worktree links analysis/ to the main checkout (scripts/dev/new_worktree.sh), so all checkouts share one slot. */
 #include <TargetConditionals.h>
@@ -42,7 +46,7 @@ void runtime_game_slot_acquire(const char *mode) { (void)mode; }
 
 static char slot_dir[PATH_MAX], lock_path[PATH_MAX], my_queue[PATH_MAX];
 static char owner[33], purpose[200], token[48], mode_name[64];
-static int lock_fd = -1, acquired;
+static int lock_fd = -1, acquired, pair_role;   /* 0, 'a' or 'b' (TOTK_GAME_SLOT_PAIR) */
 static time_t acquired_at;
 
 _Noreturn static void slot_fail(const char *what, const char *path) {
@@ -195,6 +199,8 @@ static void preempt_holder(void) {
         char extra[300]; snprintf(extra, sizeof extra, "target_owner=%s target_pid=%d target_purpose=%s", who, gp, what);
         history("preempt", extra);
         if (live) kill(gp, SIGTERM);
+        char pp[PATH_MAX]; path_in(pp, "pair-holder"); pid_t pair = (pid_t)kv_num(pp, "game_pid");
+        if (kv_num(p, "pair") && pid_same(pair, (uint64_t)kv_num(pp, "game_start")) && pid_is_game(pair)) kill(pair, SIGTERM);
         fprintf(stderr, "[game-slot] 用户要玩：停止 %s 的游戏（%s，pid %d），它的测试稍后会自动重跑\n", who, what, gp);
         snprintf(done_token, sizeof done_token, "%s", tok); sent_at = time(NULL); killed = 0;
     } else if (live && !killed && time(NULL) - sent_at > 15) {
@@ -241,10 +247,10 @@ static void holder_write(void) {
     if (fcntl(2, F_GETPATH, log) == -1) log[0] = 0;
     const char *w = getenv("TOTK_SLOT_WRAPPER_PID"), *ex = getenv("TOTK_SLOT_EXPECT_S"), *si = getenv("TOTK_SLOT_SINCE");
     snprintf(text, sizeof text,
-             "owner=%s\npurpose=%s\ntoken=%s\ngame_pid=%d\ngame_start=%llu\nwrapper_pid=%s\nsince=%lld\nexpect_s=%s\nmode=%s\nexe=%s\ncwd=%s\nlog=%s\n",
+             "owner=%s\npurpose=%s\ntoken=%s\ngame_pid=%d\ngame_start=%llu\nwrapper_pid=%s\nsince=%lld\nexpect_s=%s\nmode=%s\nexe=%s\ncwd=%s\nlog=%s\npair=%d\n",
              owner, purpose, token, getpid(), (unsigned long long)pid_start(getpid()), w ? w : "", si ? atoll(si) : (long long)acquired_at,
-             ex ? ex : "0", mode_name, exe, cwd, log);
-    char p[PATH_MAX]; path_in(p, "holder");
+             ex ? ex : "0", mode_name, exe, cwd, log, pair_role == 'a');
+    char p[PATH_MAX]; path_in(p, pair_role == 'b' ? "pair-holder" : "holder");
     write_atomic(p, text);
 }
 
@@ -273,6 +279,31 @@ void runtime_game_slot_acquire(const char *mode) {
     clean_copy(purpose, sizeof purpose, pu && *pu ? pu : mode);
     slot_dir_init();
     atexit(at_exit);
+
+    const char *pe = getenv("TOTK_GAME_SLOT_PAIR");
+    if (pe && *pe) {
+        if (strcmp(pe, "a") && strcmp(pe, "b")) runtime_fail("TOTK_GAME_SLOT_PAIR is a or b");
+        pair_role = pe[0];
+    }
+    if (pair_role == 'b') {   /* beside the pair's first game, never instead of the slot */
+        char hp[PATH_MAX], lp[PATH_MAX]; path_in(hp, "holder"); path_in(lp, "lock-pair");
+        int main_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (main_fd < 0) slot_fail("cannot open", lock_path);
+        int free_slot = !flock(main_fd, LOCK_EX | LOCK_NB); close(main_fd);
+        pid_t gp = (pid_t)kv_num(hp, "game_pid");
+        if (free_slot || !kv_num(hp, "pair") || !pid_same(gp, (uint64_t)kv_num(hp, "game_start")))
+            runtime_fail("TOTK_GAME_SLOT_PAIR=b needs a running game started with TOTK_GAME_SLOT_PAIR=a");
+        lock_fd = open(lp, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (lock_fd < 0) slot_fail("cannot open", lp);
+        if (flock(lock_fd, LOCK_EX | LOCK_NB)) runtime_fail("the pair's second game is already running");
+        struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+        snprintf(token, sizeof token, "%llx-%d", (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec, getpid());
+        acquired = 1; acquired_at = time(NULL);
+        holder_write(); history("acquire", "pair=b");
+        fprintf(stderr, "[game-slot] second game of a local-play pair (beside pid %d)\n", gp);
+        dry_run();
+        return;
+    }
 
     const char *fd_env = getenv("TOTK_GAME_SLOT_FD");
     if (fd_env) {   /* a wrapper took the slot for us: check that this descriptor really holds the lock */
