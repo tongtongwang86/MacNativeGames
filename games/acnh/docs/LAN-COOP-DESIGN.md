@@ -283,6 +283,74 @@ resident. Large: it changes how the game identifies a visitor at arrival, and ne
 | D5 (new) | **Who hosts** | (a) always the Mac that owns the island save (SaveSync's copy), (b) any device | **(a)**. Only the host's save is the island; the iPad can host later by the same rule, but never two devices with the same island at once (SaveSync would see two writers). |
 | D6 (new) | **Scope of "everything"** | (a) all of L4–L7, (b) stop after L6 (items + terraforming + building moves) | **(b)** as the first target; L7 items one at a time by what the user misses most. |
 
+### 4.1 What the user decided (2026-10-21)
+
+- **D1: yes**, two games at once on this Mac for testing (a two-slot test mode).
+- **D2, D3:** testing may use whatever saves are convenient (test profiles only); **no ldn_mitm / Ryujinx
+  compatibility**, so the discovery protocol is the port's own.
+- **D4, D5, D6:** as recommended (visitors first; the save owner hosts; stop after L6 first).
+- **New requirement: it must work across a LAN *and* over a virtual network such as ZeroTier**, not only on one
+  subnet (section 6).
+- **New requirement: an island browser** in the port's own UI, to discover and join hosts without walking to the
+  airport every time (section 7).
+
+---
+
+## 6. Networks: LAN, ZeroTier and the like
+
+The game only ever sees the virtual LDN subnet 10.114.0.0/24 handed out by `ldn_host.c` (plan 1.3). Real addresses
+live in the runtime only, so any IP network between the devices works as long as the runtime can reach the peers:
+
+| Network | Discovery | Game traffic |
+|---|---|---|
+| Same LAN / Wi-Fi | UDP broadcast on every interface's broadcast address, plus Bonjour (`_acnh-coop._udp`) | unicast UDP |
+| **ZeroTier** (virtual Ethernet: broadcast and mDNS usually pass) | same as LAN on the `zt*` interface; manual address as backup | unicast UDP over the ZeroTier address |
+| Tailscale / WireGuard / routed networks (no broadcast) | **manual address** (`host:port`), remembered in the browser's list | unicast UDP |
+| Two copies on one Mac | loopback, each copy with its own port offset | unicast UDP on 127.0.0.1 |
+
+Rules that make this work:
+
+- **No broadcast in the data path.** A send to the virtual broadcast address 10.114.0.255 becomes one unicast per
+  member (plan 1.3), so networks without broadcast carry the session.
+- **The host's control port is the only fixed one** (TCP and UDP **11452 + offset**); members report their real
+  address and port offset when they join, and the host sends the node table to everyone.
+- **Addresses the peers see.** A member announces the address it reached the host from (its socket's local address),
+  so a ZeroTier member is reached on its ZeroTier address, not on a LAN address the host cannot route to.
+- **MTU.** ZeroTier's MTU is 2800 and Tailscale's 1280; pia's packets are below 1400 bytes [expected], so at worst
+  they are fragmented by IP on Tailscale. Nothing to do unless measurements show loss.
+- **Security.** The session is for people the user trusts on their own network. Joining needs the host's island in
+  the list and, optionally, a passphrase set in the browser (sent as a hash in the join request). Nothing listens
+  unless the user hosts or browses.
+
+## 7. The island browser: join without the airport
+
+**What the user sees.** A *Local play* section in the Settings window (Mac) / sheet (iPad):
+
+- **Host:** "Open my island to local play" (a switch), with the island name and the address others can type.
+- **Islands found:** live list (island name, host player, players n/8, address, network: LAN / ZeroTier / manual),
+  a **Join** button per row, and **Add by address…** for networks without discovery. The list is kept between runs.
+- **Status:** connected players, ping, "waiting for the game".
+
+**How it drives the game.** Two levels, the second built on the first:
+
+1. **J1, browser + quick airport.** The browser does discovery and keeps the chosen host. When the player then talks
+   to Dodo and picks local play, the game's own scan (`nn::ldn::Scan`) returns **only the chosen island**, so the
+   game's list has one entry and is confirmed with one button. Hosting from the browser makes the next "open the
+   gate" use those settings. This needs no game patches and works on iOS at once.
+2. **J2, no airport at all.** The runtime starts the game's own session flow from anywhere on the player's island:
+   the EventFlow actions `EventFlowActionNetCreateSessionVillage` (host) and `EventFlowActionNetJoinSessionVillage`
+   (visit) are the game's entry points [confirmed names, plan 3.1]. A small custom EventFlow file in the romfs overlay
+   (the runtime already serves romfs) calls them with the game's own departure / arrival demo; the runtime starts it at
+   a safe point (no menu open, player idle, outdoors), the way a phone app starts its flow. The game then runs the
+   normal join, including the save commit (section 1.2), so nothing about saving changes.
+   - **Verify:** from the browser, a visitor on their own island presses Join and lands on the host island with the
+     game's arrival scene; leaving with "−" works; both saves are right after a restart.
+   - **Stop / switch if:** starting the flow outside the airport scene breaks the game's scene state (the departure
+     demo may expect the airport). Fallback: the browser warps the player to the airport and answers Dodo's
+     questions itself (the quick airport of J1, made automatic).
+
+J1 belongs to stage L2 (it replaces the manual `ACNH_LDN_PEER`); J2 is its own stage between L2 and L3.
+
 ## 5. Risks in one place
 
 1. **Pia join needs something we cannot provide** (L1/L2): the only blocker for every option except (B). Known early
