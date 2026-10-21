@@ -98,7 +98,15 @@ folders (`extracted/aoc`) go into the app as well.
 The same app as `games/totk/ios` (UIScene app, `runtime/frontend_ios.m`, touch controls). iOS can neither patch code nor
 translate shaders at run time: the Mac binary exports its patched code (`export-ios`), and the shaders the Mac has
 translated so far (`build/shader-cache`) become the app's seed, so play on the Mac where you want to play on the iPad
-first, or shaders the Mac has not seen draw nothing on the device. The island is in the app's Documents
+first, or shaders the Mac has not seen draw nothing on the device (a dig hole that never opens, no fishing splash, wood
+drawn black). The device keeps a request for every shader it missed; with the iPad connected,
+
+```bash
+python3 ios/tools/fill_shaders.py --device <udid>   # pull its requests, translate them here, push them back
+```
+
+sends them back (the game merges them on its next start), and they are in the Mac cache for the next `build_ipa.py`.
+The island is in the app's Documents
 (`save/save/device`, Files app). SaveSync keeps it in step with the Mac only when the signing profile has the iCloud
 entitlements (`libs/savesync/ARCHITECTURE.md`); the app carries the increased-memory-limit entitlement.
 
