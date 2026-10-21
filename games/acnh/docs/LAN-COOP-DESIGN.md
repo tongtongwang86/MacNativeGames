@@ -413,3 +413,12 @@ not touched (the test binary is `build/acnh-coop`).
 - With that, pia talks both ways (the host sends the station unicast packets), the host shows the arrival board
   ("Panthea, arriving from pantheon"), the island streams over (7,000+ packets) and **the visitor lands on iLand Pro**.
   Both copies show the host island's time.
+
+### 8.4 Full session (2026-10-21): **stage L2 passed** on one Mac
+
+The user played both windows: Panthea (pantheon) dropped an item on iLand Pro, the host picked it up, Panthea left
+through the airport. No error on either side. The arrival save (14:15:38) and the departure saves (host 14:21:27,
+visitor 14:21:56 after landing home) were written by both copies; afterwards all four files decrypt, every Murmur3
+region is valid (19 in `main.dat`, 2 in `personal.dat`), and each island records the other (iLand Pro's `main.dat`
+mentions pantheon, pantheon's mentions iLand Pro). So the game's two-phase save commit (section 1.2) runs over the
+port's layer. Not yet checked: which pocket holds the item (no 3.0 pocket offsets yet), Mac + iPad, ZeroTier.
