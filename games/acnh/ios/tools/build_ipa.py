@@ -122,7 +122,7 @@ def main():
     env.update(ACNH_APP_NAME=a.app_name, ACNH_BUNDLE_ID=a.bundle_id)
     frameworks = ' '.join('-framework ' + x for x in ['UIKit', 'Metal', 'MetalFX', 'Foundation', 'QuartzCore', 'ImageIO', 'CoreGraphics',
                                                       'CoreText', 'UniformTypeIdentifiers', 'CoreFoundation', 'AudioToolbox',
-                                                      'GameController', 'CoreHaptics', 'AVFAudio', 'Security'])
+                                                      'GameController', 'CoreHaptics', 'CoreMotion', 'AVFAudio', 'Security'])
     (gen / 'acnh.xcconfig').write_text(f'OTHER_LDFLAGS = $(inherited) {frameworks} Gen/deps/lib/libopus.a Gen/deps/lib/libvpx.a {flags}\n')
     clone(ios / 'Sources/Info.plist', gen / 'Info.plist')   # xcodegen fills in the copy, the source stays as it is
     run(['xcodegen', 'generate', '--spec', 'project.yml'], ios, logs / 'xcodegen.log', env)
