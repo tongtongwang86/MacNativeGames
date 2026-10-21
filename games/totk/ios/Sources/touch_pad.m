@@ -2,6 +2,7 @@
 #import <GameController/GameController.h>
 #include <math.h>
 #include "runtime.h"
+void gamesettings_show(void);   /* vendor/gamesettings: the Settings sheet */
 
 /* Layout inside the safe area (clear of the iPhone's notch, rounded corners and home indicator), like a Switch
    controller: ZL/L and R/ZR along the top with − and + between them, and two columns mirroring each other: on the left
@@ -133,6 +134,10 @@ static void stick_axes(CGPoint from, CGPoint to, CGFloat radius, int32_t *x, int
     runtime_touch_pad_set(&s); [self setNeedsDisplay];
 }
 
+/* The Settings gear, top centre between − and + (vendor/gamesettings opens the sheet). */
+- (CGPoint)gear { CGRect a = self.area; return CGPointMake(CGRectGetMidX(a), CGRectGetMinY(a) + a.size.height * .12); }
+- (BOOL)gearAt:(CGPoint)p { CGPoint g = self.gear; return hypot(p.x - g.x, p.y - g.y) < kButtonSize * .6; }
+
 /* Whether a touch starting at p is for the game's touch screen (see the top). */
 - (BOOL)isScreenTouch:(CGPoint)p {
     if (!runtime_touch_screen_used()) return NO;
@@ -151,6 +156,7 @@ static void stick_axes(CGPoint from, CGPoint to, CGFloat radius, int32_t *x, int
     (void)event; BOOL controls = NO;
     for (UITouch *t in touches) {
         CGPoint p = [t locationInView:self];
+        if ([self gearAt:p]) { gamesettings_show(); continue; }
         if ([self isScreenTouch:p]) { [screenTouches addObject:t]; [self sendScreenTouch:t phase:0]; continue; }
         controls = YES; NSValue *v = [NSValue valueWithCGPoint:p]; [points setObject:v forKey:t];
         if ([self buttonAt:p]) continue;
@@ -185,8 +191,17 @@ static void draw_stick(CGContextRef c, CGPoint o, CGPoint p, CGFloat r) {
     CGContextFillEllipseInRect(c, knob); CGContextStrokeEllipseInRect(c, knob);
 }
 
+/* The Settings gear stays on screen while the controls are hidden (a controller connected): there every touch goes to
+   the game's touch screen, so the gear is the way to Settings without a keyboard. */
+static void draw_gear(CGContextRef c, CGPoint g, UIColor *ink) {
+    CGFloat gs = kButtonSize * .8; CGRect gb = CGRectMake(g.x - gs / 2, g.y - gs / 2, gs, gs);
+    CGContextSetFillColorWithColor(c, ink.CGColor); CGContextSetStrokeColorWithColor(c, ink.CGColor); CGContextSetLineWidth(c, 2);
+    CGContextFillEllipseInRect(c, gb); CGContextStrokeEllipseInRect(c, gb);
+    UIImage *gear = [[UIImage systemImageNamed:@"gearshape.fill"] imageWithTintColor:ink renderingMode:UIImageRenderingModeAlwaysOriginal];
+    [gear drawInRect:CGRectInset(gb, gs * .22, gs * .22)];
+}
 - (void)drawRect:(CGRect)rect {
-    if (concealed) return;
+    if (concealed) { draw_gear(UIGraphicsGetCurrentContext(), self.gear, [UIColor colorWithWhite:1 alpha:.32]); return; }
     (void)rect; CGContextRef c = UIGraphicsGetCurrentContext(); UIColor *ink = [UIColor colorWithWhite:1 alpha:.32];
     // One fill for every button and knob, set before each fill: drawing a label leaves the context's fill colour at the
     // label's, which once made every button after A (the first drawn) brighter than A and the stick knobs.
@@ -204,5 +219,6 @@ static void draw_stick(CGContextRef c, CGPoint o, CGPoint p, CGFloat r) {
         CGContextSetFillColorWithColor(c, fill); CGContextFillEllipseInRect(c, box); CGContextStrokeEllipseInRect(c, box);
         CGSize z = [b[i].label sizeWithAttributes:attrs]; [b[i].label drawAtPoint:CGPointMake(b[i].at.x - z.width / 2, b[i].at.y - z.height / 2) withAttributes:attrs];
     }
+    draw_gear(c, self.gear, ink);
 }
 @end

@@ -75,6 +75,9 @@ void runtime_aspect_window(double w, double h) {
     aspect_apply();
 }
 
+/* Whether key 4's shape is on (the Settings window); 0 where the patch is not available. */
+int runtime_aspect_on(void) { return g_aspect_slot && atomic_load(&g_aspect_on); }
+
 /* Key 4 (runtime/input.c). Returns 0 where it is not available (other game versions). */
 int runtime_aspect_toggle(void) {
     if (!g_aspect_slot) return 0;

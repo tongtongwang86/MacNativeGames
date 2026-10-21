@@ -108,8 +108,27 @@ is backed up). An empty save folder is never sent.
 | Finding the folder | the app's container (or `container_id`) | `~/Library/Mobile Documents/iCloud~<id>/Documents/SaveSync/<title>`; set `container_id` or `SAVESYNC_CONTAINER` to create it from the Mac, otherwise the first iOS run creates it |
 | Permission | none | macOS may ask once to let the game read iCloud Drive files |
 
-Several games can share one container (one entitlement for all apps; each game has its own `SaveSync/<title id>`) or
-each app can have its own: the Mac finds the title in whichever container holds it.
+**The container must be public.** A private container only syncs to a Mac while an app that owns it is installed
+there; the Mac game has none, and macOS stops syncing it (`brctl status <container>` then reports
+`blocked-app-uninstalled` / "SYNC DISABLED (app not installed)"). Declared public, the container is an ordinary
+iCloud Drive folder: it shows in Finder and the Files app under its name, and every Mac signed in to the account
+syncs it. The iOS app's Info.plist declares it (iOS reads it when `CFBundleVersion` rises):
+
+```xml
+<key>NSUbiquitousContainers</key>
+<dict>
+  <key>iCloud.tongtonginc.save</key>
+  <dict>
+    <key>NSUbiquitousContainerIsDocumentScopePublic</key><true/>
+    <key>NSUbiquitousContainerName</key><string>Game Saves</string>
+    <key>NSUbiquitousContainerSupportedFolderLevels</key><string>Any</string>
+  </dict>
+</dict>
+```
+
+Use **one container for all games** (here `iCloud.tongtonginc.save`, shown in iCloud Drive as "Game Saves"): one
+entitlement and one public folder for every app, each game in its own `SaveSync/<title id>`. Each app may also
+have its own; the Mac finds the title in whichever container holds it.
 
 Environment: `SAVESYNC=0` turns it off, `SAVESYNC_DIR=<folder>` uses that folder as the title's cloud folder (tests,
 another sync tool), `SAVESYNC_CONTAINER=iCloud.<id>` picks the container.
@@ -125,7 +144,8 @@ another sync tool), `SAVESYNC_CONTAINER=iCloud.<id>` picks the container.
    `savesync_start(&(savesync_config){.title_id = …, .game_version = …, .save_dir = …, .state_dir = …, .log_tag = …, .save_busy = …});`
    and after a save-data commit: `savesync_committed();`
 4. iOS app: `savesync_flush` from `sceneDidEnterBackground` (see `games/totk/ios/Sources/main.m`).
-5. Signing: the iCloud entitlements above on the iOS app.
+5. Signing: the iCloud entitlements above on the iOS app, naming the shared container, and `NSUbiquitousContainers`
+   making it public in its Info.plist (with a higher `CFBundleVersion` than the installed build).
 
 ## Limits
 
@@ -133,8 +153,9 @@ another sync tool), `SAVESYNC_CONTAINER=iCloud.<id>` picks the container.
 - Both devices playing at once is settled by time, file-set granularity: the newer set wins, the older is kept as a
   backup, slots are not merged.
 - Times come from each device's clock; a clock far off can pick the wrong winner (the loser is still backed up).
-- TOTK's first version kept its copy in `Documents/TOTK Saves`; SaveSync uses `Documents/SaveSync/0100F2C0115B6000`,
-  starts from the device that next saves, and leaves the old folder untouched (safe to delete).
+- Moving to another container (TOTK went from its own `iCloud.com.tongtonginc.zelda` to the shared
+  `iCloud.tongtonginc.save`) starts empty: the first device to start sends its saves, the others take them. The old
+  container's folder is left untouched (safe to delete).
 
 ## Tests
 

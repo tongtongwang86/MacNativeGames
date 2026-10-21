@@ -11,6 +11,34 @@
 #include "runtime.h"
 #import "touch_pad.h"
 #include "../../vendor/savesync/savesync.h"
+#include "../../vendor/gamesettings/gamesettings.h"
+int fps_overlay_hints_enabled(void);
+int fps_overlay_toggle_hints(void);
+uint64_t dm_nvn_frame_count(void);
+int mfx_enabled(void);
+void dm_gfx_set_flag(const char *name, int v);
+
+/* The Settings sheet on iPhone / iPad (vendor/gamesettings): picture shape, frame interpolation, motion controls (the
+   device's own gyro, device_motion.m, or a controller's) and the FPS overlay; keyboard bindings and the save folders. */
+static int shape_get(void) { return runtime_aspect_on() ? 0 : 1; }
+static void shape_set(int v) { if (shape_get() != v) runtime_aspect_toggle(); }
+static int interp_get(void) { return mfx_enabled(); }
+static void interp_set(int v) { dm_gfx_set_flag("mfx_interp", v); }
+static int motion_get(void) { return runtime_device_motion_enabled(); }
+static void motion_set(int v) { runtime_hid_feedback_flag("gyro", !!v); runtime_device_motion_enable(v); }   /* off: the game sees a pad lying still */
+static int overlay_get(void) { return fps_overlay_hints_enabled(); }
+static void overlay_set(int v) { if (overlay_get() != v) fps_overlay_toggle_hints(); }
+static const char *const shape_choices[] = {"The screen's shape", "16:9 (the game's own)"};
+static const char *const interp_choices[] = {"Off", "30 + 30", "Half the refresh rate", "Unlimited"};
+static const char *const motion_choices[] = {"Off", "On"};
+static const char *const overlay_choices[] = {"Hidden", "Shown"};
+static const gamesettings_choice graphics_settings[] = {
+    {"shape", "Picture shape", shape_choices, 2, shape_get, shape_set, "The camera fills the screen without black bars; the HUD keeps its shape in the middle."},
+    {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60)."},
+    {"motion", "Motion controls", motion_choices, 2, motion_get, motion_set, "Tilt and turn the device (or a controller with a gyro, such as a DualSense) where the game uses motion."},
+    {"overlay", "FPS overlay", overlay_choices, 2, overlay_get, overlay_set, NULL},
+};
+static const gamesettings_config settings_config = {"01006F8002326000", "Animal Crossing: New Horizons", "[acnh]", graphics_settings, sizeof graphics_settings / sizeof *graphics_settings};
 
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
@@ -44,6 +72,26 @@ void runtime_shortcut_help_toggle(void) {}
     pthread_t thread; pthread_create(&thread, &attr, run_host, NULL);
     pthread_detach(thread); pthread_attr_destroy(&attr);
 }
+/* A hardware keyboard (Magic Keyboard, Bluetooth) plays with the same key bindings as the Mac (vendor/gamesettings). */
+- (BOOL)canBecomeFirstResponder { return YES; }
+- (void)viewWillAppear:(BOOL)animated { [super viewWillAppear:animated]; [self becomeFirstResponder]; }
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    UIKeyCommand *settings = [UIKeyCommand commandWithTitle:@"Settings" image:nil action:@selector(openSettings) input:@"," modifierFlags:UIKeyModifierCommand propertyList:nil];
+    return @[settings];
+}
+- (void)openSettings { gamesettings_show(); }
+static BOOL forward_presses(NSSet<UIPress *> *presses, int down) {
+    BOOL handled = NO;
+    for (UIPress *p in presses) {
+        if (!p.key || (p.key.modifierFlags & UIKeyModifierCommand)) continue;
+        int code = gamesettings_mac_key_from_hid(p.key.keyCode); if (code < 0) continue;
+        runtime_input_key((unsigned)code, down); handled = YES;
+    }
+    return handled;
+}
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event { if (!forward_presses(presses, 1)) [super pressesBegan:presses withEvent:event]; }
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event { if (!forward_presses(presses, 0)) [super pressesEnded:presses withEvent:event]; }
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event { if (!forward_presses(presses, 0)) [super pressesCancelled:presses withEvent:event]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
@@ -87,6 +135,9 @@ void runtime_shortcut_help_toggle(void) {}
     unsetenv("TOTK_AUTOLOAD");
     chdir(docs.fileSystemRepresentation);
     host_argv[0] = strdup("ACNH"); host_argv[1] = strdup(res.fileSystemRepresentation); host_argv[2] = strdup("boot");
+    /* Settings: loaded off the main thread (iCloud may be slow to answer); graphics applied once the game draws. */
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ gamesettings_start(&settings_config); });
+    [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t) { if (dm_nvn_frame_count() < 60) return; [t invalidate]; gamesettings_apply_graphics(); }];
     return YES;
 }
 @end

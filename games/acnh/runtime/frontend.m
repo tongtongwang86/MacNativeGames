@@ -9,6 +9,9 @@
 #include "game_version.h"
 #include "totk_ui_lang.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
+#include "../vendor/gamesettings/gamesettings.h"
+int fps_overlay_hints_enabled(void);
+void dm_gfx_set_flag(const char *name,int v);
 int mfxup_output_enabled(void);
 static NSWindow *window;
 uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented so far */
@@ -102,7 +105,11 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 -(BOOL)acceptsFirstResponder{return YES;}
 -(void)keyDown:(NSEvent *)e{runtime_input_key(e.keyCode,1);}
 -(void)keyUp:(NSEvent *)e{runtime_input_key(e.keyCode,0);}
--(void)flagsChanged:(NSEvent *)e{if(e.keyCode==56)runtime_input_key(56,!!(e.modifierFlags&NSEventModifierFlagShift));if(e.keyCode==58)runtime_input_key(58,!!(e.modifierFlags&NSEventModifierFlagOption));}
+/* Modifier keys arrive as flag changes; any of them can be bound (Settings window) except Command, which stays the app's. */
+-(void)flagsChanged:(NSEvent *)e{NSEventModifierFlags f=e.modifierFlags;int down;
+ switch(e.keyCode){case 56:case 60:down=!!(f&NSEventModifierFlagShift);break;case 58:case 61:down=!!(f&NSEventModifierFlagOption);break;
+  case 59:case 62:down=!!(f&NSEventModifierFlagControl);break;case 63:down=!!(f&NSEventModifierFlagFunction);break;default:return;}
+ runtime_input_key(e.keyCode,down);}
 @end
 @interface TOTKShortcutHelp:NSView
 @property(strong) NSTextField *label;
@@ -199,12 +206,35 @@ static TOTKWindowDelegate *windowDelegate;
 int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
 void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(), ^{[window performClose:nil];});}
 /* Use the window-close path, not terminate:, so Command-Q also waits for active saves. */
+/* The Settings window's graphics (vendor/gamesettings): what keys 1, 2 and 4 change, read from and applied to the
+   renderer directly; shape is stepped with its key action until it matches. Key 3's picture cycle has no Settings entry
+   (ACNH's runtime cannot report its current mode yet). */
+static int interp_get(void){return mfx_enabled();}
+static void interp_set(int v){dm_gfx_set_flag("mfx_interp",v);}
+static int shape_get(void){return runtime_aspect_on()?0:1;}
+static void shape_set(int v){if(shape_get()!=v)runtime_aspect_toggle();}
+static int overlay_get(void){return fps_overlay_hints_enabled();}
+static void overlay_set(int v){if(overlay_get()!=v)runtime_shortcut_help_toggle();}
+static const char *const interp_choices[]={"Off","30 + 30","Half the refresh rate","Unlimited"};
+static const char *const shape_choices[]={"The window's shape","16:9 (the game's own)"};
+static const char *const overlay_choices[]={"Hidden","Shown"};
+static const gamesettings_choice graphics_settings[]={
+ {"interpolation","Frame interpolation",interp_choices,4,interp_get,interp_set,"MetalFX generates in-between frames. Key 2."},
+ {"shape","Picture shape",shape_choices,2,shape_get,shape_set,"The camera follows the window as you resize it or go full screen. Key 4."},
+ {"overlay","FPS and shortcut overlay",overlay_choices,2,overlay_get,overlay_set,"Key 1."},
+};
+static const gamesettings_config settings_config={"01006F8002326000","Animal Crossing: New Horizons","[acnh]",graphics_settings,sizeof graphics_settings/sizeof *graphics_settings};
+/* The saved graphics settings go in once the game is drawing (the renderer is ready then). */
+static void apply_settings_when_drawing(void){
+ [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){if(dm_nvn_frame_count()<60)return;[t invalidate];gamesettings_apply_graphics();}];
+}
 static void front_install_menu(void){
  NSMenu *menu=[NSMenu new],*appMenu=[NSMenu new];
  NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[menu addItem:appItem];
  NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("退出 Tears of the Kingdom","Quit Tears of the Kingdom")) action:@selector(performClose:) keyEquivalent:@"q"];
  quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
- [appMenu addItem:quit];NSApp.mainMenu=menu;
+ [appMenu addItem:quit];gamesettings_add_menu_item(appMenu);NSApp.mainMenu=menu;
+  gamesettings_start(&settings_config);   /* keyboard bindings and graphics, this Mac's copy or iCloud's */
 }
 static void *guest_main(void *callback){@autoreleasepool{((void(*)(void))callback)();}return NULL;}
 void runtime_front_run(void(*callback)(void)){
@@ -226,7 +256,7 @@ void runtime_front_run(void(*callback)(void)){
   const char *owner=getenv("TOTK_SLOT_OWNER"),*purpose=getenv("TOTK_SLOT_PURPOSE");
   window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@(TOTK_UI("测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭","Test session (%s) Ver. %s: %s — save copy, progress is not saved to your save, the script closes it")),owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:TOTK_UI("代理测试","agent test")]:[NSString stringWithFormat:@"Tears of the Kingdom  Mac — Ver. %s",TOTK_GAME_VERSION];
   windowDelegate=[TOTKWindowDelegate new];window.delegate=windowDelegate;
-  front_install_menu();
+  front_install_menu();apply_settings_when_drawing();
   window.collectionBehavior|=NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];
   metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.drawableSize=CGSizeMake(ww,wh);

@@ -25,6 +25,12 @@ targets:
         excludes:
           - "*.md"
       - path: Gen/embed.S
+      - path: ../vendor/gamesettings
+        excludes:
+          - "*.md"
+          - "tests/**"
+          - "tools/**"
+          - "assets/**"
       - path: ../vendor/savesync
         excludes:
           - "tests/**"

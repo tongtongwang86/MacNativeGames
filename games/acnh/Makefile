@@ -11,8 +11,8 @@ GFX_FLAGS := -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1 -std=gnu11 -Wno-error -Wno-unuse
 NATIVE_OPT ?= -O2
 PY := .venv/bin/python
 
-RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S)) vendor/savesync/savesync.m
-RUNTIME_HDR := $(wildcard runtime/*.h) vendor/savesync/savesync.h
+RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S)) vendor/savesync/savesync.m vendor/gamesettings/gamesettings.m
+RUNTIME_HDR := $(wildcard runtime/*.h) vendor/savesync/savesync.h vendor/gamesettings/gamesettings.h
 
 .PHONY: help dependencies rewrite tables boot verify-startup clean icon
 help:
