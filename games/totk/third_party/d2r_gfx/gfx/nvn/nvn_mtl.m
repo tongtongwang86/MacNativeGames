@@ -2274,6 +2274,13 @@ static uint64_t g_wb_done, g_wb_skip_cpu, g_wb_skip_fmt, g_wb_bytes;
 void dm_gfx_querylog_next(long n) { long f = (long)atomic_load(&g_cur_frame); atomic_store(&g_ql_until, f + (n > 0 ? n : 1)); MLOG("[query] logging occlusion queries until frame %ld", f + n); }
 static void driver_cache_set(int v);
 static void driver_cache_check_set(int v);
+/* TOTK: render-target feedback pass split (draw). TOTK_RT_FEEDBACK / "flag rt_feedback": 0 off, 1 every feedback read
+   (correct, but 8-10 ms more GPU time near water on an M4 Pro: about 200 splits a frame), 2 (default) the layered-surface
+   case only. TOTK_RT_FEEDBACK_BITS / "flag rt_feedback_bits" (decimal): attachments that can split (bit i = colour i,
+   bit 8 = depth / stencil), default 1 = colour target 0. */
+static _Atomic int g_rt_feedback_on = -1; static _Atomic int g_rt_feedback_bits = -1; static uint64_t g_rt_feedback_splits;
+static int rt_feedback_on(void) { int v = atomic_load(&g_rt_feedback_on); if (v < 0) { const char *e = getenv("TOTK_RT_FEEDBACK"); v = e ? atoi(e) : 2; atomic_store(&g_rt_feedback_on, v); } return v; }
+static uint32_t rt_feedback_bits(void) { int v = atomic_load(&g_rt_feedback_bits); if (v < 0) { const char *e = getenv("TOTK_RT_FEEDBACK_BITS"); v = e ? atoi(e) & 0x1ff : 1; atomic_store(&g_rt_feedback_bits, v); } return (uint32_t)v; }
 // One shader class can be hidden for geometry fault isolation without restarting.
 // Diagnostic only: measurements with this enabled are never valid performance results.
 static _Atomic uint64_t g_diag_skip_fs;
@@ -2288,6 +2295,8 @@ void dm_gfx_set_flag(const char *name, int v) {
     if (!strcmp(name, "tex_slots")) { (void)tex_slots_on(); atomic_store(&g_tex_slots_on, v != 0); MLOG("[flag] tex_slots = %d", v != 0); return; }
     if (!strcmp(name, "tex_slots_check")) { (void)tex_slots_on(); atomic_store(&g_tex_slots_check, v != 0); MLOG("[flag] tex_slots_check = %d verified=%llu hits=%llu", v != 0, (unsigned long long)atomic_load(&g_tex_slots_verified), (unsigned long long)atomic_load(&g_tex_slots_hits)); return; }
     if (!strcmp(name, "render_stream")) { atomic_store(&g_rs_on, v != 0); MLOG("[flag] render_stream = %d (next render pass)", v != 0); return; }
+    if (!strcmp(name, "rt_feedback_bits")) { atomic_store(&g_rt_feedback_bits, v & 0x1ff); MLOG("[flag] rt_feedback_bits = %#x", v & 0x1ff); return; }
+    if (!strcmp(name, "rt_feedback")) { (void)rt_feedback_on(); atomic_store(&g_rt_feedback_on, v); MLOG("[flag] rt_feedback = %d (%llu splits so far)", v, (unsigned long long)g_rt_feedback_splits); return; }
     if (!strcmp(name, "cube_merge")) { atomic_store(&g_cg_on, v != 0); MLOG("[flag] cube_merge = %d", v != 0); return; }
     if (!strcmp(name, "skip_invisible")) { skv_set(v); return; }
     if (!strcmp(name, "mfx_upscale")) { mfxup_set(v < 0 ? !mfxup_enabled() : v); return; }   // TOTK_MFX_UPSCALE at run time (manual key 3 picture mode)
@@ -4062,6 +4071,9 @@ static id<MTLTexture> blk_aux(const tex_t *t, const view_t *v, int has_v, blk_wb
 static id<MTLTexture> g_nt_watch; static void *g_nt_watch_ptr; static uint64_t g_nt_watch_ser;
 static void nt_watch_after_pass(void);
 static uint8_t g_nt_pass_clear[8]; static MTLClearColor g_nt_pass_cc[8]; static unsigned g_nt_pass_draws;   /* TOTK_NAN_TRACE watch log: how the current pass began */
+/* TOTK: attachments of the open pass written since it began (bit i = colour i, bit 8 = depth / stencil): load-clears and
+   draws with a colour mask / depth or stencil write. A later draw that samples one of them ends the pass first (draw). */
+static uint32_t g_pass_wrote, g_pass_fbw; static void *g_pass_fbprog;   // fbw: of those, written by draws that themselves sampled attachments (fbprog: the last such program)
 static const char *nan_trace_prefix(void);
 static void rp_end(void) { if (g_enc) {
     ghost_flush();
@@ -4403,6 +4415,8 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) {
                    pd.stencilAttachment.storeAction = MTLStoreActionUnknown; }
     }
     memcpy(g_nt_pass_clear, R.clear_c, sizeof g_nt_pass_clear); memcpy(g_nt_pass_cc, R.cc, sizeof g_nt_pass_cc); g_nt_pass_draws = 0;
+    g_pass_wrote = R.clear_d || R.clear_s ? 1u << 8 : 0; for (int i = 0; i < 8; i++) if (R.clear_c[i]) g_pass_wrote |= 1u << i;
+    g_pass_fbw = 0; g_pass_fbprog = NULL;
     memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0;
     {   // 通道信息（口径同原先每次绘制现取：颜色取各附件基贴图格式，采样数取最后一个颜色附件、有深度则取深度） | Pass info (same convention as the former per-draw fetch: colors take each attachment's base texture format; sample count takes the last color attachment, or depth if there is depth)
         uint64_t ser = g_pass.serial + 1; memset(&g_pass, 0, sizeof g_pass); g_pass.serial = ser;
@@ -7738,6 +7752,20 @@ static int rt_range_same(const p_set_rt *a, const p_set_rt *b) {
         depth.textureType == MTLTextureType2D && color.sampleCount == 1 && depth.sampleCount == 1 &&
         g_pass.reg_gen == g_reg_gen && g_pass.ser_gen == g_ser_gen && g_pass.range_dirty == nvn_dirty_now();
 }
+/* TOTK: the attachments of the current targets this draw's program reads as textures / images (bit i = colour i, bit 8 =
+   depth / stencil); same serial-level test as draw_samples_rt. */
+static uint32_t draw_sampled_rt_mask(NvProg *pr) {
+    uint64_t rs[9]; int idx[9], nr = 0; uint32_t m = 0;
+    for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) { rs[nr] = R.rt.color[k]->serial; idx[nr++] = k; }
+    if (R.rt.depth) { rs[nr] = R.rt.depth->serial; idx[nr++] = 8; }
+    if (!pr || !nr) return 0;
+    for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
+            if (b->kind == NVN_RB_IMG) h = b->reg < 32 && sh->stage < 6 ? S.img[sh->stage][b->reg] : 0; else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = b->reg < 128 && sh->stage < 6 ? S.tex[sh->stage][b->reg] : 0; else continue;
+            int tid = (int)(h & 0xfffff); uint64_t ser = tid ? atomic_load_explicit(&g_tser[tid], memory_order_relaxed) : 0;   // lock-free: runs for every draw of an open pass
+            for (int j = 0; j < nr; j++) if (ser && ser == rs[j]) m |= 1u << idx[j]; } }
+    return m;
+}
 static int draw_samples_rt(NvProg *pr) {   // 采样附件保持原ser级保守guard，不分级/层 | Sampled attachments keep the original conservative ser-level guard, not split by level/layer
     uint64_t rs[9]; int nr = 0;
     for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) rs[nr++] = R.rt.color[k]->serial;
@@ -9633,6 +9661,24 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     if (g_rt_range_active && (!rt_range_pr_ro(pr) || !S.ds.dt || S.ds.dw || S.ds.st)) rp_end();   // 原encoder边界的外部写可见性不删 | The external write visibility at the original encoder boundary is not removed
     if (g_rt_merged && draw_samples_rt(pr)) { static int once; if (!once++) MLOG("同目标续用：续用通道内绘制要采样附件，在此切开（首例 通道 %llu）", g_stat_pass);
         PD("M %llu 续用通道内绘制要采样附件，在此切开", g_stat_pass); rp_end(); }
+    /* TOTK: render-target feedback. On the Switch a draw that samples an attachment an earlier draw of the same pass wrote
+       sees that write after nvnCommandBufferBarrier(ORDER_FRAGMENTS | INVALIDATE_TEXTURE), which the game issues. The
+       water surfaces rely on it: each reads, at its own pixel, the G-buffer it writes (colour target 0 holds the surface
+       bits it tests) and blends over what is already there - the river over the pool drawn just before it. On the tile
+       GPU an open pass keeps those writes in tile memory, so the reads returned the targets as they were when the pass
+       began: where the river crosses the pool it showed the bare riverbed, a hard-edged see-through patch.
+       Ending the pass lands the stores (the next encoder's start barrier orders them). Splitting for every feedback read
+       (mode 1) also catches the G-buffer layer draws, which read the albedo / normal / depth targets: about 200 splits a
+       frame and 8-10 ms more GPU time near water, with no visible change in still scenes. Mode 2 splits only where the
+       read attachment (rt_feedback_bits, default colour target 0) was written by an earlier feedback-reading draw of
+       another program in this pass: about 6 splits a frame at the river, 0.2 ms. */
+    uint32_t fb_rd = rt_feedback_on() && !g_fz.active && !g_defer_replaying && !g_cg.replaying ? draw_sampled_rt_mask(pr) : 0;
+    if (g_enc && fb_rd) {
+        int mode = rt_feedback_on();
+        uint32_t fb = fb_rd & (mode == 1 ? g_pass_wrote : (__bridge void *)pr != g_pass_fbprog ? g_pass_fbw & rt_feedback_bits() : 0);
+        if (fb) { g_rt_feedback_splits++;
+            static int once; if (!once++) MLOG("render-target feedback: a draw samples attachments 0x%x written earlier in its pass (fs %.16s), the pass ends before it (first in pass %llu)", fb, pr && pr->sh[1] ? pr->sh[1]->key : "-", g_stat_pass);
+            PD("M %llu draw samples attachments 0x%x written earlier in the pass: split", g_stat_pass, fb); rp_end(); } }
     static id<MTLFunction> fz_fn;   // 合并通道后一个通道本次绘制的特化片元函数（nil = 用原版本） | Specialized fragment function for this draw of the later pass in a merged render pass (nil = use the original version)
     if (g_fz.active && g_enc && g_fz.phase == 2 && !fz_p2_draw(pr, dw, di, g_fz.lmap2, &fz_fn)) {   // 证不出：结束合并通道（前一个通道的结果照常写回），按后一个通道的原目标重开 | Cannot be proven: end the merged render pass (the earlier pass's result is stored as usual) and reopen with the later pass's original targets
         static int once3; if (!once3++) MLOG("可读 tile 通道合并：后一个通道的绘制证不出，退回分开（首例 通道 %llu）", g_stat_pass);
@@ -9842,6 +9888,9 @@ frz_plain:;
     if (pr && nan_trace_match(pr->sh[1]) && !pr->sh[1]->writes_depth) nan_trace_bind(en);   // diagnostic TOTK_NAN_TRACE
     g_nt_pass_draws++;
     g_stat_draw++;
+    { uint32_t w = R.rt.depth && (S.ds.dw || S.ds.st) ? 1u << 8 : 0;
+      for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && (S.chmask.mask >> (4 * i) & 0xf)) w |= 1u << i;
+      g_pass_wrote |= w; if (fb_rd) { g_pass_fbw |= w; g_pass_fbprog = (__bridge void *)pr; } }
     { static int tg; if (!tg) { tg = 1; const char *e = getenv("DM_TEST_GHOST"); float v[8];   // 测试开关 DM_TEST_GHOST=px,py,gx,gy,gw,gh,cx,cy（归一化；按下点、格网、跟手图中心）：不经前端直接开跟手图（Mac 宿主截图验证用） | Test switch DM_TEST_GHOST=px,py,gx,gy,gw,gh,cx,cy (normalized; press point, grid, center of the drag-follow image): turns on the drag-follow image directly without going through the front end (for Mac host screenshot verification)
         if (e && sscanf(e, "%f,%f,%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) mtl_ui_ghost(1, v[0], v[1], &v[2], v[6], v[7]); } }
     if (dw && atomic_load(&g_ghost_on)) ghost_note(dw);
