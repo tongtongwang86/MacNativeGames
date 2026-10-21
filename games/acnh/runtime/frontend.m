@@ -130,13 +130,8 @@ static NSString *shortcut_text(void){
   case MFX_MAX:interp=TOTK_UI("不限帧","unlimited");break;
   default:interp=TOTK_UI("关闭","off");break;
  }
- uint64_t size=runtime_output_size_current();unsigned w=(uint32_t)size,h=(uint32_t)(size>>32);
- NSString *picture;
- if(mfxup_output_enabled())picture=@"MetalFX 2K";
- else if(w==2560&&h==1440)picture=@(TOTK_UI("原生 2K","native 2K"));
- else if(w!=1920||h!=1080)picture=[NSString stringWithFormat:@(TOTK_UI("原生 %u×%u","native %u×%u")),w,h];
- else picture=@(TOTK_UI("关闭","off"));
- return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  显示 / 隐藏所有提示\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  21:9 宽屏：开 / 关","Shortcuts\n1  Show / hide all overlays\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Ultrawide 21:9: on / off")),[NSString stringWithUTF8String:interp],picture];
+ int mode=runtime_output_mode_get();NSString *picture=@(runtime_output_mode_name(mode<0?0:mode));
+ return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  显示 / 隐藏所有提示\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  画面比例：窗口 / 16:9","Shortcuts\n1  Show / hide all overlays\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Picture shape: the window's / 16:9")),[NSString stringWithUTF8String:interp],picture];
 }
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){int compact=hud_compact();self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:compact?0.72:0.86].CGColor;self.layer.cornerRadius=compact?7:14;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:compact?0.14:0.2].CGColor;
  self.label=[NSTextField labelWithString:shortcut_text()];self.label.font=[NSFont systemFontOfSize:17 weight:NSFontWeightMedium];self.label.textColor=NSColor.whiteColor;self.label.alignment=NSTextAlignmentCenter;self.label.maximumNumberOfLines=0;self.label.lineBreakMode=NSLineBreakByWordWrapping;self.label.frame=NSInsetRect(self.bounds,20,18);self.label.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[self addSubview:self.label];
@@ -207,18 +202,21 @@ int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
 void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(), ^{[window performClose:nil];});}
 /* Use the window-close path, not terminate:, so Command-Q also waits for active saves. */
 /* The Settings window's graphics (vendor/gamesettings): what keys 1, 2 and 4 change, read from and applied to the
-   renderer directly; shape is stepped with its key action until it matches. Key 3's picture cycle has no Settings entry
-   (ACNH's runtime cannot report its current mode yet). */
+   renderer directly; shape is stepped with its key action until it matches. */
+static int picture_get(void){int m=runtime_output_mode_get();return m<0?0:m;}
+static void picture_set(int v){runtime_output_mode_set(v);}
 static int interp_get(void){return mfx_enabled();}
 static void interp_set(int v){dm_gfx_set_flag("mfx_interp",v);}
 static int shape_get(void){return runtime_aspect_on()?0:1;}
 static void shape_set(int v){if(shape_get()!=v)runtime_aspect_toggle();}
 static int overlay_get(void){return fps_overlay_hints_enabled();}
 static void overlay_set(int v){if(overlay_get()!=v)runtime_shortcut_help_toggle();}
+static const char *const picture_choices[]={"1080p","MetalFX (upscaled to the window)"};
 static const char *const interp_choices[]={"Off","30 + 30","Half the refresh rate","Unlimited"};
 static const char *const shape_choices[]={"The window's shape","16:9 (the game's own)"};
 static const char *const overlay_choices[]={"Hidden","Shown"};
 static const gamesettings_choice graphics_settings[]={
+ {"picture","Picture",picture_choices,2,picture_get,picture_set,"The game draws 1080p; MetalFX upscales it to the window instead of plain scaling. Key 3."},
  {"interpolation","Frame interpolation",interp_choices,4,interp_get,interp_set,"MetalFX generates in-between frames. Key 2."},
  {"shape","Picture shape",shape_choices,2,shape_get,shape_set,"The camera follows the window as you resize it or go full screen. Key 4."},
  {"overlay","FPS and shortcut overlay",overlay_choices,2,overlay_get,overlay_set,"Key 1."},

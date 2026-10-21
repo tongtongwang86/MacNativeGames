@@ -22,6 +22,8 @@ void dm_gfx_set_flag(const char *name, int v);
    device's own gyro, device_motion.m, or a controller's) and the FPS overlay; keyboard bindings and the save folders. */
 static int shape_get(void) { return runtime_aspect_on() ? 0 : 1; }
 static void shape_set(int v) { if (shape_get() != v) runtime_aspect_toggle(); }
+static int upscale_get(void) { return runtime_ios_full_resolution(); }
+static void upscale_set(int v) { runtime_ios_set_full_resolution(v); }
 static int interp_get(void) { return mfx_enabled(); }
 static void interp_set(int v) { dm_gfx_set_flag("mfx_interp", v); }
 static int motion_get(void) { return runtime_device_motion_enabled(); }
@@ -29,11 +31,13 @@ static void motion_set(int v) { runtime_hid_feedback_flag("gyro", !!v); runtime_
 static int overlay_get(void) { return fps_overlay_hints_enabled(); }
 static void overlay_set(int v) { if (overlay_get() != v) fps_overlay_toggle_hints(); }
 static const char *const shape_choices[] = {"The screen's shape", "16:9 (the game's own)"};
+static const char *const upscale_choices[] = {"Off (720p, the iPad scales it)", "MetalFX at full resolution"};
 static const char *const interp_choices[] = {"Off", "30 + 30", "Half the refresh rate", "Unlimited"};
 static const char *const motion_choices[] = {"Off", "On"};
 static const char *const overlay_choices[] = {"Hidden", "Shown"};
 static const gamesettings_choice graphics_settings[] = {
     {"shape", "Picture shape", shape_choices, 2, shape_get, shape_set, "The camera fills the screen without black bars; the HUD keeps its shape in the middle."},
+    {"upscale", "Upscaling", upscale_choices, 2, upscale_get, upscale_set, "MetalFX scales the 720p picture to the screen's own pixels; uses more GPU time and battery."},
     {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60)."},
     {"motion", "Motion controls", motion_choices, 2, motion_get, motion_set, "Tilt and turn the device (or a controller with a gyro, such as a DualSense) where the game uses motion."},
     {"overlay", "FPS overlay", overlay_choices, 2, overlay_get, overlay_set, NULL},

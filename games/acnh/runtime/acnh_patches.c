@@ -221,5 +221,20 @@ void runtime_frame_step_pin(double ms) { (void)ms; }
 void runtime_frame_step_update(uint64_t now_ns) { (void)now_ns; }
 int runtime_output_res(unsigned *w, unsigned *h) { (void)w; (void)h; return 0; }
 uint64_t runtime_output_res_extra_bytes(void) { return 0; }
-int runtime_output_mode_cycle(void) { return 0; }
+/* Picture modes (key 3, the Settings window's Picture): ACNH's output stays 1920x1080 (no output-size patch yet), shown
+   either as it is (the present scales it to the window) or upscaled to the window by MetalFX (the renderer's output stage,
+   which runs only with MetalFX upscaling on, hence both flags). */
+extern void dm_gfx_set_flag(const char *name, int value);
+extern int mfxup_output_enabled(void);
+static const char *const output_modes[] = {"1080p", "MetalFX"};
+int runtime_output_mode_count(void) { return 2; }
+const char *runtime_output_mode_name(int k) { return k >= 0 && k < 2 ? output_modes[k] : ""; }
+int runtime_output_mode_get(void) { return mfxup_output_enabled() ? 1 : 0; }
+int runtime_output_mode_set(int k) {
+    if (k < 0 || k > 1) return 0;
+    dm_gfx_set_flag("mfx_output", k); dm_gfx_set_flag("mfx_upscale", k);
+    fprintf(stderr, "[acnh] picture: %s\n", output_modes[k]);
+    return 1;
+}
+int runtime_output_mode_cycle(void) { return runtime_output_mode_set((runtime_output_mode_get() + 1) % 2); }
 uint64_t runtime_output_size_current(void) { return 1920ull | (1080ull << 32); }
