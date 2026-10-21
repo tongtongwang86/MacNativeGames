@@ -401,3 +401,15 @@ not touched (the test binary is `build/acnh-coop`).
   dispatcher, and the host's reaction to `nn::ldn` state changes (`LdnBackgroundProcessJob`, the node list it reads),
   to see which check both sides fail. Candidates: the NodeInfo fields pia matches (MAC, version, the station's own
   entry), or a packet source check before `PacketReader::BeginDispatch`.
+
+### 8.3 First visit lands (2026-10-21)
+
+- The visitor uses a separate real save ("pantheon", imported into its test profile with `scripts/import_save.py`;
+  the port's `account.uid` is the save's UID bytes reversed with the halves swapped).
+- Tracing `GetState` / `GetNetworkInfo` showed the cause of 2618-0502: the **visitor never saw itself in the node
+  list**. The host sends the NetworkInfo that includes the new station right after accepting it, and that update could
+  arrive before `connect_info` marked the station connected, so it was dropped. It is now kept and used when the join
+  completes (`ldn_host.c`, `pending`).
+- With that, pia talks both ways (the host sends the station unicast packets), the host shows the arrival board
+  ("Panthea, arriving from pantheon"), the island streams over (7,000+ packets) and **the visitor lands on iLand Pro**.
+  Both copies show the host island's time.

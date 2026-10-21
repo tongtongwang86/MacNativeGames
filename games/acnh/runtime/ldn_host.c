@@ -43,6 +43,9 @@ static int state, reason, self_node = -1;
 static void *state_event;
 static LdnNetworkInfo info;              /* the session's NetworkInfo: ours as host, the host's as station */
 static LdnNetworkInfo last_scan[16]; static int last_scan_count;
+/* The host sends its updated NetworkInfo (with the new station in it) right after accepting; it can arrive before
+   connect_info marks the station connected, so it is kept here and used when the join completes. */
+static LdnNetworkInfo pending; static int have_pending;
 
 static const char *state_name(int s) {
     static const char *n[] = {"None", "Initialized", "AccessPoint", "AccessPointCreated", "Station", "StationConnected", "Error"};
@@ -53,7 +56,11 @@ static void set_state(int s) {   /* lock held */
     state = s;
     if (state_event) hle_signal_system_event(state_event);
 }
-static void signal_change(void) { if (state_event) hle_signal_system_event(state_event); }
+static int trace_reads(void) { static int t = -1; if (t < 0) t = getenv("ACNH_COOP_TRACE") != NULL; return t; }
+static void signal_change(void) {
+    if (trace_reads()) fprintf(stderr, "[ldn] state change event %s\n", state_event ? "signalled" : "not attached");
+    if (state_event) hle_signal_system_event(state_event);
+}
 
 static uint32_t initialize(void) { pthread_mutex_lock(&lock); if (state == ST_NONE) set_state(ST_INITIALIZED); pthread_mutex_unlock(&lock); return 0; }
 static void leave_network(void) {   /* lock held */
@@ -68,7 +75,11 @@ static uint32_t finalize(void) {
     state_event = NULL; fprintf(stderr, "[ldn] %s -> None\n", state_name(state)); state = ST_NONE;
     pthread_mutex_unlock(&lock); return 0;
 }
-static int get_state(void) { pthread_mutex_lock(&lock); int s = state; pthread_mutex_unlock(&lock); return s; }
+static int get_state(void) {
+    pthread_mutex_lock(&lock); int s = state; pthread_mutex_unlock(&lock);
+    static int last = -1; if (trace_reads() && s != last) { fprintf(stderr, "[ldn] GetState -> %s\n", state_name(s)); last = s; }
+    return s;
+}
 static int disconnect_reason(void) { pthread_mutex_lock(&lock); int r = reason; pthread_mutex_unlock(&lock); return r; }
 static void attach_state_change_event(void *event) {
     if (!event) runtime_fail("ldn state change event");
@@ -185,14 +196,14 @@ static uint32_t scan(LdnNetworkInfo *out, int *count, int capacity, const LdnSca
     return 0;
 }
 static uint32_t connect_info(const LdnNetworkInfo *target, const LdnUserConfig *user, int version) {
-    pthread_mutex_lock(&lock); int s = state; pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock); int s = state; have_pending = 0; pthread_mutex_unlock(&lock);
     if (s != ST_STATION) return R_INVALID_STATE;
     LdnNetworkInfo joined; int node = -1, r;
     { __attribute__((cleanup(runtime_core_back))) int away = runtime_core_away();
       r = coop_lan_connect(target, user->user_name, (int16_t)version, &joined, &node); }
     if (r) { fprintf(stderr, "[ldn] connect failed (%d)\n", r); return r == 2 ? R_CONNECT_NOT_FOUND : R_CONNECT_FAILURE; }
     pthread_mutex_lock(&lock);
-    info = joined; self_node = node; reason = REASON_NONE;
+    info = have_pending ? pending : joined; have_pending = 0; self_node = node; reason = REASON_NONE;
     set_state(ST_STATION_CONNECTED);
     pthread_mutex_unlock(&lock);
     fprintf(stderr, "[ldn] joined as node %d (10.114.0.%d)\n", node, node + 1);
@@ -220,7 +231,15 @@ static uint32_t disconnect(void) {
 
 static int in_network(void) { return state == ST_ACCESS_POINT_CREATED || state == ST_STATION_CONNECTED; }
 static uint32_t get_network_info(LdnNetworkInfo *out) {
-    pthread_mutex_lock(&lock); uint32_t r = in_network() ? 0 : R_INVALID_STATE; if (!r) *out = info; pthread_mutex_unlock(&lock); return r;
+    pthread_mutex_lock(&lock); uint32_t r = in_network() ? 0 : R_INVALID_STATE; if (!r) *out = info;
+    static int last = -1; int c = r ? -1 : info.ldn.node_count;
+    if (trace_reads() && c != last) {
+        fprintf(stderr, "[ldn] GetNetworkInfo -> %d node(s):", c);
+        for (int i = 0; !r && i < COOP_NODES; i++) if (info.ldn.nodes[i].is_connected)
+            fprintf(stderr, " [%d %08x %.12s v%d]", info.ldn.nodes[i].node_id, info.ldn.nodes[i].ipv4, info.ldn.nodes[i].user_name, info.ldn.nodes[i].local_communication_version);
+        fprintf(stderr, "\n"); last = c;
+    }
+    pthread_mutex_unlock(&lock); return r;
 }
 static uint32_t get_ipv4(uint32_t *ip, uint32_t *mask) {
     pthread_mutex_lock(&lock); uint32_t r = in_network() ? 0 : R_INVALID_STATE;
@@ -263,7 +282,10 @@ void ldn_host_station_left(int node) {
     pthread_mutex_unlock(&lock);
 }
 void ldn_host_network_updated(const LdnNetworkInfo *n) {
-    pthread_mutex_lock(&lock); if (state == ST_STATION_CONNECTED) { info = *n; signal_change(); } pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock);
+    if (state == ST_STATION_CONNECTED) { info = *n; signal_change(); }
+    else if (state == ST_STATION) { pending = *n; have_pending = 1; }
+    pthread_mutex_unlock(&lock);
 }
 void ldn_host_lost_host(void) {
     pthread_mutex_lock(&lock);
