@@ -88,12 +88,36 @@ static uint32_t show_controller_support(ControllerSupportResult *out,const void 
  return 0;
 }
 /* Vibration devices and the six-axis sensor: runtime/hid_feedback.c (none unless TOTK_RUMBLE=1 / TOTK_GYRO=1). */
-/* ACNH (SDK 10.9) also reads the touch screen and the Joy-Con assignment. No touch input yet: every sample has no
-   touches. One controller, always in dual assignment. */
-typedef struct{int64_t sampling;int32_t count,reserved;uint8_t touches[][0x28];} TouchScreenState;
+/* ACNH (SDK 10.9) also reads the touch screen and the Joy-Con assignment. One controller, always in dual assignment.
+   Touch screen (2026-10-20): the iPhone / iPad's touches that are not on an on-screen control (ios touch_pad.m), in the
+   game's 1280x720 screen, through runtime_touch_screen. Each touch is reported by at least one read: one that starts and
+   ends between two reads (a quick tap) is reported once with both its start and end attributes, so no tap is lost.
+   TouchState (0x28 bytes, the SDK's): delta time, attributes (bit 0 start, bit 1 end), finger id, x, y, diameter x / y,
+   rotation, reserved. The Mac has no touch screen: every sample has no touches there. */
+typedef struct{int64_t delta;uint32_t attributes;int32_t finger,x,y,dx,dy,angle,reserved;} TouchState;
+_Static_assert(sizeof(TouchState)==0x28,"touch ABI");
+typedef struct{int64_t sampling;int32_t count,reserved;TouchState touches[];} TouchScreenState;
+enum{TOUCH_SLOTS=16,TOUCH_START=1,TOUCH_END=2,TOUCH_DIAMETER=15};
+typedef struct{uintptr_t key;int32_t finger,x,y;bool used,seen,ended;} TouchSlot;
+static TouchSlot touchSlots[TOUCH_SLOTS];static int32_t touchFingers;
 static bool touchReady;
-static void initialize_touch(void){pthread_mutex_lock(&inputLock);touchReady=true;pthread_mutex_unlock(&inputLock);}
-static void touch_fill(TouchScreenState *out,size_t touches){if(!out)runtime_fail("touch output pointer");pthread_mutex_lock(&inputLock);if(!touchReady)runtime_fail("touch screen used before InitializeTouchScreen");memset(out,0,16+touches*0x28);out->sampling=++sample;pthread_mutex_unlock(&inputLock);}
+static void initialize_touch(void){pthread_mutex_lock(&inputLock);touchReady=true;pthread_mutex_unlock(&inputLock);fprintf(stderr,"[input] the game uses the touch screen\n");}
+int runtime_touch_screen_used(void){pthread_mutex_lock(&inputLock);bool v=touchReady;pthread_mutex_unlock(&inputLock);return v;}
+void runtime_touch_screen(uintptr_t key,int phase,int x,int y){
+ x=x<0?0:x>1279?1279:x;y=y<0?0:y>719?719:y;
+ pthread_mutex_lock(&inputLock);TouchSlot *t=NULL;
+ for(int i=0;i<TOUCH_SLOTS;i++)if(touchSlots[i].used&&!touchSlots[i].ended&&touchSlots[i].key==key)t=&touchSlots[i];
+ if(phase==0&&!t){for(int i=0;i<TOUCH_SLOTS&&!t;i++)if(!touchSlots[i].used)t=&touchSlots[i];
+  if(t)*t=(TouchSlot){.key=key,.finger=touchFingers++,.used=true};}   /* more than 16 fingers: the rest are not seen */
+ if(t){t->x=x;t->y=y;if(phase==2)t->ended=true;}
+ pthread_mutex_unlock(&inputLock);
+ if(phase==0)user_input("touch screen");
+}
+static void touch_fill(TouchScreenState *out,size_t cap){if(!out)runtime_fail("touch output pointer");pthread_mutex_lock(&inputLock);if(!touchReady)runtime_fail("touch screen used before InitializeTouchScreen");memset(out,0,16+cap*0x28);out->sampling=++sample;
+ int n=0;for(int i=0;i<TOUCH_SLOTS&&(size_t)n<cap;i++){TouchSlot *t=&touchSlots[i];if(!t->used)continue;
+  out->touches[n++]=(TouchState){.attributes=(t->seen?0u:TOUCH_START)|(t->ended?TOUCH_END:0u),.finger=t->finger,.x=t->x,.y=t->y,.dx=TOUCH_DIAMETER,.dy=TOUCH_DIAMETER};
+  t->seen=true;if(t->ended)t->used=false;}
+ out->count=n;pthread_mutex_unlock(&inputLock);}
 static void touch_state1(TouchScreenState *out){touch_fill(out,1);}
 static int touch_states16(TouchScreenState *out,int max){if(max<=0)return 0;touch_fill(out,16);return 1;}
 static uint32_t supported_style_set(void){pthread_mutex_lock(&inputLock);uint32_t v=styles;pthread_mutex_unlock(&inputLock);return v;}

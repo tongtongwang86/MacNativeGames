@@ -1,5 +1,7 @@
 /* The Mac controller's haptics and motion sensors for the game's HD rumble and six-axis sensor (runtime/hid_feedback.c),
-   2026-10-17. Only with TOTK_RUMBLE=1 / TOTK_GYRO=1, and only on macOS (iOS: stubs, never on).
+   2026-10-17. Only with TOTK_RUMBLE=1 / TOTK_GYRO=1 (both on by default). Mac and, since 2026-10-20, iPhone / iPad (a
+   DualSense or Joy-Con there; the iPhone / iPad's own sensors are ios/Sources/device_motion.m, paused while a controller
+   gives motion). Reading a Switch Pro Controller's raw HID reports needs IOKit: Mac only.
    Rumble: each of the game's two vibration devices (left, right) is a Core Haptics engine on that handle of the
    controller (GCHapticsLocalityLeftHandle / RightHandle; a DualSense has both) playing a long continuous event. The
    game's value (two bands, each an amplitude 0..1 at a frequency) sets the event's intensity (TOTK_RUMBLE_GAIN, default 1,
@@ -20,12 +22,6 @@
 #include <string.h>
 #include "runtime.h"
 
-#if !TARGET_OS_OSX
-void runtime_feedback_attach(GCController *c) { (void)c; }
-void runtime_feedback_detach(GCController *c) { (void)c; }
-void runtime_feedback_quiet(void) {}
-void runtime_rumble_set(unsigned side, float al, float fl, float ah, float fh) { (void)side; (void)al; (void)fl; (void)ah; (void)fh; }
-#else
 #import <CoreHaptics/CoreHaptics.h>
 
 /* ---- rumble ----
@@ -196,6 +192,7 @@ static void motion_sample(GCMotion *m) {   /* the controller's handler queue */
    calibration (the user calibration at 0x8026 when it has its 0xB2A1 magic, else the factory one at 0x6020), as SDL:
    G = raw * 4 / (sensitivity - origin), deg/s = (raw - origin) * 936 / (sensitivity - origin); until it arrives the
    sensor's nominal ranges, 8 G and 2000 deg/s over 32768. */
+#if TARGET_OS_OSX
 #import <IOKit/hid/IOHIDManager.h>
 static IOHIDManagerRef hidManager;   /* main queue */
 static IOHIDDeviceRef hidDevice;     /* main queue */
@@ -278,6 +275,14 @@ static void hid_motion_stop(void) {   /* main queue */
     CFRelease(hidDevice); hidDevice = NULL;
     CFRelease(hidManager); hidManager = NULL;
 }
+#else   /* iOS: no IOKit. A controller whose GameController motion stays all zeros gives none: the device's sensors take over */
+static void hid_motion_start(void) {   /* main queue */
+    if (!motionPad) return;
+    fprintf(stderr, "[gyro] %s: GameController's motion is all zeros: the device's own sensors instead\n", (motionPad.vendorName ?: @"controller").UTF8String);
+    motionPad.motion.valueChangedHandler = nil; motionPad = nil; runtime_device_motion_controller(0);
+}
+static void hid_motion_stop(void) {}
+#endif
 
 /* ---- controllers ---- */
 void runtime_feedback_attach(GCController *c) {   /* main queue */
@@ -303,6 +308,9 @@ void runtime_feedback_attach(GCController *c) {   /* main queue */
         hid_motion_stop(); zeroSince = 0; motionSeen = hidAsked = NO; runtime_motion_deadzone_default(0);
         m.valueChangedHandler = ^(GCMotion *changed) { motion_sample(changed); };
         motionPad = c; runtime_motion_live(1);
+#if TARGET_OS_IPHONE
+        runtime_device_motion_controller(1);
+#endif
         fprintf(stderr, "[gyro] %s: motion sensors on (gyro%s)\n", name, m.hasGravityAndUserAcceleration ? ", gravity" : ", acceleration");
     }
 }
@@ -311,6 +319,8 @@ void runtime_feedback_detach(GCController *c) {   /* main queue */
         dispatch_async(rumbleQueue, ^{ if (rumblePad == c) { for (int s = 0; s < 2; s++) forget_side(s); rumblePad = nil; } });
     if (motionPad == c) {
         c.motion.valueChangedHandler = nil; hid_motion_stop(); motionPad = nil; runtime_motion_live(0);
+#if TARGET_OS_IPHONE
+        runtime_device_motion_controller(0);
+#endif
     }
 }
-#endif

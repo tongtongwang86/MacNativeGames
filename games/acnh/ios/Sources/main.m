@@ -14,6 +14,7 @@
 
 int totk_host_main(int argc, char **argv);
 void runtime_ios_attach_layer(CAMetalLayer *layer, UIView *host);
+void runtime_ios_device_motion_start(UIView *view);
 static char *host_argv[3];
 static void *run_host(void *unused) { (void)unused; return (void *)(intptr_t)totk_host_main(3, host_argv); }
 /* The desktop keyboard-overlay shortcut has no counterpart on iOS. */
@@ -38,6 +39,7 @@ void runtime_shortcut_help_toggle(void) {}
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     static BOOL started; if (started) return; started = YES;
+    runtime_ios_device_motion_start(self.view);   /* the device's gyro as the controller's (device_motion.m) */
     pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 64u << 20);
     pthread_t thread; pthread_create(&thread, &attr, run_host, NULL);
     pthread_detach(thread); pthread_attr_destroy(&attr);

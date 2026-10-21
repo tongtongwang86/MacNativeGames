@@ -10,16 +10,22 @@
    under ZL / ZR.
    A touch that misses every button is a stick, centred where the finger went down: the left stick on the left half,
    the camera (right stick) on the right half. Bits are the Npad buttons. While a game controller is connected the layer
-   is hidden; a touch shows it and works as usual, and it hides again 3 seconds after the last finger lifts. */
+   is hidden; a touch shows it and works as usual, and it hides again 3 seconds after the last finger lifts.
+   A game that uses its touch screen (ACNH; runtime_touch_screen_used) gets the touches that are not for the controls
+   (2026-10-20): with a controller connected (the controls hidden) every touch, otherwise those that miss every button
+   and start between the two stick zones (the outer 30 % of the width on each side). They land on the game's 1280x720
+   screen as the 16:9 picture fills the view, centred (where its HUD is). */
 typedef struct { CGPoint at; uint64_t bit; NSString *label; CGFloat size; } TouchButton;
 enum { kButtonCount = 16 };
 static const CGFloat kButtonSize = 46;
 static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger lifts, with a controller connected
+static const CGFloat kStickZone = .30;        // a touch starting this far (share of the width) from a side is a stick
 
 @implementation TOTKTouchPad {
     NSMapTable<UITouch *, NSValue *> *points;
     NSMapTable<UITouch *, NSValue *> *leftOrigins;    // where each left-stick touch went down
     NSMapTable<UITouch *, NSValue *> *rightOrigins;   // the same for the camera stick
+    NSMutableSet<UITouch *> *screenTouches;           // touches for the game's touch screen
     BOOL gamepad, concealed;                          // a controller is connected; the layer is hidden for it
     NSTimer *hideTimer;
 }
@@ -30,6 +36,7 @@ static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger l
         points = [NSMapTable strongToStrongObjectsMapTable];
         leftOrigins = [NSMapTable strongToStrongObjectsMapTable];
         rightOrigins = [NSMapTable strongToStrongObjectsMapTable];
+        screenTouches = [NSMutableSet set];
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
         [center addObserver:self selector:@selector(controllersChanged:) name:GCControllerDidConnectNotification object:nil];
         [center addObserver:self selector:@selector(controllersChanged:) name:GCControllerDidDisconnectNotification object:nil];
@@ -126,23 +133,46 @@ static void stick_axes(CGPoint from, CGPoint to, CGFloat radius, int32_t *x, int
     runtime_touch_pad_set(&s); [self setNeedsDisplay];
 }
 
+/* Whether a touch starting at p is for the game's touch screen (see the top). */
+- (BOOL)isScreenTouch:(CGPoint)p {
+    if (!runtime_touch_screen_used()) return NO;
+    if (concealed) return YES;
+    if ([self buttonAt:p]) return NO;
+    CGRect a = self.area; CGFloat u = (p.x - CGRectGetMinX(a)) / a.size.width;
+    return u > kStickZone && u < 1 - kStickZone;
+}
+- (void)sendScreenTouch:(UITouch *)t phase:(int)phase {
+    CGPoint p = [t locationInView:self]; CGSize s = self.bounds.size;
+    CGFloat w = MIN(s.width, s.height * 16 / 9), h = w * 9 / 16;   // the game's 16:9 screen, centred
+    runtime_touch_screen((uintptr_t)(__bridge void *)t, phase, (int)lround((p.x - (s.width - w) / 2) / w * 1280), (int)lround((p.y - (s.height - h) / 2) / h * 720));
+}
+
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    (void)event; concealed = NO; [hideTimer invalidate]; hideTimer = nil;
+    (void)event; BOOL controls = NO;
     for (UITouch *t in touches) {
-        CGPoint p = [t locationInView:self]; NSValue *v = [NSValue valueWithCGPoint:p]; [points setObject:v forKey:t];
+        CGPoint p = [t locationInView:self];
+        if ([self isScreenTouch:p]) { [screenTouches addObject:t]; [self sendScreenTouch:t phase:0]; continue; }
+        controls = YES; NSValue *v = [NSValue valueWithCGPoint:p]; [points setObject:v forKey:t];
         if ([self buttonAt:p]) continue;
         [(p.x < CGRectGetMidX(self.bounds) ? leftOrigins : rightOrigins) setObject:v forKey:t];
     }
+    if (controls) { concealed = NO; [hideTimer invalidate]; hideTimer = nil; }
     [self updateState];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *t in touches) [points setObject:[NSValue valueWithCGPoint:[t locationInView:self]] forKey:t];
+    for (UITouch *t in touches) {
+        if ([screenTouches containsObject:t]) [self sendScreenTouch:t phase:1];
+        else [points setObject:[NSValue valueWithCGPoint:[t locationInView:self]] forKey:t];
+    }
     [self updateState];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *t in touches) { [points removeObjectForKey:t]; [leftOrigins removeObjectForKey:t]; [rightOrigins removeObjectForKey:t]; }
+    for (UITouch *t in touches) {
+        if ([screenTouches containsObject:t]) { [self sendScreenTouch:t phase:2]; [screenTouches removeObject:t]; continue; }
+        [points removeObjectForKey:t]; [leftOrigins removeObjectForKey:t]; [rightOrigins removeObjectForKey:t];
+    }
     [self updateState]; [self hideLater];
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self touchesEnded:touches withEvent:event]; }

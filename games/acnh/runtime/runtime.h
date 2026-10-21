@@ -124,6 +124,10 @@ void runtime_gamepad_read(RuntimeGamepadState *out);
    the background, so a button held at focus loss would otherwise stay pressed for the game. */
 void runtime_gamepad_clear(void);
 void runtime_touch_pad_set(const RuntimeGamepadState *state);   /* on-screen touch controls (iOS) */
+/* The game's touch screen (runtime/input.c): touches on the iPhone / iPad, in the game's 1280x720 screen; touch is any key
+   that stays the same for one finger, phase 0 down, 1 moved, 2 up (or cancelled). Used: the game has switched it on. */
+void runtime_touch_screen(uintptr_t touch, int phase, int x, int y);
+int runtime_touch_screen_used(void);
 /* Controller rumble and motion (opt-in TOTK_RUMBLE=1 / TOTK_GYRO=1): the game's hid side in runtime/hid_feedback.c, the
    Mac controller's haptics and motion sensors in runtime/gamepad_feedback.m. */
 #define RUNTIME_MOTION_MAX 32
@@ -140,6 +144,11 @@ void runtime_motion_feed(const double acc_g[3], const double gyro_rad_s[3], uint
 int runtime_motion_axes(const char *spec);   /* TOTK_GYRO_AXES ("-x,y,-z"): 1 set, 0 unset, -1 malformed */
 void runtime_motion_deadzone_default(double deg_s);   /* when TOTK_GYRO_DEADZONE is unset: 1.2 for HID motion, else 0 */
 void runtime_motion_live(int on);   /* a controller with motion attached (1) / detached (0) */
+/* iPhone / iPad (ios/Sources/device_motion.m): the device's own motion sensors as the six-axis sensor, held in landscape
+   like a Switch in handheld mode. Paused while a controller gives motion (gamepad_feedback.m). */
+void runtime_device_motion_controller(int attached);
+void runtime_device_motion_enable(int on);
+int runtime_device_motion_enabled(void);
 void runtime_feedback_quiet(void);   /* focus lost: stop rumbling */
 #ifdef __OBJC__
 @class GCController;
