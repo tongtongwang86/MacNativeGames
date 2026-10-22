@@ -494,3 +494,15 @@ asking main+0x2567d40, "is this player on their own island?" (the value the game
 Counters on the menu's eleven calls of it showed three run when the menu opens; those three now answer yes (this menu
 only, the player's real location is untouched). With that, Panthea placed furniture on the host's island and the host
 saw it; picking up works too. `ACNH_MP_EDIT=furniture` is now 8 words.
+
+### 8.9 Visitor picking up / turning the host's furniture: not yet (2026-10-21)
+
+- Lifting main+0x21cc50c completely (8.5) let a visitor grab furniture, and turning it **crashed the visitor** at
+  main+0x3847ca0 (called from main+0x1458fd4): a structure at +0xa0 of the held object is null, used again right after,
+  so a null check would not do; the visitor's copy never builds it for the owner's furniture. The patch now lifts only
+  results 3 / 4 (the host's "company is near"); result 1 ("not your home", visitors) stays, so the visitor gets the
+  game's refusal again. A patch of the grab code's IsInMyVillage call (main+0x2327dd8) did not help and was removed.
+- Counting showed none of the 16 IsInMyVillage callers seen on the visitor runs while it presses Y / holds A, so the
+  visitor's pick-up refusal is decided elsewhere (expected: the item layer's own owner / "placed vs dropped" rule).
+- Next: find who builds the +0xa0 structure when the owner grabs furniture (watch on it, as in 8.7), and decide between
+  building it for visitors too and having the host do the grab and replicate it (the design's host-sequenced channel).

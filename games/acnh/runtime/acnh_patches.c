@@ -314,10 +314,12 @@ static void output_install(Module *m, uint64_t s, uint64_t data_off) {
 /* Local play editing (docs/LAN-COOP-DESIGN.md, ACNH_MP_EDIT). Each row is checked against the 3.0.0 word first.
    "furniture": main+0x21cc50c decides whether a furniture operation is allowed (8 callers, indoor and outdoor): 1 =
    someone else's home during a session, 2 = a special state, 3 / 4 = another player is near or in the room
-   (SYS_Telepathy 005 "It's rude to redecorate when you have company!"), 0 = allowed. The patch makes it return 0. */
+   (SYS_Telepathy 005 "It's rude to redecorate when you have company!"), 0 = allowed. */
 static const struct { uint64_t off; uint32_t original, patched; const char *group; } mp_edit_sites[] = {
-    {0x21cc50c, 0xa9bc7bfd, 0x52800000, "furniture"},   /* stp x29, x30, [sp, #-0x40]!  ->  mov w0, #0 */
-    {0x21cc510, 0xf9000bf7, 0xd65f03c0, "furniture"},   /* str x23, [sp, #0x10]         ->  ret */
+    /* Only 3 and 4 (another player near or in the room) are lifted. 1 stays: a visitor who could grab and turn the
+       host's furniture crashed (main+0x3847ca0 reads an object only the island's owner has), so that needs more work. */
+    {0x21cc714, 0x52800060, 0x52800000, "furniture"},   /* mov w0, #3 -> mov w0, #0 */
+    {0x21cc724, 0x52800080, 0x52800000, "furniture"},   /* mov w0, #4 -> mov w0, #0 */
     /* main+0x3353540: may an item from the pockets be placed here? Returns 0 or a reason the pocket menu turns into a
        message: 0x10 indoors with 2+ players in the session (SYS_Telepathy 005 "It's rude to redecorate when you have
        company!"), 0x11 outdoors (012 "There's company over right now"). Found with the "watch" diagnostic on the pocket
