@@ -525,3 +525,12 @@ saw it; picking up works too. `ACNH_MP_EDIT=furniture` is now 8 words.
   item representation (watch on a host turn or pick-up) before the host can apply a visitor's request.
 - Tools added: Ghidra project of the game's own `main` (`scripts/ghidra_prep.py`, `scripts/ghidra/*.java`, decompile
   any function in seconds); `memfind` / `peek` / `poke` and `watch` in `TOTK_INPUT_FILE`.
+
+### 8.11 Player coordinates in a session (2026-10-22)
+
+- Mapped in [GAME-MAP.md](GAME-MAP.md) section 5. Each copy moves its own player. The others replay a fixed-size
+  state snapshot (244 / 260 bytes, about 20 per second, whether the player moves or not) through the `PlayerNetMove`
+  animation state, with their own skeleton.
+- The host's copy of a visitor trails her by about 0.2–0.3 s and settles within a unit of where she stops. A
+  host-authoritative edit therefore acts on the host's view of her position, which is close enough to pick a tile.
+- New tool: `memsnap` (runtime/mem_diag.c) with scripts/memsnap_diff.py.

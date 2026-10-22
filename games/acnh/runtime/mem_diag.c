@@ -2,7 +2,9 @@
    locate live game state such as the island's item layer (docs/LAN-COOP-DESIGN.md section 9).
      memfind <hex bytes>         every writable region, at most 32 matches, on a background thread
      peek <hex address> <len>    hex dump, at most 256 bytes
-     poke <hex address> <hex>    write the bytes */
+     poke <hex address> <hex>    write the bytes
+     memsnap <dir> <hex lo> <hex hi>   every writable region in [lo, hi) to <dir>/<address>.bin, on a background thread
+                                 (scripts/memsnap_diff.py compares snapshots: how player coordinates were found) */
 #include <TargetConditionals.h>
 #if !TARGET_OS_IPHONE
 #include "runtime.h"
@@ -53,7 +55,43 @@ static void *find_main(void *arg) {
     return NULL;
 }
 
+typedef struct { char dir[512]; mach_vm_address_t lo, hi; } SnapJob;
+static void *snap_main(void *arg) {
+    SnapJob *job = arg;
+    mach_vm_address_t a = job->lo; uint64_t total = 0; unsigned files = 0;
+    enum { CHUNK = 16 << 20 };
+    uint8_t *buf = malloc(CHUNK);
+    for (; buf && a < job->hi; ) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = 0;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &obj) != KERN_SUCCESS || a >= job->hi) break;
+        mach_vm_address_t end = a + size < job->hi ? a + size : job->hi;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE)) {
+            char path[600]; snprintf(path, sizeof path, "%s/%llx.bin", job->dir, (unsigned long long)a);
+            FILE *f = fopen(path, "wb");
+            for (mach_vm_address_t p = a; f && p < end; p += CHUNK) {
+                mach_vm_size_t want = end - p < (mach_vm_size_t)CHUNK ? end - p : (mach_vm_size_t)CHUNK, got = 0;
+                if (mach_vm_read_overwrite(mach_task_self(), p, want, (mach_vm_address_t)(uintptr_t)buf, &got) != KERN_SUCCESS) { memset(buf, 0, want); got = want; }
+                fwrite(buf, 1, got, f); total += got;
+            }
+            if (f) { fclose(f); files++; }
+        }
+        a += size;
+    }
+    fprintf(stderr, "[mem] memsnap done: %u region(s), %llu MiB in %s\n", files, (unsigned long long)(total >> 20), job->dir);
+    free(buf); free(job);
+    return NULL;
+}
+
 int runtime_mem_command(char *line) {
+    if (!strncmp(line, "memsnap ", 8)) {
+        SnapJob *job = calloc(1, sizeof *job);
+        unsigned long long lo, hi;
+        if (!job) return 1;
+        if (sscanf(line + 8, "%511s %llx %llx", job->dir, &lo, &hi) != 3 || hi <= lo) { fprintf(stderr, "[mem] memsnap <dir> <hex lo> <hex hi>\n"); free(job); return 1; }
+        job->lo = lo; job->hi = hi;
+        pthread_t t; if (pthread_create(&t, NULL, snap_main, job)) { free(job); return 1; }
+        pthread_detach(t); return 1;
+    }
     if (!strncmp(line, "memfind ", 8)) {
         FindJob *job = calloc(1, sizeof *job);
         if (!job) return 1;

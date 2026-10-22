@@ -240,7 +240,7 @@ static void *input_file(void *arg) {
             runtime_frame_step_pin(ms);
         } else if (!strcmp(line, "threads\n")) {   /* every guest thread's wait state and guest return chain, now (a hang: what is each thread waiting for) */
             runtime_dump_threads();
-        } else if (!strncmp(line, "memfind ", 8) || !strncmp(line, "peek ", 5) || !strncmp(line, "poke ", 5)) {   /* mem_diag.c */
+        } else if (!strncmp(line, "memfind ", 8) || !strncmp(line, "memsnap ", 8) || !strncmp(line, "peek ", 5) || !strncmp(line, "poke ", 5)) {   /* mem_diag.c */
             extern int runtime_mem_command(char *line); runtime_mem_command(line);
         } else if (!strncmp(line, "watch ", 6)) {   /* "watch <hex address>": hardware write watchpoint (loader.c) */
             extern void runtime_watch_arm(uint64_t addr); runtime_watch_arm(strtoull(line + 6, NULL, 16));
