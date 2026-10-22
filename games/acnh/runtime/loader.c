@@ -310,8 +310,16 @@ static void signal_hex(const char *label,uint64_t value) {
 }
 /* CTR_EL0 for 128-byte host cache lines: DminLine=IminLine=5 (32 words), ERG=CWG=5, PIPT I-cache, IDC/DIC clear. */
 #define HOST_CTR_EL0 0x8555c005ULL
+uint64_t runtime_trace_site_pc,runtime_trace_site_stub;   /* acnh_patches.c, ACNH_TRACE_SITE */
 static void crash(int num,siginfo_t *info,void *context) {
  ucontext_t *u=context;
+ if((num==SIGTRAP||num==SIGILL)&&runtime_trace_site_pc&&u->uc_mcontext->__ss.__pc==runtime_trace_site_pc){
+  static int hits;if(hits++<12){signal_hex("[acnh] trace site hit, lr=",u->uc_mcontext->__ss.__lr);for(unsigned i=0;i<4;i++)signal_hex("  x=",u->uc_mcontext->__ss.__x[i]);
+   uint64_t lr=u->uc_mcontext->__ss.__lr,fp=u->uc_mcontext->__ss.__fp;
+   for(unsigned depth=0;depth<14;depth++){for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base&&lr<(uintptr_t)modules[i].base+modules[i].size){write(2,"  ",2);write(2,modules[i].name,strlen(modules[i].name));signal_hex(" caller=",lr-(uintptr_t)modules[i].base);}
+    if(!fp||(fp&15))break;uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;lr=frame[1];if(frame[0]==fp)break;fp=frame[0];}}
+  u->uc_mcontext->__ss.__pc=runtime_trace_site_stub;return;
+ }
  /* EL0 cache maintenance that Darwin traps but Horizon allows: emulate exactly two encodings (SDK only). */
  if(num==SIGILL){uint32_t insn=*(const uint32_t *)(uintptr_t)u->uc_mcontext->__ss.__pc;unsigned rt=insn&31;
   if((insn&~31u)==0xd53b0020u){if(rt!=31)u->uc_mcontext->__ss.__x[rt]=HOST_CTR_EL0;u->uc_mcontext->__ss.__pc+=4;return;}   /* mrs Xt, CTR_EL0 */

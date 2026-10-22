@@ -195,6 +195,15 @@ static void site_probe(Module *m, uint64_t stub_off, uint64_t data_off) {
                             ins, aspect_branch(s + 28, site + 4)};
         memcpy(m->base + s, stub, sizeof stub);
         uint32_t jump = aspect_branch(site, s); memcpy(m->base + site, &jump, 4);
+        /* ACNH_TRACE_SITE=<hex> (one of the probe sites): the site becomes brk #0x7a; loader.c's signal handler prints
+           the guest call chain and x0-x3 (first 12 hits), then resumes in this stub (which runs the instruction). */
+        const char *t = getenv("ACNH_TRACE_SITE");
+        if (t && strtoull(t, NULL, 16) == site) {
+            extern uint64_t runtime_trace_site_pc, runtime_trace_site_stub;
+            runtime_trace_site_pc = (uintptr_t)m->base + site; runtime_trace_site_stub = (uintptr_t)m->base + s;
+            uint32_t brk = 0xd4200f40; memcpy(m->base + site, &brk, 4);
+            fprintf(stderr, "[acnh] trace site main+%#llx armed\n", (unsigned long long)site);
+        }
     }
     probe_counts = (volatile uint32_t *)(void *)(m->base + data_off + 64);
     pthread_t t; pthread_create(&t, NULL, probe_log, NULL); pthread_detach(t);
@@ -302,6 +311,26 @@ static void output_install(Module *m, uint64_t s, uint64_t data_off) {
 }
 #endif
 
+/* Local play editing (docs/LAN-COOP-DESIGN.md, ACNH_MP_EDIT). Each row is checked against the 3.0.0 word first.
+   "furniture": main+0x21cc50c decides whether a furniture operation is allowed (8 callers, indoor and outdoor): 1 =
+   someone else's home during a session, 2 = a special state, 3 / 4 = another player is near or in the room
+   (SYS_Telepathy 005 "It's rude to redecorate when you have company!"), 0 = allowed. The patch makes it return 0. */
+static const struct { uint64_t off; uint32_t original, patched; const char *group; } mp_edit_sites[] = {
+    {0x21cc50c, 0xa9bc7bfd, 0x52800000, "furniture"},   /* stp x29, x30, [sp, #-0x40]!  ->  mov w0, #0 */
+    {0x21cc510, 0xf9000bf7, 0xd65f03c0, "furniture"},   /* str x23, [sp, #0x10]         ->  ret */
+};
+static void mp_edit_apply(Module *m) {
+    const char *e = getenv("ACNH_MP_EDIT"); if (!e || !*e || !strcmp(e, "0")) return;
+    unsigned n = 0;
+    for (size_t i = 0; i < sizeof mp_edit_sites / sizeof *mp_edit_sites; i++) {
+        if (strcmp(e, "full") && !strstr(e, mp_edit_sites[i].group)) continue;
+        uint32_t w; memcpy(&w, m->base + mp_edit_sites[i].off, 4);
+        if (w != mp_edit_sites[i].original) runtime_fail("ACNH_MP_EDIT: a site's original word differs (another game version?)");
+        memcpy(m->base + mp_edit_sites[i].off, &mp_edit_sites[i].patched, 4); n++;
+    }
+    fprintf(stderr, "[acnh] local play editing (%s): %u word(s) patched\n", e, n);
+}
+
 void runtime_game_patches(Module *m) {
     /* Frame pacing: ACNH advances its simulation once per frame and asks for present interval 2, i.e. every second
        60 Hz vblank = 30 fps on the console. The graphics layer otherwise paces by the Mac display's refresh rate
@@ -310,6 +339,7 @@ void runtime_game_patches(Module *m) {
     setenv("DM_PRESENT_HZ", "60", 0);
     fprintf(stderr, "[acnh] main at %p\n", (void *)m->base);   /* for debugger offsets (main+0x...) */
     speedfix_apply(m);   /* before the aspect stubs, which check their own words */
+    mp_edit_apply(m);
     /* Stubs go to main's text padding: 432 zero bytes between text_end and read-only data (ro_off). */
     aspect_install_reads(m, (m->text_end + 15) & ~15ULL, (m->file_size + 0x3fff) & ~0x3fffULL);
     render_install(m, ASPECT_STUBS_END(m), (m->file_size + 0x3fff) & ~0x3fffULL);

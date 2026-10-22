@@ -78,7 +78,16 @@ static uint32_t initialize(void *pool, size_t size, size_t alloc, int concurrenc
     (void)pool; (void)size; (void)alloc; (void)concurrency;
     fprintf(stderr, "[socket] nn::socket initialised on host sockets (port offset %d)\n", coop_port_offset()); return 0;
 }
-static uint32_t finalize(void) { return 0; }
+/* As on the console, finalizing the socket library closes every socket the game still has open (a session that ended
+   abruptly leaves pia's socket behind, and the next session could not bind its port). */
+static uint32_t finalize(void) {
+    unsigned n = 0;
+    pthread_mutex_lock(&lock);
+    for (int fd = 0; fd < MAX_FD; fd++) if (socks[fd].used) { socks[fd].used = 0; close(fd); n++; }
+    pthread_mutex_unlock(&lock);
+    if (n) fprintf(stderr, "[socket] finalize closed %u socket(s)\n", n);
+    return 0;
+}
 static int socket_(int domain, int type, int protocol) {
     int base = type & ~(SWITCH_SOCK_NONBLOCK | SWITCH_SOCK_CLOEXEC);
     if (domain != AF_INET || (base != SOCK_DGRAM && base != SOCK_STREAM)) return fail(EAFNOSUPPORT);
@@ -111,7 +120,7 @@ static int bind_(int fd, const struct sockaddr_in *addr, uint32_t len) {
         vport = (uint16_t)(40000 + arc4random_uniform(9000)); real.sin_port = htons((uint16_t)(vport + off));
         r = bind(fd, (struct sockaddr *)&real, sizeof real);
     }
-    if (r) { int e = errno; log_call("bind", fd, -1); return fail(e); }
+    if (r) { int e = errno; last_errno = linux_errno(e); log_call("bind", fd, -1); return -1; }
     pthread_mutex_lock(&lock); s->vport = vport; pthread_mutex_unlock(&lock);
     if (trace) fprintf(stderr, "[socket] bind fd=%d virtual port %u (host %u)\n", fd, vport, vport + off);
     return 0;

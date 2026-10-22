@@ -422,3 +422,26 @@ visitor 14:21:56 after landing home) were written by both copies; afterwards all
 region is valid (19 in `main.dat`, 2 in `personal.dat`), and each island records the other (iLand Pro's `main.dat`
 mentions pantheon, pantheon's mentions iLand Pro). So the game's two-phase save commit (section 1.2) runs over the
 port's layer. Not yet checked: which pocket holds the item (no 3.0 pocket offsets yet), Mac + iPad, ZeroTier.
+
+### 8.5 House editing and joining without the airport: findings so far (2026-10-21)
+
+**Furniture.** A save diff of one moved item (host alone) shows the edit is "clear 4 cells, write 4 cells" of 8-byte
+items in a 192-cell-high grid in the second checksum region; nothing else changes. The "rude" message is SYS_Telepathy
+005, shown by `Player_FtrActionError.bfevfl` at the entry the code picks (`FtrIndoorOperateError_ExistsVisitor`,
+`FtrOperateError_ExistsVisitor`, `FtrPickupError_ExistsVisitor`). main+0x21cc50c decides furniture operations (0 ok,
+1 someone else's home in a session, 3/4 another player near; queries main+0x15e7060 / 0x15e7260); 8 callers, among
+them the placement checker main+0x21cd2c0 (result into player state +0x66c, copied to +0x20f0). `ACNH_MP_EDIT=furniture`
+makes it return 0: picking furniture up with a visitor present then works, **placing from the pockets still shows
+005** through a path not yet found (none of the eight name-loading sites ran in one probe round that had no visitor;
+to repeat with one). Diagnostics added: `ACNH_TRACE_SITE=<hex>` (one of the `ACNH_SITE_PROBE` sites) prints the guest
+call chain and x0-x3 at that instruction; the first trace showed the message coming from the EventFlow interpreter.
+`nn::socket::Finalize` now closes the game's sockets (a session that ended abruptly kept pia's port bound).
+
+**Joining without the airport (J2).** `SNPC_dod_11_Airport_LocalVisitor` runs every network step on the
+`EventFlowSystemActor`: NetInitLocal, NetFindSessionVillage, OpenVillageList (the game's island list), NetJoinSessionVillage,
+NetDemoLock; then `SNPC_dod_30_Airport_DepartVisitor` walks the player through the gate and calls NetEnterVillage
+(system actor) for the flight. The host side (`SNPC_dod_10_Airport_LocalHost`) is NetInitLocal, SaveSimpleSave,
+NetCreateSessionVillage, OpenVillageGate, all system actor. So a small system script in the RomFS overlay could do a
+visit or host from anywhere. Missing: the call that starts a script by name (the loader formats `EventFlow/%s.bfevfl`
+at main+0x1085a54; `System_*` scripts are started through {script, entry} tables), and a safe point on the game
+thread to call it.
