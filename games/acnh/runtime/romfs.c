@@ -120,7 +120,16 @@ unsigned runtime_romfs_open(uint64_t *out, const char *path, int mode) {
     const RomMount *m = mount_of(path);
     const char *p = rom_path(path);
     if (!m || !p) return NOT_FOUND;
-    int fd = m == &rmounts[0] && coop_fd >= 0 ? openat(coop_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    int fd = -1;
+    /* museum/: the visitor-donation scripts (ACNH_MP_EDIT "museum", coop_edit.c), only with the patch that sends the
+       donation to the host; without it a visitor's donation would record nothing */
+    static int museum = -1;
+    if (museum < 0) { const char *e = getenv("ACNH_MP_EDIT"); museum = e && (!strcmp(e, "full") || strstr(e, "museum")); }
+    if (museum && m == &rmounts[0] && coop_fd >= 0) {
+        char mp[600]; snprintf(mp, sizeof mp, "museum/%s", p);
+        fd = openat(coop_fd, mp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    }
+    if (fd < 0) fd = m == &rmounts[0] && coop_fd >= 0 ? openat(coop_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
     if (fd >= 0) fs_log("rom local play", p);
     if (fd < 0) fd = m == &rmounts[0] && overlay_fd >= 0 ? openat(overlay_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
     if (fd >= 0) fs_log("rom overlay", p);

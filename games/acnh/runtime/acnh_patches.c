@@ -11,6 +11,7 @@
 #include "game_patches.h"
 #include "aspect_patch.h"
 #include "game_version.h"
+#include "coop.h"
 
 /* Camera aspect ratio (aspect_patch.h: the picture follows the window's shape, key 4 toggles 16:9).
    ACNH uses sead's PerspectiveProjection (2.0.6: default ctor main+0x271f5e0, ctor(near, far, fovy, aspect) main+0x271f6f0;
@@ -350,6 +351,54 @@ static void mp_edit_apply(Module *m) {
     fprintf(stderr, "[acnh] local play editing (%s): %u word(s) patched\n", e, n);
 }
 
+/* Museum donations by a visitor (ACNH_MP_EDIT group "museum"; docs/LAN-COOP-DESIGN.md 8.12). The donation action
+   (EventFlowActionOwlDonationDone, main+0xafb0f0) records each item with main+0x26bdd90(museum record, item, donor),
+   where donor = main+0x24819f0(player) is the donor's resident slot on this island, or -1 for anyone else (a
+   visitor), and -1 records nothing. Its only call, main+0xafb53c, goes through this stub: with a negative donor and a
+   credit in the data page's slot (the host's slot + 1, kept by coop_edit.c while visiting; 0 otherwise) it records
+   with that credit and also puts the 8-byte item in a 16-entry ring on the data page, which coop_edit.c sends to the
+   host, whose copy records it in the island that is saved. x3, x4, x16 and x17 are free at a call.
+     tbz w2, #31, 1f; adrp x16, <data>; ldr w17, [x16, #CREDIT]; cbz w17, 1f; sub w2, w17, #1
+     ldr w17, [x16, #HEAD]; and w3, w17, #15; add x3, x16, x3, lsl #3; ldr x4, [x1]; str x4, [x3, #RING]
+     dmb ishst; add w17, w17, #1; str w17, [x16, #HEAD]; 1: b main+0x26bdd90
+   Mac only for now, like the site probes it sits after. */
+#if !TARGET_OS_IPHONE
+#define MUSEUM_SITE 0x0afb53cu
+#define MUSEUM_RECORD 0x26bdd90u
+#define MUSEUM_STUB (SIZE_STUBS + 32 * 24)   /* after the site probes' stubs */
+#define MUSEUM_CREDIT 0x200
+#define MUSEUM_HEAD 0x204
+#define MUSEUM_RING 0x210
+static void museum_install(Module *m, uint64_t s, uint64_t data_off) {
+    const char *e = getenv("ACNH_MP_EDIT");
+    if (!e || (strcmp(e, "full") && !strstr(e, "museum"))) return;
+    uint32_t call; memcpy(&call, m->base + MUSEUM_SITE, 4);
+    if (call != aspect_branch(MUSEUM_SITE, MUSEUM_RECORD) + 0x80000000u) runtime_fail("ACNH_MP_EDIT museum: the donation call differs (another game version?)");
+    if (s + 64 > m->ro_off) runtime_fail("ACNH_MP_EDIT museum: no room in main's text padding");
+    for (unsigned b = 0; b < 64; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT museum: text padding in use");
+    if (data_off + MUSEUM_RING + 16 * 8 > m->size) runtime_fail("ACNH_MP_EDIT museum: no data page after main");
+    uint32_t stub[14] = {
+        0x36000000u | 31u << 19 | 13u << 5 | 2,                        /* tbz w2, #31, 1f */
+        (adrp_x10(s + 4, data_off) & ~31u) | 16,                       /* adrp x16, <data> */
+        0xb9400000u | (MUSEUM_CREDIT / 4) << 10 | 16 << 5 | 17,        /* ldr w17, [x16, #CREDIT] */
+        0x34000000u | 10u << 5 | 17,                                   /* cbz w17, 1f */
+        0x51000400u | 17 << 5 | 2,                                     /* sub w2, w17, #1 */
+        0xb9400000u | (MUSEUM_HEAD / 4) << 10 | 16 << 5 | 17,          /* ldr w17, [x16, #HEAD] */
+        0x12000c00u | 17 << 5 | 3,                                     /* and w3, w17, #15 */
+        0x8b000000u | 3 << 16 | 3 << 10 | 16 << 5 | 3,                 /* add x3, x16, x3, lsl #3 */
+        0xf9400000u | 1 << 5 | 4,                                      /* ldr x4, [x1] */
+        0xf9000000u | (MUSEUM_RING / 8) << 10 | 3 << 5 | 4,            /* str x4, [x3, #RING] */
+        0xd5033abfu,                                                   /* dmb ishst */
+        0x11000400u | 17 << 5 | 17,                                    /* add w17, w17, #1 */
+        0xb9000000u | (MUSEUM_HEAD / 4) << 10 | 16 << 5 | 17,          /* str w17, [x16, #HEAD] */
+        aspect_branch(s + 52, MUSEUM_RECORD)};                         /* 1: b main+0x26bdd90 */
+    memcpy(m->base + s, stub, sizeof stub);
+    uint32_t bl = aspect_branch(MUSEUM_SITE, s) + 0x80000000u; memcpy(m->base + MUSEUM_SITE, &bl, 4);
+    coop_edit_set_queue((volatile uint32_t *)(void *)(m->base + data_off + MUSEUM_CREDIT), (volatile uint64_t *)(void *)(m->base + data_off + MUSEUM_RING));
+    fprintf(stderr, "[acnh] local play editing: visitor museum donations go to the host\n");
+}
+#endif
+
 void runtime_game_patches(Module *m) {
     /* Frame pacing: ACNH advances its simulation once per frame and asks for present interval 2, i.e. every second
        60 Hz vblank = 30 fps on the console. The graphics layer otherwise paces by the Mac display's refresh rate
@@ -365,6 +414,7 @@ void runtime_game_patches(Module *m) {
 #if !TARGET_OS_IPHONE
     output_install(m, ASPECT_STUBS_END(m) + 32, (m->file_size + 0x3fff) & ~0x3fffULL);
     site_probe(m, ASPECT_STUBS_END(m) + SIZE_STUBS, (m->file_size + 0x3fff) & ~0x3fffULL);
+    museum_install(m, ASPECT_STUBS_END(m) + MUSEUM_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
 #endif
 }
 

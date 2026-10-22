@@ -47,6 +47,7 @@ void coop_flow_request(int what) {
 const char *coop_flow_result(void) { return last_result; }
 
 void coop_flow_tick(void) {
+    coop_edit_tick();   /* coop_edit.c: museum donations between visitor and host */
     int what = atomic_exchange(&pending, 0);
     if (!what) return;
     uint8_t *main = runtime_module_base("main");

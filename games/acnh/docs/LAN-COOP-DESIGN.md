@@ -543,3 +543,36 @@ saw it; picking up works too. `ACNH_MP_EDIT=furniture` is now 8 words.
 - The host's copy of a visitor trails her by about 0.2–0.3 s and settles within a unit of where she stops. A
   host-authoritative edit therefore acts on the host's view of her position, which is close enough to pick a tile.
 - New tool: `memsnap` (runtime/mem_diag.c) with scripts/memsnap_diff.py.
+
+### 8.12 Visitor museum donations, carried out by the host's copy (2026-10-22): works
+
+The first edit done the host-authoritative way (decision on progress data, 4.1). Enabled with `ACNH_MP_EDIT` group
+`museum`.
+
+- **Two script gates, lifted by an overlay.** The overlay lives in `build/romfs-coop/museum/` and the runtime reads it
+  only with the group on (scripts/make_coop_flows.py):
+  - `SNPC_owl` asks `IsMyVillage` and sends a visitor to small talk (`SNPC_owl_90_OtherTown`). That branch now takes
+    the resident's path.
+  - `SNPC_owl_01_Museum_Donation` Event55 asks `NetHasVisitor` and refuses **everyone** while the island has a visitor,
+    the host too (`SP_owl_00_Common:101`). That branch now goes on to the donation. This file has entry-point
+    variables, which the evfl package cannot write, so its case table is patched in place (1 byte).
+- **The donation's native code.** `EventFlowActionOwlDonationDone` is found in the action table, keyed by its
+  Murmur3 hash, at main+0x1023760. Its execute method is main+0xafb0f0. For each selected item it:
+  - checks with main+0x26bd5b0(museum, item), "not yet donated and a museum item";
+  - records with main+0x26bdd90(museum, item, donor);
+  - computes the donor with main+0x24819f0(player), the player's **resident slot** on this island, or −1 for anyone
+    else. With −1 nothing is recorded, so the save format cannot hold a visitor as a donor.
+- **The route.**
+  1. A stub on the record call (main+0xafb53c, runtime/acnh_patches.c) replaces −1 with the host's slot, kept up to
+     date by runtime/coop_edit.c. It records in the visitor's copy, so she sees the exhibit, and queues the item.
+  2. coop_edit.c sends the item to the host (an `EDIT` message on the control connection, coop_lan.c).
+  3. The host's copy makes the same calls on its own island data and records the item.
+- **Tested with two copies:** Panthea donated a bluegill (0x08b8) and a salmon (0x08c2).
+  - Both copies' live museum records gained them.
+  - After she left, the host's saved `main.dat` held 131 items ending in those two, donor slot 0, dated 2026-10-22.
+  - Her pockets lost them as for any donation.
+- **Accepted limits:**
+  - The plaque credits the host (decision 4.1).
+  - Mac only: the stub sits beside the Mac-only probes.
+  - If the host's museum already has the item, the host logs it and records nothing, but the visitor's item is still
+    gone.

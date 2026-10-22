@@ -176,7 +176,29 @@ A recorder logged both copies' datagrams every 0.5 s and screenshots of both win
    notes). Then sample both addresses with `peek` while she walks, using `down 2` / `up 2`. Do not use `key`, which
    blocks the command reader for its whole duration.
 
-## 6. The island's item layer
+## 6. Save files: how they are structured (3.0.0)
+
+- **Encryption.** Each `x.dat` is encrypted with AES-128-CTR. The key and counter come from its `xHeader.dat`, as NHSE
+  documents. `scripts/acnh_save_crypt.py <header> <dat> <out>` decrypts and also encrypts. Murmur3 checksums cover
+  regions (19 in `main.dat`, 2 in `personal.dat`): scripts/acnh_save_regions.c.
+- **Items.** Every item is 8 bytes: u16 id, u8 system flags, u8 extra, u32 value (stack count − 1 or uses). 0xfffe is
+  empty. The ids are the numbers in the item-name message labels, e.g. `String_USen`
+  `Item/STR_ItemName_31_Fish.msbt` label `Fish_00328` "crucian carp" is 0x0148, and `FishingRod_02377` is 0x0949.
+- **`personal.dat`** (one per player, 0x74a40 bytes):
+  - pocket 2: 20 items at 0x37bf0, then a u32 slot count (0x14) and 20 flag bytes;
+  - pocket 1: 20 items at 0x37ca8, with the same trailer;
+  - home storage: from about 0x37d74.
+- **`main.dat`** (0x9b0e90 bytes): the museum record is at 0x491220, 0x3404 bytes:
+  - +0x4: 0x400 dates, u32 = year | month << 16 | day << 24;
+  - +0x1004: 0x400 items, in donation order, ending at the first 0xfffe;
+  - +0x3004: 0x400 donor bytes, each the donor's resident slot.
+- **In memory** the game keeps several copies of each of these in save format:
+  - museum: four on the host (two live, two refreshed when it saves) and two on a visitor;
+  - pockets: two on the player's own copy.
+  - Live edits (`poke`) must change all of the live ones. That is how a bluegill and a salmon were put in Panthea's
+    pockets for the donation test (LAN-COOP-DESIGN.md 8.12).
+
+## 7. The island's item layer
 
 - Each cell is 8 bytes: u16 item, u8, u8, u32. 0xfffe is empty; 0xfffd is an extension cell that holds its column / row
   offset.
@@ -184,13 +206,13 @@ A recorder logged both copies' datagrams every 0.5 s and screenshots of both win
 - There are six identical copies in memory, all save-format buffers. Outdoor rotation and the live field state are
   kept elsewhere. [confirmed: LAN-COOP-DESIGN.md 8.10]
 
-## 7. Co-op checks found so far
+## 8. Co-op checks found so far
 
 The patch table `mp_edit_sites` in runtime/acnh_patches.c lists each "company" or "not your island" check that has
 been lifted, with its group (`ACNH_MP_EDIT=furniture,…`). scripts/mp_count_checks.py lists the readers of the session
 player count. The findings behind each entry are in LAN-COOP-DESIGN.md 8.5–8.10.
 
-## 8. Open
+## 9. Open
 
 - **Which copy of the position is the source.** A `watch` on the 5.2 records during a walk would name the writer. That
   function is where the game's own player position lives.

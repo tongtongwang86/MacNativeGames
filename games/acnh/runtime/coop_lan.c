@@ -5,7 +5,8 @@
      island name, NetworkInfo). Works on a LAN and on ZeroTier; on networks without broadcast the address is typed in.
    - Control, TCP on the host's COOP_PORT + offset: a station sends JOIN (name, version, its port offset), the host
      answers ACCEPT (node, NetworkInfo) and then sends every member NODES (where each node's traffic goes) and INFO
-     whenever the session changes. Closing the connection leaves the session.
+     whenever the session changes. A station may send EDIT (coop_edit.c: an edit of the island that only the host's
+     copy may carry out, e.g. a museum donation). Closing the connection leaves the session.
    ACNH_COOP_PORT_OFFSET gives a copy its port offset (two copies on one Mac: 0 and 100); ACNH_COOP_PEERS adds
    addresses ("ip[:port],..."). The browser's manual list is <profile>/coop-islands.txt. */
 #include "runtime.h"
@@ -25,7 +26,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-enum { MSG_SCAN = 1, MSG_INFO = 2, MSG_JOIN = 3, MSG_ACCEPT = 4, MSG_NODES = 5, MSG_UPDATE = 6, MSG_REFUSE = 7 };
+enum { MSG_SCAN = 1, MSG_INFO = 2, MSG_JOIN = 3, MSG_ACCEPT = 4, MSG_NODES = 5, MSG_UPDATE = 6, MSG_REFUSE = 7, MSG_EDIT = 8 };
 static const char MAGIC[8] = {'A', 'C', 'N', 'H', 'C', 'O', 'O', 'P'};
 #define VERSION 1
 #define MAX_ISLANDS 32
@@ -239,8 +240,10 @@ static void *host_main(void *arg) {
             int k = k2fd[i - 3]; uint8_t type; uint32_t n; uint8_t body[16];
             pthread_mutex_lock(&lock);
             if (members[k].fd == p[i].fd) {
+                int node = members[k].node;
                 pthread_mutex_unlock(&lock);
-                int bad = recv_msg(p[i].fd, &type, body, sizeof body, &n);   /* stations only ever close */
+                int bad = recv_msg(p[i].fd, &type, body, sizeof body, &n);   /* EDIT, or the station closing */
+                if (!bad && type == MSG_EDIT) coop_edit_received(node, body, n);
                 pthread_mutex_lock(&lock);
                 if (bad && members[k].fd == p[i].fd) drop_member(k, "connection closed");
             }
@@ -454,6 +457,12 @@ int coop_lan_connect(const LdnNetworkInfo *target, const char *user_name, int16_
     pthread_detach(station_thread);
     fprintf(stderr, "[coop] %s\n", coop_status());
     return 0;
+}
+int coop_lan_send_edit(const void *body, uint32_t n) {   /* station: to the host (game thread) */
+    pthread_mutex_lock(&lock);
+    int r = station_running && station_fd >= 0 ? send_msg(station_fd, MSG_EDIT, body, n) : -1;
+    pthread_mutex_unlock(&lock);
+    return r;
 }
 void coop_lan_disconnect(void) {
     pthread_mutex_lock(&lock); int fd = station_fd, running = station_running; station_fd = -1; station_running = 0; set_self(-1); pthread_mutex_unlock(&lock);

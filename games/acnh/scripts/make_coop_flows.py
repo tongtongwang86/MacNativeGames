@@ -10,10 +10,17 @@ SNPC_dod_10_Airport_LocalHost; a flowchart with Orville's actor is refused away 
   Coop_Visit  save, start local mode, search, the game's island list when several answer, the Dodo Code prompt when the
               island has one, join, lock the session, fly (NetEnterVillage, without the walk through the gate)
   Coop_Host   save, start local mode, open the session (no Dodo Code), open the gate
-in Coop_LocalVisitor and Coop_LocalHost. EventFlow/Info/EventFlowInfoProduct.byml lists them (no subfiles). Needs the evfl and byml packages (pip install evfl byml). Nothing made here is committed: it is built from
+in Coop_LocalVisitor and Coop_LocalHost. EventFlow/Info/EventFlowInfoProduct.byml lists them (no subfiles).
+It also writes museum/EventFlow/SNPC_owl.bfevfl: Blathers' script with its "is this my island?" branch (which sends a
+visitor to small talk, SNPC_owl_90_OtherTown) going the resident's way, so a visitor can donate. The runtime reads
+museum/ only with ACNH_MP_EDIT "museum", whose patch sends the donation to the host (runtime/coop_edit.c). And
+museum/EventFlow/SNPC_owl_01_Museum_Donation.bfevfl: the donation script with its "the island has a visitor" refusal
+(SP_owl_00_Common:101, which stops everyone, the host too, while anyone visits) going on to the donation. That file
+has entry points with variables, which the evfl package cannot write, so its case table is patched in place. Needs the evfl and byml packages (pip install evfl byml). Nothing made here is committed: it is built from
 the player's own game files."""
 import argparse
 import copy
+import struct
 from pathlib import Path
 
 import byml
@@ -132,6 +139,36 @@ def add_host(fc):
     b.entry('Coop_Test', b.action('OpenMessageWindow', None, MessageID='TalkSys/SYS_Save:001', IsCloseMessageWindow=True))   # diagnostics
 
 
+def visitor_refusal(data, patched=False):
+    """The donation script's NetHasVisitor switch: (its name, the refusal's event index, the other case's index).
+    Read only, with entry-point variables skipped (the evfl package asserts there are none)."""
+    import evfl.entry_point as ep
+    from evfl.util import SeekContext
+    keep = ep.EntryPoint._do_read
+
+    def read(self, stream):
+        off = stream.read_u64(); stream.read_u64(); stream.read_u64(); n = stream.read_u16(); stream.read_u16()
+        self.main_event._idx = stream.read_u16(); stream.read_u16()
+        if n:
+            with SeekContext(stream, off):
+                self._sub_flow_event_indices = [stream.read_u16() for _ in range(n)]
+    ep.EntryPoint._do_read = read
+    try:
+        ef = evfl.EventFlow(); ef.read(data)
+    finally:
+        ep.EntryPoint._do_read = keep
+    events = ef.flowchart.events
+    sws = [e for e in events if isinstance(e.data, SwitchEvent) and e.data.actor_query.v.v == 'EventFlowQueryNetHasVisitor']
+    assert len(sws) == 1 and set(sws[0].data.cases) == {0, 1}, 'SNPC_owl_01_Museum_Donation: expected one NetHasVisitor switch'
+    cases = sws[0].data.cases
+    if patched:
+        assert cases[0].v is cases[1].v
+        return cases[0].v.name
+    refuse = cases[0].v
+    assert isinstance(refuse.data, ActionEvent) and refuse.data.params.data['MessageID'].endswith(':101'), 'refusal moved'
+    return sws[0].name, events.index(refuse), events.index(cases[1].v)
+
+
 def main():
     ap = argparse.ArgumentParser()
     here = Path(__file__).resolve().parent.parent
@@ -154,6 +191,30 @@ def main():
         check.read((a.out / f'EventFlow/{name}.bfevfl').read_bytes())
         assert entry in [e.name for e in check.flowchart.entry_points], name
         print(f'{name}: {len(check.flowchart.events)} events, actions {[h.v for h in check.flowchart.actors[0].actions]}')
+    owl = evfl.EventFlow()
+    owl.read((a.romfs / 'EventFlow/SNPC_owl.bfevfl').read_bytes())
+    gate = [e for e in owl.flowchart.events if type(e.data).__name__ == 'SwitchEvent'
+            and e.data.actor_query.v.v == 'EventFlowQueryIsMyVillage']
+    assert len(gate) == 1 and set(gate[0].data.cases) == {0, 1}, 'SNPC_owl: expected one IsMyVillage switch'
+    gate[0].data.cases[1] = gate[0].data.cases[0]   # 1 (another island) -> the resident's path
+    (a.out / 'museum/EventFlow').mkdir(parents=True, exist_ok=True)
+    with open(a.out / 'museum/EventFlow/SNPC_owl.bfevfl', 'wb') as f:
+        owl.write(f)
+    check = evfl.EventFlow()
+    check.read((a.out / 'museum/EventFlow/SNPC_owl.bfevfl').read_bytes())
+    sw = [e for e in check.flowchart.events if e.name == gate[0].name][0].data
+    assert sw.cases[0].v is sw.cases[1].v
+    print(f'SNPC_owl: {gate[0].name} sends visitors the resident way ({sw.cases[0].v.name})')
+    donation = 'EventFlow/SNPC_owl_01_Museum_Donation.bfevfl'
+    raw = bytearray((a.romfs / donation).read_bytes())
+    sw, refuse, go = visitor_refusal(bytes(raw))
+    rows = [struct.pack('<IHH', 0, refuse, 0) + struct.pack('<IHH', 1, go, 0)]
+    at = [i for i in range(0, len(raw) - 16, 8) if raw[i:i + 16] == rows[0]]
+    assert len(at) == 1, 'SNPC_owl_01_Museum_Donation: the visitor switch\'s case table not found once'
+    struct.pack_into('<H', raw, at[0] + 4, go)
+    (a.out / f'museum/{donation}').write_bytes(raw)
+    check = visitor_refusal(bytes(raw), patched=True)
+    print(f'SNPC_owl_01_Museum_Donation: {sw} goes on to the donation with visitors ({check})')
     info_path = a.romfs / 'EventFlow/Info/EventFlowInfoProduct.byml'
     raw = info_path.read_bytes()
     info = byml.Byml(raw).parse()
