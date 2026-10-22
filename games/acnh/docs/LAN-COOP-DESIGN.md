@@ -506,3 +506,22 @@ saw it; picking up works too. `ACNH_MP_EDIT=furniture` is now 8 words.
   visitor's pick-up refusal is decided elsewhere (expected: the item layer's own owner / "placed vs dropped" rule).
 - Next: find who builds the +0xa0 structure when the owner grabs furniture (watch on it, as in 8.7), and decide between
   building it for visitors too and having the host do the grab and replicate it (the design's host-sequenced channel).
+
+### 8.10 Visitor grab / turn / pick up: findings, and the switch to host-authoritative edits (2026-10-22)
+
+- **Grab:** main+0x21cc50c fully lifted again (`furniture`) for host and visitor. The visitor's crash when holding the
+  owner's furniture was a failed render-target allocation ("ExtendGBuffer", pool search main+0x3865630 returning null),
+  not missing ownership; with the output patch's larger pools (the Mac default) it holds furniture without crashing.
+  (Narrowing the patch to results 3 / 4 had also taken result 2 away from the host, who could then no longer turn.)
+- **Turn, visitor:** `State::cFtrRotateReady` (0x52) runs main+0x22e4ab8 each push. Gate 1: byte 0x3e of the target
+  record copied into the player at main+0x225aeb8 (player +0x191e) is 0 on the visitor (host: set). Ignoring it
+  (`cbz w25` at main+0x22e4dd8) reaches main+0x22e552c, where gate 2, main+0x1292974 (the player's action-condition
+  graph), answers "back to ready" (1 = turn, 3 = wait). Each layer showed the visitor's copy lacking owner data, so the
+  user chose the host-authoritative route: the visitor's refused action is sent to the host's copy, which does it.
+- **Where the island's items live:** the outdoor item layer (8-byte cells, 0x600 per column of 192; `0xfffd` extension
+  cells carry their column/row offset) has six identical copies in memory, all save-format buffers. Turning the train
+  set (item 0x0055, a 3 x 3 footprint) as the host, then saving, changed **nothing** in its cells or anywhere in the item
+  layer, so outdoor rotation is stored elsewhere, and the live layer is not one of these copies. Open: find the live field
+  item representation (watch on a host turn or pick-up) before the host can apply a visitor's request.
+- Tools added: Ghidra project of the game's own `main` (`scripts/ghidra_prep.py`, `scripts/ghidra/*.java`, decompile
+  any function in seconds); `memfind` / `peek` / `poke` and `watch` in `TOTK_INPUT_FILE`.

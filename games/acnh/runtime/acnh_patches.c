@@ -318,14 +318,13 @@ static void output_install(Module *m, uint64_t s, uint64_t data_off) {
 static const struct { uint64_t off; uint32_t original, patched; const char *group; } mp_edit_sites[] = {
     /* Only 3 and 4 (another player near or in the room) are lifted. 1 stays: a visitor who could grab and turn the
        host's furniture crashed (main+0x3847ca0 reads an object only the island's owner has), so that needs more work. */
-    /* "visitor-grab": all of it, so a visitor can also hold and turn the owner's furniture. Holding it allocates a
-       half-resolution "ExtendGBuffer" render target (main+0x1458fd0 -> 0x38472d0 -> pool search main+0x3865630); with the
-       game's own pool sizes the visitor's search fails and main+0x3847ca0 uses the null result (crash). Under test with
-       the larger pools of the output patch. */
-    {0x21cc50c, 0xa9bc7bfd, 0x52800000, "visitor-grab"},   /* stp x29, x30, [sp, #-0x40]!  ->  mov w0, #0 */
-    {0x21cc510, 0xf9000bf7, 0xd65f03c0, "visitor-grab"},   /* str x23, [sp, #0x10]         ->  ret */
-    {0x21cc714, 0x52800060, 0x52800000, "furniture"},   /* mov w0, #3 -> mov w0, #0 */
-    {0x21cc724, 0x52800080, 0x52800000, "furniture"},   /* mov w0, #4 -> mov w0, #0 */
+    /* All of it (0 = allowed), for host and visitor. A visitor holding the owner's furniture allocates a half-resolution
+       "ExtendGBuffer" render target (main+0x1458fd0 -> 0x38472d0 -> pool search main+0x3865630); with the game's own
+       render-target pools that search fails and main+0x3847ca0 uses the null result (crash), so this needs the output
+       patch's larger pools (the default on the Mac; ACNH_OUTPUT_RES=0 turns them off). Turning or picking up the
+       owner's furniture still does not work for a visitor (LAN-COOP-DESIGN.md 8.10). */
+    {0x21cc50c, 0xa9bc7bfd, 0x52800000, "furniture"},   /* stp x29, x30, [sp, #-0x40]!  ->  mov w0, #0 */
+    {0x21cc510, 0xf9000bf7, 0xd65f03c0, "furniture"},   /* str x23, [sp, #0x10]         ->  ret */
     /* main+0x3353540: may an item from the pockets be placed here? Returns 0 or a reason the pocket menu turns into a
        message: 0x10 indoors with 2+ players in the session (SYS_Telepathy 005 "It's rude to redecorate when you have
        company!"), 0x11 outdoors (012 "There's company over right now"). Found with the "watch" diagnostic on the pocket
