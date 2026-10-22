@@ -164,12 +164,12 @@ static int speedfix_apply(Module *m) {
 /* ACNH_SITE_PROBE=<hex>,<hex>,... (Mac, diagnostics): counts how often each main+<hex> instruction runs and logs the
    counts every 5 s. Each site branches to a stub in the text padding after the aspect stubs that bumps a counter on the
    data page after main (+64 + 4 * i), runs the instruction (it must not be PC-relative) and branches back. */
-#define PROBE_MAX 8
+#define PROBE_MAX 24
 static volatile uint32_t *probe_counts; static uint64_t probe_sites[PROBE_MAX]; static unsigned probe_n;
 static void *probe_log(void *unused) {
     (void)unused;
     for (;;) {
-        sleep(5); char line[512]; int n = snprintf(line, sizeof line, "[acnh] site probe:");
+        sleep(5); char line[1024]; int n = snprintf(line, sizeof line, "[acnh] site probe:");
         for (unsigned i = 0; i < probe_n; i++) n += snprintf(line + n, sizeof line - n, " +%#llx=%u", (unsigned long long)probe_sites[i], probe_counts[i]);
         fprintf(stderr, "%s\n", line);
     }

@@ -337,7 +337,10 @@ static void crash(int num,siginfo_t *info,void *context) {
  ucontext_t *u=context;
  if((num==SIGTRAP||num==SIGILL)&&runtime_trace_site_pc&&u->uc_mcontext->__ss.__pc==runtime_trace_site_pc){
   static int hits,skip=-1,max;if(skip<0){const char *e=getenv("ACNH_TRACE_SKIP");skip=e?atoi(e):0;e=getenv("ACNH_TRACE_MAX");max=e?atoi(e):12;}   /* ACNH_TRACE_SKIP / ACNH_TRACE_MAX: which hits to print */
-  hits++;if(hits>skip&&hits<=skip+max){signal_hex("[acnh] trace site hit, lr=",u->uc_mcontext->__ss.__lr);for(unsigned i=0;i<4;i++)signal_hex("  x=",u->uc_mcontext->__ss.__x[i]);
+  /* ACNH_TRACE_NEW=1: print each calling site (lr) only the first time, so a site called every frame shows once */
+  static int only_new=-1;static uint64_t seen[256];static unsigned nseen;if(only_new<0)only_new=getenv("ACNH_TRACE_NEW")!=NULL;
+  int fresh=1;if(only_new){uint64_t lr0=u->uc_mcontext->__ss.__lr;for(unsigned i=0;i<nseen;i++)if(seen[i]==lr0)fresh=0;if(fresh&&nseen<256)seen[nseen++]=lr0;}
+  if(fresh)hits++;if(fresh&&hits>skip&&hits<=skip+max){signal_hex("[acnh] trace site hit, lr=",u->uc_mcontext->__ss.__lr);for(unsigned i=0;i<4;i++)signal_hex("  x=",u->uc_mcontext->__ss.__x[i]);
    if(getenv("ACNH_TRACE_X1")){uint64_t w[6];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),u->uc_mcontext->__ss.__x[1],sizeof w,(uintptr_t)w,&got)==KERN_SUCCESS&&got==sizeof w){for(unsigned i=0;i<6;i++)signal_hex("  [x1]=",w[i]);
      for(unsigned k=1;k<4;k+=2){char str[48];mach_vm_size_t sg=0;   /* the two SafeStrings' text (flowchart, entry) */
       if(mach_vm_read_overwrite(mach_task_self(),w[k],sizeof str-1,(uintptr_t)str,&sg)==KERN_SUCCESS){str[sizeof str-1]=0;size_t n=strnlen(str,sizeof str-1);write(2,"  name: ",8);write(2,str,n);write(2,"\n",1);}}}}   /* ACNH_TRACE_X1: the first 48 bytes x1 points to */
