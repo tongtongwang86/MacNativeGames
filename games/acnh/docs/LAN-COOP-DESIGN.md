@@ -610,3 +610,41 @@ applies: outside a session, as the host, and as a visitor. Each also has a diagn
 - **Tested with two copies on one Mac:**
   - Leave: Panthea flew home.
   - Stop: Panthea was sent home, the host saved and closed the gate, and both copies went back to idle.
+
+### 8.14 Visitor turn and pick-up: what actually blocks them (2026-10-22)
+
+Measured with counters on the player's state entries on both copies (`ACNH_SITE_PROBE`) and a trap on the disabled
+state (`ACNH_TRACE_SITE`). Corrections to 8.10 first.
+
+- **State ids.** In the registration code (main+0x2286xxx–0x2287xxx) each state's name string comes **before**
+  `mov w1, #id`. The state-change call main+0x3db9620 takes **id − 1**, as do the enter functions'
+  main+0x2274140(player, id − 1).
+
+  | State | Id | Enter |
+  |---|---|---|
+  | cPickupWait | 0x23 | main+0x22918c0 |
+  | cPickup | 0x24 | main+0x2291a64 |
+  | cFtrPickup | 0x26 | main+0x2291dd4 |
+  | cFtrHold | 0x48 | main+0x22957ac |
+  | cFtrRotateReady | 0x52 | main+0x2296bec, run main+0x2296c2c → main+0x22e4ab8 |
+  | cFtrRotateDisable | 0x53 | main+0x2296d94, run main+0x2296dd4 → main+0x22e552c |
+  | cFtrRotate | 0x55 | main+0x22970e4 |
+
+- **Players' actions travel as states.** main+0x2259760 fills the player's network state record at player+0x18e0:
+  player number, stage, state id, position (x×1000, y×4, z×1000 as integers), angle, speed and flags. Every copy runs
+  the other players' states itself; state counters on the host's copy step exactly with Panthea's. So when a player's
+  own copy turns furniture, the others replay the turn.
+- **Turning.** Panthea goes hold → rotate-ready → rotate-disabled, every time. The byte check in main+0x22e4ab8
+  (player+0x191e) is not her gate: she already takes the normal path there. A patch forcing it changed nothing, and was
+  removed. Her gate is main+0x22e552c, which:
+  1. marks her entry in the per-player session table, `*(main+0x4ab3f08)+0x20+player*0x740`, as requesting
+     (+0x5b4 = 2);
+  2. polls the request at +0x658 with main+0x1292974, a job in the table under `*(main+0x4abb1a8)` (0x518-byte
+     entries, state at +0x2c): 1 granted → cFtrRotate, 3 pending → wait, otherwise failed → back to ready.
+
+  **Turning furniture with company needs a lock that is asked for over the network, and Panthea's request fails.**
+  Forcing "granted" on her copy (8.10) could not work: no copy holds the lock. Next: find where the request is
+  answered (expected: the host's copy, refusing a visitor) and grant visitors there.
+- **Y pick-up.** The host's Y on placed outdoor furniture enters cPickupWait (0x23). Panthea's Y enters no pick-up
+  state at all, so her refusal is decided before any state change; it is probably the same lock request, still to
+  confirm.
