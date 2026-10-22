@@ -486,3 +486,11 @@ lands at the host's airport, no airport walk on either side.
   run the session (arrivals, the save commit, who simulates what).
 - Also: Host / Visit in the Local Play window are refused while a session is running (pressing one again restarted
   local play and broke the session for everyone).
+
+### 8.8 The visitor places and picks up furniture (2026-10-21)
+
+On someone else's island the pocket submenu (built by main+0x307cf70) left out "Place Item" (CmnSubWin 0111) after
+asking main+0x2567d40, "is this player on their own island?" (the value the game also exposes as `IsInMyVillage`).
+Counters on the menu's eleven calls of it showed three run when the menu opens; those three now answer yes (this menu
+only, the player's real location is untouched). With that, Panthea placed furniture on the host's island and the host
+saw it; picking up works too. `ACNH_MP_EDIT=furniture` is now 8 words.

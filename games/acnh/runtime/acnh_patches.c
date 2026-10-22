@@ -325,6 +325,11 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
     {0x3353818, 0x54001183, 0x1400008c, "furniture"},   /* b.lo +0x230 (outdoors, < 2 players: allowed) -> b */
     {0x3353960, 0x54000122, 0x14000025, "furniture"},   /* b.hs 0x3353984 (2+ players: indoor block)    -> b 0x33539f4 */
     {0x3353980, 0x540003a9, 0x1400001d, "furniture"},   /* b.ls 0x33539f4 (<= 1 player: allowed)        -> b */
+    /* main+0x307cf70 builds the pocket item submenu; on another island it leaves out "Place Item" (CmnSubWin 0111)
+       after asking main+0x2567d40, "is this player on their own island?". These three calls answer yes (this menu only). */
+    {0x307d9ec, 0x97d3a8d5, 0x52800020, "furniture"},   /* bl IsInMyVillage -> mov w0, #1 */
+    {0x307e5a0, 0x97d3a5e8, 0x52800020, "furniture"},   /* bl IsInMyVillage -> mov w0, #1 */
+    {0x307e918, 0x97d3a50a, 0x52800020, "furniture"},   /* bl IsInMyVillage -> mov w0, #1 */
 };
 static void mp_edit_apply(Module *m) {
     const char *e = getenv("ACNH_MP_EDIT"); if (!e || !*e || !strcmp(e, "0")) return;
