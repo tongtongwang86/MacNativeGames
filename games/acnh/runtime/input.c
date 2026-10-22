@@ -63,8 +63,9 @@ static void supported_ids(const uint32_t *ids,uint64_t n){if(n>10||(!ids&&n))run
 static void supported_styles(uint32_t value){pthread_mutex_lock(&inputLock);styles=value;pthread_mutex_unlock(&inputLock);}
 static uint32_t style(const uint32_t *id){if(!id)runtime_fail("controller id pointer");input_log("style set",*id);pthread_mutex_lock(&inputLock);uint32_t v=enabled&&allowed&&*id==pad_id()?(styles&pad_style()):0;pthread_mutex_unlock(&inputLock);return v;}
 static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_style);
-static int full_states(NpadState *out,int max,const uint32_t *id){return pad_states(out,max,id,1);}
-static int handheld_states(NpadState *out,int max,const uint32_t *id){return pad_states(out,max,id,2);}
+void coop_flow_tick(void);   /* coop_flow.c: Local play requests start on the game's thread, once per controller read */
+static int full_states(NpadState *out,int max,const uint32_t *id){coop_flow_tick();return pad_states(out,max,id,1);}
+static int handheld_states(NpadState *out,int max,const uint32_t *id){coop_flow_tick();return pad_states(out,max,id,2);}
 static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_style){if(max<=0)return 0;if(id)input_log(want_style==2?"handheld state":"full-key state",*id);if(!out||!id)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);NpadState state={.sampling=++sample};if(enabled&&allowed&&*id==pad_id()&&want_style==pad_style()&&(styles&want_style)){
  state.attributes=1;for(unsigned i=0;i<128;i++)if(keys[i])state.buttons|=button(i);state.buttons|=gamesettings_buttons(user_keys);state.buttons|=pending;pending=0;
  state.lx=32767*((int)keys[2]-(int)keys[0]);state.ly=32767*((int)keys[13]-(int)keys[1]);state.rx=32767*((int)keys[124]-(int)keys[123]);state.ry=32767*((int)keys[126]-(int)keys[125]);
@@ -239,6 +240,13 @@ static void *input_file(void *arg) {
             runtime_frame_step_pin(ms);
         } else if (!strcmp(line, "threads\n")) {   /* every guest thread's wait state and guest return chain, now (a hang: what is each thread waiting for) */
             runtime_dump_threads();
+        } else if (!strncmp(line, "coop actor ", 11)) {   /* "coop actor <hex actor handle> <player index>" (diagnostics) */
+            extern void coop_flow_actor(uint32_t actor, int player); char *end; uint32_t a = (uint32_t)strtoul(line + 11, &end, 16);
+            coop_flow_actor(a, (int)strtol(end, NULL, 10));
+        } else if (!strncmp(line, "coop flow ", 10)) {   /* "coop flow <flowchart>:<entry>" (diagnostics) */
+            extern void coop_flow_test(const char *flow_entry); line[strcspn(line, "\r\n")] = 0; coop_flow_test(line + 10);
+        } else if (!strcmp(line, "coop visit\n") || !strcmp(line, "coop host\n") || !strcmp(line, "coop test\n")) {   /* Local play without the airport (coop_flow.c) */
+            extern void coop_flow_request(int what); coop_flow_request(line[5] == 'v' ? 1 : line[5] == 'h' ? 2 : 3);
         } else if (!strcmp(line, "close\n")) { runtime_front_request_close(); break; }
         else runtime_fail("invalid diagnostic input command");
     }

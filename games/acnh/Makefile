@@ -16,11 +16,11 @@ RUNTIME_HDR := $(wildcard runtime/*.h) vendor/savesync/savesync.h vendor/gameset
 
 .PHONY: help dependencies rewrite tables boot verify-startup clean icon
 help:
-	@echo 'targets: dependencies rewrite tables build/acnh-native boot verify-startup icon'
+	@echo 'targets: dependencies rewrite tables build/acnh-native romfs-coop boot verify-startup icon'
 
 dependencies:
 	@test -x "$(PY)" || python3.12 -m venv .venv
-	"$(PY)" -m pip install -q lz4==4.4.5 capstone==5.0.9 unicorn==2.1.4
+	"$(PY)" -m pip install -q lz4==4.4.5 capstone==5.0.9 unicorn==2.1.4 evfl==1.2.0 byml==2.4.5.post1
 
 # Rewrite main/subsdk0/sdk with d2r's patch_nso.py and verify them (structural + emulator equivalence)
 rewrite: analysis/rewrite-validation.json
@@ -72,13 +72,20 @@ build/shader-service/totk_xlate: ../totk/prebuilt/macos-arm64/totk_xlate ../totk
 	@mkdir -p $(dir $@)
 	cp $< $@ && chmod +x $@
 
+# Local play without the airport (runtime/coop_flow.c): the game's Local Play steps as scripts of the port's own, built
+# from the player's extracted game into the RomFS overlay the runtime reads (ACNH_COOP_ROMFS, default build/romfs-coop).
+.PHONY: romfs-coop
+romfs-coop: build/romfs-coop/EventFlow/Coop_LocalHost.bfevfl
+build/romfs-coop/EventFlow/Coop_LocalHost.bfevfl: scripts/make_coop_flows.py
+	"$(PY)" scripts/make_coop_flows.py
+
 # Headless boot until nnMain is entered (TOTK_VERIFY_STARTUP: the runtime exits there with a JSON line)
 verify-startup: build/acnh-native
 	TOTK_VERIFY_STARTUP=1 TOTK_HEADLESS=1 build/acnh-native rewritten boot
 
 # GPU submission on, with the same safety flags the TotK app sets (games/totk/app/launcher.m)
 GPU_ENV := TOTK_GPU_ALLOW_SUBMIT=1 TOTK_GPU_WIDEN=1 TOTK_GPU_BLOCKRT=1 TOTK_GPU_MIDCLEAR=1 TOTK_GPU_BUDGET_MB=5000
-boot: build/acnh-native shader-tools
+boot: build/acnh-native shader-tools romfs-coop
 	$(GPU_ENV) build/acnh-native rewritten boot
 
 clean:

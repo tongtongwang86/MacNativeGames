@@ -19,6 +19,7 @@ targets:
       - path: ../runtime
         excludes:
           - frontend.m
+          - coop_ui.m   # the Mac's Local Play window (AppKit); the iPad's comes later
           - loader.c
       - path: ../../totk/third_party/d2r_gfx/gfx/nvn
       - path: ../../totk/third_party/d2r_gfx/gfx/tex

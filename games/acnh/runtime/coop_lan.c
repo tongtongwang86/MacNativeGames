@@ -341,6 +341,10 @@ int coop_lan_scan(LdnNetworkInfo *out, int max, unsigned wait_ms) {
         InfoPacket pkt; struct sockaddr_in from; socklen_t fl = sizeof from;
         ssize_t r = recvfrom(fd, &pkt, sizeof pkt, 0, (struct sockaddr *)&from, &fl);
         if (r != (ssize_t)sizeof pkt || memcmp(pkt.magic, MAGIC, 8) || pkt.type != MSG_INFO || pkt.version != VERSION) continue;
+        pthread_mutex_lock(&lock);   /* our own island answers our own scan: not listed */
+        int own = hosting && !memcmp(&pkt.info.network_id.session, &host_info.network_id.session, 16);
+        pthread_mutex_unlock(&lock);
+        if (own) continue;
         struct sockaddr_in ctl = from; ctl.sin_port = pkt.control_port;
         char address[64]; format_address(&ctl, address, sizeof address);
         pkt.island[47] = 0;

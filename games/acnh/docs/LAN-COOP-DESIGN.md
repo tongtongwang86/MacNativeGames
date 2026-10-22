@@ -445,3 +445,26 @@ NetCreateSessionVillage, OpenVillageGate, all system actor. So a small system sc
 visit or host from anywhere. Missing: the call that starts a script by name (the loader formats `EventFlow/%s.bfevfl`
 at main+0x1085a54; `System_*` scripts are started through {script, entry} tables), and a safe point on the game
 thread to call it.
+
+### 8.6 Local Play without the airport (2026-10-21)
+
+**Working on one Mac (two copies):** host from in front of a house, the other copy visits from its own island and
+lands at the host's airport, no airport walk on either side.
+
+- `scripts/make_coop_flows.py` (`make romfs-coop`) builds `build/romfs-coop`: two flowcharts of the port's own,
+  `Coop_LocalHost` (entry `Coop_Host`: save, NetInitLocal, NetCreateSessionVillage cOpenLocal, OpenVillageGate) and
+  `Coop_LocalVisitor` (entry `Coop_Visit`: save, NetInitLocal, NetFindSessionVillage, the game's island list when
+  several answer, Dodo Code prompt when needed, NetJoinSessionVillage, NetDemoLock, NetEnterVillage), with only the
+  `EventFlowSystemActor`, plus their entries in `EventFlowInfoProduct.byml`. `romfs.c` reads that folder first
+  (`ACNH_COOP_ROMFS`).
+- `runtime/coop_flow.c` queues one with the game's event request, main+0x107fed0(manager, &request), as the game does
+  for `System_GameClose` (main+0x1c63760); called on the game thread from the controller read. Found the hard way:
+  main+0x10805a0 is a *synchronous* check-script runner (it refused every event); and the request's player byte must
+  be 0 (0xff, "no player", makes every Net action a silent no-op).
+- `runtime/coop_ui.m`: **Local Play… (⌘L)** window: status, Host My Island, the islands found (LAN broadcast,
+  ZeroTier, other copies on this Mac, ones added by address), Visit (double-click), Add by Address, Remove. Visit
+  selects the island in `coop_lan.c` so the game's search returns only it. The window lists no copy of one's own
+  island. Diagnostics: `TOTK_INPUT_FILE` lines `coop host`, `coop visit`, `coop flow <flowchart>:<entry>`.
+- Not done: the iPad (no Local Play sheet yet; `coop_ui.m` is excluded from the iOS project), leaving from the menu
+  (players still leave through the game's "−" menu or the airport), and the user's own app (`build/acnh-native`) is
+  not rebuilt.

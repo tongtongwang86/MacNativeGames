@@ -231,7 +231,9 @@ static void front_install_menu(void){
  NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[menu addItem:appItem];
  NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("退出 Tears of the Kingdom","Quit Tears of the Kingdom")) action:@selector(performClose:) keyEquivalent:@"q"];
  quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
- [appMenu addItem:quit];gamesettings_add_menu_item(appMenu);NSApp.mainMenu=menu;
+ [appMenu addItem:quit];gamesettings_add_menu_item(appMenu);
+ {extern void coop_ui_add_menu_item(NSMenu *app_menu);coop_ui_add_menu_item(appMenu);}   /* Local Play… ⌘L (coop_ui.m) */
+ NSApp.mainMenu=menu;
   {int n=runtime_output_mode_count();if(n>16)n=16;for(int i=0;i<n;i++)picture_choices[i]=runtime_output_mode_name(i);if(n)graphics_settings[0].nchoices=(unsigned)n;}
   gamesettings_start(&settings_config);   /* keyboard bindings and graphics, this Mac's copy or iCloud's */
 }

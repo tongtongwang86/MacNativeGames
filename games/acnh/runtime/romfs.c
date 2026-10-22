@@ -22,7 +22,7 @@
 #define NH 65536
 #define HANDLE_BASE 0x100000000ULL
 
-static int root_fd = -1, overlay_fd = -1;
+static int root_fd = -1, overlay_fd = -1, coop_fd = -1;
 static char root_path[2048];
 /* Mounts: [0] the game's RomFS (MountRom), then add-on content folders (MountAddOnContent). */
 typedef struct { char name[64]; int fd; char path[2048]; } RomMount;
@@ -57,6 +57,10 @@ void runtime_fs_init(void) {
         if (overlay_fd < 0) { fprintf(stderr, "[acnh] RomFS overlay %s missing\n", ov); runtime_fail("RomFS overlay folder missing"); }
         fprintf(stderr, "[acnh] RomFS overlay: %s (its files replace the game's)\n", ov);
     }
+    /* Local play scripts (scripts/make_coop_flows.py, runtime/coop_flow.c): checked before the overlay above. */
+    const char *co = getenv("ACNH_COOP_ROMFS"); if (!co || !*co) co = "build/romfs-coop";
+    coop_fd = open(co, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (coop_fd >= 0) fprintf(stderr, "[acnh] local play scripts: %s\n", co);
 }
 
 static const char *rom_path(const char *path) { const RomMount *m = mount_of(path); return m ? romfs_path_relative(m->name, path) : NULL; }
@@ -116,7 +120,9 @@ unsigned runtime_romfs_open(uint64_t *out, const char *path, int mode) {
     const RomMount *m = mount_of(path);
     const char *p = rom_path(path);
     if (!m || !p) return NOT_FOUND;
-    int fd = m == &rmounts[0] && overlay_fd >= 0 ? openat(overlay_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    int fd = m == &rmounts[0] && coop_fd >= 0 ? openat(coop_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (fd >= 0) fs_log("rom local play", p);
+    if (fd < 0) fd = m == &rmounts[0] && overlay_fd >= 0 ? openat(overlay_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
     if (fd >= 0) fs_log("rom overlay", p);
     else fd = openat(m->fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return NOT_FOUND;

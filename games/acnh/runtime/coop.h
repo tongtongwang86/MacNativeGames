@@ -69,6 +69,9 @@ void ldn_host_station_joined(int node, const char *user_name, int16_t version);
 void ldn_host_station_left(int node);
 void ldn_host_network_updated(const LdnNetworkInfo *info);   /* station: the host sent a new NetworkInfo */
 void ldn_host_lost_host(void);                                /* station: the host went away */
+/* coop_flow.c: Local play from anywhere (1 visit, 2 host); started at the next controller read on the game's thread */
+void coop_flow_request(int what);
+const char *coop_flow_result(void);
 void *runtime_ldn_override(const char *name);
 void *runtime_socket_override(const char *name);
 #endif
