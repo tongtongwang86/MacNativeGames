@@ -468,3 +468,21 @@ lands at the host's airport, no airport walk on either side.
 - Not done: the iPad (no Local Play sheet yet; `coop_ui.m` is excluded from the iOS project), leaving from the menu
   (players still leave through the game's "−" menu or the airport), and the user's own app (`build/acnh-native`) is
   not rebuilt.
+
+### 8.7 Furniture with company: unblocked and synced (2026-10-21)
+
+- **Placing from the pockets with a visitor present now works, indoors and outdoors, and the visitor sees the item
+  appear live**: the game already replicates item placement; it only refused it. Picking furniture up already worked
+  (8.5). Both are `ACNH_MP_EDIT=furniture` (5 words).
+- How it was found: the pocket menu stores the refusal reason in a field the message window later reads; a hardware
+  write watchpoint on that field (new diagnostic: `watch <hex>` in `TOTK_INPUT_FILE`, armed on every thread by the
+  runtime itself, reported by its SIGTRAP handler; an external lldb froze the game) stopped at main+0x3073c84, which
+  stores the result of **main+0x3353540**, "may this pocket item be placed here?". It returns 0x10 indoors and 0x11
+  outdoors when the session has 2+ players (SYS_Telepathy 005 / 012). Three branches now skip only those two tests.
+- Both tests read **the session's player count**, the byte +0x476 of the object behind main+0x4ab1760.
+  `scripts/mp_count_checks.py` lists every such read: **369 checks in 328 functions**, the map for lifting the
+  other restrictions one feature at a time (museum, Town Hall services, Island Designer, building moves, Lost and
+  Found / recycle box, villager reactions...). A blanket "count = 1" is not an option: the game also uses the count to
+  run the session (arrivals, the save commit, who simulates what).
+- Also: Host / Visit in the Local Play window are refused while a session is running (pressing one again restarted
+  local play and broke the session for everyone).

@@ -311,16 +311,49 @@ static void signal_hex(const char *label,uint64_t value) {
 /* CTR_EL0 for 128-byte host cache lines: DminLine=IminLine=5 (32 words), ERG=CWG=5, PIPT I-cache, IDC/DIC clear. */
 #define HOST_CTR_EL0 0x8555c005ULL
 uint64_t runtime_trace_site_pc,runtime_trace_site_stub;   /* acnh_patches.c, ACNH_TRACE_SITE */
+/* Diagnostics, Mac: a hardware write watchpoint on one guest address in every thread of this process ("watch <hex>"
+   in TOTK_INPUT_FILE). The first write stops in crash() below as SIGTRAP: it prints the writing instruction, x0-x3 and
+   the guest call chain, clears the watchpoint everywhere and lets the write happen. */
+#if !TARGET_OS_IPHONE
+static volatile uint64_t watch_addr;
+static void watch_set_all(uint64_t addr){
+ thread_act_array_t th;mach_msg_type_number_t n=0;if(task_threads(mach_task_self(),&th,&n)!=KERN_SUCCESS)return;
+ for(mach_msg_type_number_t i=0;i<n;i++){
+  arm_debug_state64_t d;mach_msg_type_number_t c=ARM_DEBUG_STATE64_COUNT;
+  if(thread_get_state(th[i],ARM_DEBUG_STATE64,(thread_state_t)&d,&c)!=KERN_SUCCESS)memset(&d,0,sizeof d);
+  if(addr){d.__wvr[0]=addr&~7ULL;d.__wcr[0]=1u|(2u<<1)|(2u<<3)|(0xfu<<(5+(addr&4)));}   /* enable, EL0, store, 4 bytes */
+  else{d.__wvr[0]=0;d.__wcr[0]=0;}
+  thread_set_state(th[i],ARM_DEBUG_STATE64,(thread_state_t)&d,ARM_DEBUG_STATE64_COUNT);
+  mach_port_deallocate(mach_task_self(),th[i]);
+ }
+ vm_deallocate(mach_task_self(),(vm_address_t)th,n*sizeof *th);
+}
+void runtime_watch_arm(uint64_t addr){watch_addr=addr;watch_set_all(addr);fprintf(stderr,"[acnh] watch armed on %#llx\n",(unsigned long long)addr);}
+#else
+static volatile uint64_t watch_addr;static void watch_set_all(uint64_t a){(void)a;}
+void runtime_watch_arm(uint64_t addr){(void)addr;}
+#endif
 static void crash(int num,siginfo_t *info,void *context) {
  ucontext_t *u=context;
  if((num==SIGTRAP||num==SIGILL)&&runtime_trace_site_pc&&u->uc_mcontext->__ss.__pc==runtime_trace_site_pc){
   static int hits,skip=-1,max;if(skip<0){const char *e=getenv("ACNH_TRACE_SKIP");skip=e?atoi(e):0;e=getenv("ACNH_TRACE_MAX");max=e?atoi(e):12;}   /* ACNH_TRACE_SKIP / ACNH_TRACE_MAX: which hits to print */
   hits++;if(hits>skip&&hits<=skip+max){signal_hex("[acnh] trace site hit, lr=",u->uc_mcontext->__ss.__lr);for(unsigned i=0;i<4;i++)signal_hex("  x=",u->uc_mcontext->__ss.__x[i]);
-   if(getenv("ACNH_TRACE_X1")){uint64_t w[6];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),u->uc_mcontext->__ss.__x[1],sizeof w,(uintptr_t)w,&got)==KERN_SUCCESS&&got==sizeof w)for(unsigned i=0;i<6;i++)signal_hex("  [x1]=",w[i]);}   /* ACNH_TRACE_X1: the first 48 bytes x1 points to */
+   if(getenv("ACNH_TRACE_X1")){uint64_t w[6];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),u->uc_mcontext->__ss.__x[1],sizeof w,(uintptr_t)w,&got)==KERN_SUCCESS&&got==sizeof w){for(unsigned i=0;i<6;i++)signal_hex("  [x1]=",w[i]);
+     for(unsigned k=1;k<4;k+=2){char str[48];mach_vm_size_t sg=0;   /* the two SafeStrings' text (flowchart, entry) */
+      if(mach_vm_read_overwrite(mach_task_self(),w[k],sizeof str-1,(uintptr_t)str,&sg)==KERN_SUCCESS){str[sizeof str-1]=0;size_t n=strnlen(str,sizeof str-1);write(2,"  name: ",8);write(2,str,n);write(2,"\n",1);}}}}   /* ACNH_TRACE_X1: the first 48 bytes x1 points to */
    uint64_t lr=u->uc_mcontext->__ss.__lr,fp=u->uc_mcontext->__ss.__fp;
    for(unsigned depth=0;depth<22;depth++){for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base&&lr<(uintptr_t)modules[i].base+modules[i].size){write(2,"  ",2);write(2,modules[i].name,strlen(modules[i].name));signal_hex(" caller=",lr-(uintptr_t)modules[i].base);}
     if(!fp||(fp&15))break;uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;lr=frame[1];if(frame[0]==fp)break;fp=frame[0];}}
   u->uc_mcontext->__ss.__pc=runtime_trace_site_stub;return;
+ }
+ if(num==SIGTRAP&&watch_addr){   /* the watchpoint above: report once, disarm, let the store run */
+  signal_hex("[acnh] watch hit, pc=",u->uc_mcontext->__ss.__pc);signal_hex("  addr=",(uintptr_t)info->si_addr);
+  for(unsigned i=0;i<4;i++)signal_hex("  x=",u->uc_mcontext->__ss.__x[i]);
+  for(unsigned i=0;i<NM;i++){uint64_t pc=u->uc_mcontext->__ss.__pc;if(pc>=(uintptr_t)modules[i].base&&pc<(uintptr_t)modules[i].base+modules[i].size){write(2,"  ",2);write(2,modules[i].name,strlen(modules[i].name));signal_hex(" pc=",pc-(uintptr_t)modules[i].base);}}
+  uint64_t lr=u->uc_mcontext->__ss.__lr,fp=u->uc_mcontext->__ss.__fp;
+  for(unsigned depth=0;depth<22;depth++){for(unsigned i=0;i<NM;i++)if(lr>=(uintptr_t)modules[i].base&&lr<(uintptr_t)modules[i].base+modules[i].size){write(2,"  ",2);write(2,modules[i].name,strlen(modules[i].name));signal_hex(" caller=",lr-(uintptr_t)modules[i].base);}
+   if(!fp||(fp&15))break;uint64_t frame[2];mach_vm_size_t got=0;if(mach_vm_read_overwrite(mach_task_self(),fp,16,(uintptr_t)frame,&got)!=KERN_SUCCESS||got!=16)break;lr=frame[1];if(frame[0]==fp)break;fp=frame[0];}
+  watch_addr=0;watch_set_all(0);return;
  }
  /* EL0 cache maintenance that Darwin traps but Horizon allows: emulate exactly two encodings (SDK only). */
  if(num==SIGILL){uint32_t insn=*(const uint32_t *)(uintptr_t)u->uc_mcontext->__ss.__pc;unsigned rt=insn&31;

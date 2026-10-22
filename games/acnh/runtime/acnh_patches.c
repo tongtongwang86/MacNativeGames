@@ -318,6 +318,13 @@ static void output_install(Module *m, uint64_t s, uint64_t data_off) {
 static const struct { uint64_t off; uint32_t original, patched; const char *group; } mp_edit_sites[] = {
     {0x21cc50c, 0xa9bc7bfd, 0x52800000, "furniture"},   /* stp x29, x30, [sp, #-0x40]!  ->  mov w0, #0 */
     {0x21cc510, 0xf9000bf7, 0xd65f03c0, "furniture"},   /* str x23, [sp, #0x10]         ->  ret */
+    /* main+0x3353540: may an item from the pockets be placed here? Returns 0 or a reason the pocket menu turns into a
+       message: 0x10 indoors with 2+ players in the session (SYS_Telepathy 005 "It's rude to redecorate when you have
+       company!"), 0x11 outdoors (012 "There's company over right now"). Found with the "watch" diagnostic on the pocket
+       menu's message field (written at main+0x3073c84). The three branches below skip only the player-count tests. */
+    {0x3353818, 0x54001183, 0x1400008c, "furniture"},   /* b.lo +0x230 (outdoors, < 2 players: allowed) -> b */
+    {0x3353960, 0x54000122, 0x14000025, "furniture"},   /* b.hs 0x3353984 (2+ players: indoor block)    -> b 0x33539f4 */
+    {0x3353980, 0x540003a9, 0x1400001d, "furniture"},   /* b.ls 0x33539f4 (<= 1 player: allowed)        -> b */
 };
 static void mp_edit_apply(Module *m) {
     const char *e = getenv("ACNH_MP_EDIT"); if (!e || !*e || !strcmp(e, "0")) return;

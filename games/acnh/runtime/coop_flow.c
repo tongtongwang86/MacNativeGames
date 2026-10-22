@@ -25,14 +25,22 @@ typedef struct { uint64_t vtable; const char *str; } SafeString;
 typedef struct { SafeString flowchart, entry; uint32_t actor; uint8_t player, flag; uint8_t pad[2]; void *status; } FlowRequest;
 _Static_assert(sizeof(FlowRequest) == 0x30, "flow request");
 
+static char last_result[96] = "";
 static _Atomic int pending;   /* 0 none, 1 visit, 2 host, 3 test */
 static char test_override[128];
 static uint32_t actor_override; static int player_override = -1;   /* "coop actor <hex> <player>" (diagnostics) */
 void coop_flow_actor(uint32_t actor, int player) { actor_override = actor; player_override = player; fprintf(stderr, "[coop] request actor %#x player %d\n", actor, player); }
 void coop_flow_test(const char *flow_entry) { snprintf(test_override, sizeof test_override, "%s", flow_entry); atomic_store(&pending, 3); }
-static char last_result[96] = "";
 
 void coop_flow_request(int what) {
+    /* Running the steps again inside a session restarts local play and breaks it for everyone (the game's own
+       airport never offers it then): refused until the session ends. */
+    if (coop_lan_self_node() >= 0) {
+        snprintf(last_result, sizeof last_result, "%s", coop_lan_self_node() == 0 ? "Already hosting: close the gate at the airport to stop"
+                                                                                : "Already on an island: leave it first");
+        fprintf(stderr, "[coop] %s request ignored: %s\n", what == 1 ? "visit" : "host", last_result);
+        return;
+    }
     atomic_store(&pending, what);
     fprintf(stderr, "[coop] %s requested from the Local play menu\n", what == 1 ? "visit" : "host");
 }
@@ -43,7 +51,9 @@ void coop_flow_tick(void) {
     if (!what) return;
     uint8_t *main = runtime_module_base("main");
     uint32_t word; memcpy(&word, main + START_FLOW, 4);
-    if (word != START_FLOW_WORD) { snprintf(last_result, sizeof last_result, "not available in this game version"); fprintf(stderr, "[coop] %s\n", last_result); return; }
+    /* ACNH_SITE_PROBE / ACNH_TRACE_SITE may have replaced the word with a branch to their stub or a brk (diagnostics) */
+    int diag = (word & 0xfc000000u) == 0x14000000u || word == 0xd4200f40u;
+    if (word != START_FLOW_WORD && !diag) { snprintf(last_result, sizeof last_result, "not available in this game version"); fprintf(stderr, "[coop] %s\n", last_result); return; }
     uint64_t manager_slot; memcpy(&manager_slot, main + MANAGER_SLOT, 8);
     uint64_t manager = manager_slot ? *(uint64_t *)(uintptr_t)manager_slot : 0;
     uint64_t vtable; memcpy(&vtable, main + SAFE_STRING_VTABLE_SLOT, 8);
