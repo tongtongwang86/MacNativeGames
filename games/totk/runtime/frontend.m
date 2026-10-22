@@ -10,6 +10,14 @@
 #include "totk_ui_lang.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
 #include "../vendor/gamesettings/gamesettings.h"
+/* Console mode (the Settings window): docked (the default) or handheld, kept in the app's defaults and read here before
+   the game asks (services.c reads TOTK_OPERATION_MODE once), so a change takes effect at the next start. A mode already
+   in the environment (a test run) wins. */
+__attribute__((constructor)) static void console_mode_from_settings(void){
+ if(getenv("TOTK_OPERATION_MODE"))return;
+ NSString *v=[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKOperationMode"];
+ if([v isEqualToString:@"handheld"])setenv("TOTK_OPERATION_MODE","handheld",1);
+}
 int fps_overlay_hints_enabled(void);
 void dm_gfx_set_flag(const char *name,int v);
 int mfxup_output_enabled(void);
@@ -209,6 +217,9 @@ void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(),
    runtime_front_run); shape is stepped with its key action until it matches. */
 static int picture_get(void){int m=runtime_output_mode_get();return m<0?0:m;}
 static void picture_set(int v){runtime_output_mode_set(v);}
+static int console_get(void){return [[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKOperationMode"] isEqualToString:@"handheld"];}
+static void console_set(int v){[NSUserDefaults.standardUserDefaults setObject:v?@"handheld":@"docked" forKey:@"TOTKOperationMode"];}
+static const char *const console_choices[]={"Docked","Handheld"};
 static int metalfx_get(void){return runtime_mfx_upscale_get();}
 static void metalfx_set(int v){runtime_mfx_upscale_set(v);}
 static int interp_get(void){return mfx_enabled();}
@@ -224,6 +235,7 @@ static const char *const shape_choices[]={"The window's shape","16:9 (the game's
 static const char *const overlay_choices[]={"Hidden","Shown"};
 static gamesettings_choice graphics_settings[]={
  {"size","Picture size",picture_choices,1,picture_get,picture_set,"The game draws its frame and UI at this size, its 3D scene at about 5/6 of it. Key 3."},
+ {"console_mac","Console mode",console_choices,2,console_get,console_set,"Docked is the game's TV mode; handheld draws less (the game's own handheld detail and resolution). Takes effect the next time the game starts."},
  {"metalfx","MetalFX upscaling",metalfx_choices,2,metalfx_get,metalfx_set,"MetalFX enlarges the picture to the window, at any size (instead of plain scaling), and upscales the 3D scene."},
  {"interpolation","Frame interpolation",interp_choices,4,interp_get,interp_set,"MetalFX generates in-between frames. Key 2."},
  {"shape","Picture shape",shape_choices,2,shape_get,shape_set,"The camera follows the window as you resize it or go full screen (1.2.1, 1.4.3). Key 4."},

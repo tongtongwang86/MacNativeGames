@@ -37,6 +37,16 @@ static int render_get(void) {
     return 2;
 }
 static void render_set(int v) { if (v >= 0 && v < 5) [NSUserDefaults.standardUserDefaults setObject:@(render_sizes[v]) forKey:@"TOTKRenderRes"]; }
+/* Console mode: what the game is told it is, read once at start like the render size. Automatic: handheld up to 720p,
+   docked above (handheld cannot render larger, see the start). Handheld keeps the render size at 720p or lower. */
+static const char *const console_values[] = {"auto", "handheld", "docked"};
+static const char *const console_choices[] = {"Automatic", "Handheld", "Docked"};
+static int console_get(void) {
+    NSString *v = [NSUserDefaults.standardUserDefaults stringForKey:@"TOTKOperationMode"];
+    for (int i = 0; i < 3; i++) if ([v isEqualToString:@(console_values[i])]) return i;
+    return 0;
+}
+static void console_set(int v) { if (v >= 0 && v < 3) [NSUserDefaults.standardUserDefaults setObject:@(console_values[v]) forKey:@"TOTKOperationMode"]; }
 static int overlay_get(void) { return fps_overlay_hints_enabled(); }
 static void overlay_set(int v) { if (overlay_get() != v) fps_overlay_toggle_hints(); }
 static const char *const shape_choices[] = {"The screen's shape", "16:9 (the game's own)"};
@@ -46,6 +56,7 @@ static const char *const interp_choices[] = {"Off", "30 + 30", "Half the refresh
 static const char *const motion_choices[] = {"Off", "On"};
 static const gamesettings_choice graphics_settings[] = {
     {"shape", "Picture shape", shape_choices, 2, shape_get, shape_set, "The camera fills the screen without black bars; the HUD keeps its shape in the middle."},
+    {"console_ios", "Console mode", console_choices, 3, console_get, console_set, "Docked is the game's TV mode: more detail, more GPU and battery. Handheld keeps the render resolution at 720p or lower. Automatic: handheld up to 720p, docked above. Takes effect the next time the game starts."},
     {"render", "Render resolution", render_choices, 5, render_get, render_set, "The 3D scene's size; the HUD stays sharp. Lower runs faster; MetalFX upscaling sharpens it. 900p and 1080p run the game in its docked mode (more detail, more GPU and battery). Takes effect the next time the game starts."},
     {"upscale", "Upscaling", upscale_choices, 2, upscale_get, upscale_set, "MetalFX scales the 720p picture to the screen's own pixels. New on iPad: uses more GPU time and battery."},
     {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60). New on iPad."},
@@ -128,7 +139,10 @@ static BOOL forward_presses(NSSet<UIPress *> *presses, int down) {
        handheld mode crashed it the moment a save loaded (null read at main+0x1c2e40, 2026-10-21; 900p and 1080p crash,
        480p and 720p do not, reproduced on the Mac). Above 720p the game is told it is docked, whose buffers fit 1080p
        (checked), as a docked Switch would; it then also uses its docked graphics settings. */
-    { int r = render_get(); setenv("TOTK_RENDER_RES", render_sizes[r], 1); setenv("TOTK_OPERATION_MODE", r > 2 ? "docked" : "handheld", 1); }
+    { int r = render_get(), c = console_get(); if (c == 1 && r > 2) r = 2;
+      int docked = c == 2 || (c == 0 && r > 2);
+      setenv("TOTK_RENDER_RES", render_sizes[r], 1); setenv("TOTK_OPERATION_MODE", docked ? "docked" : "handheld", 1);
+      fprintf(stderr, "[totk] console mode %s (%s), render %s\n", docked ? "docked" : "handheld", console_values[c], render_sizes[r]); }
     setenv("TOTK_ROMFS_PATCHES",[res stringByAppendingPathComponent:@"romfs-patches"].fileSystemRepresentation,1);
     setenv("TOTK_ROMFS_PATCHES_OUT",[res stringByAppendingPathComponent:@"romfs-patches-out"].fileSystemRepresentation,1);
     setenv("TOTK_SHARED_FONTS",[res stringByAppendingPathComponent:@"shared-fonts"].fileSystemRepresentation,1);
