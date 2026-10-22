@@ -648,3 +648,14 @@ state (`ACNH_TRACE_SITE`). Corrections to 8.10 first.
 - **Y pick-up.** The host's Y on placed outdoor furniture enters cPickupWait (0x23). Panthea's Y enters no pick-up
   state at all, so her refusal is decided before any state change; it is probably the same lock request, still to
   confirm.
+- **More on the "lock" (same day).**
+  - The request slot +0x658 of the per-player session table is polled the same way before every furniture action:
+    hold, push, pull, turn, and the pick-ups (main+0x22de49c to main+0x22e5be8).
+  - The table it lives in, `*(main+0x4abb1a8)` (= main+0x50a8970), is managed by code next to the script runner's
+    (strings "Root", "AI_NPC_", "NNPC_Talk_Sequence" at main+0x128af5c). So the answer may come from a script rather
+    than from the network; open.
+  - `Player_FtrActionError` only holds the refusal messages (SYS_Telepathy 005 / 013 / 014 …), not the decision.
+  - The "lock" reading above is therefore still a hypothesis. Next: trap main+0x1292974 on the visitor to get the job's
+    script name, or watch the job's state word (+0x2c of its 0x518-byte entry) to find what writes "failed".
+- **Seen by the user:** when the host moves furniture, the host's screen shows the smooth push, but on the visitor's
+  screen the furniture jumps to its new place while the host's character plays the animation.
