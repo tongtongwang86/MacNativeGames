@@ -58,10 +58,12 @@ From bottom to top. Details are in [LAN-COOP-DESIGN.md 1.1](LAN-COOP-DESIGN.md).
 |---|---|---|---|
 | Visitor → broadcast | 244 bytes | ~20 per second | the same |
 | Host → visitor | 260 bytes | ~20 per second | the same |
-| Reliable traffic, both ways | 68–240 bytes | a few per second | the same |
+| Reliable traffic from the visitor | 64–276 bytes | about 1 per second | bursts of 112 / 176-byte messages, about 9 per second, during longer walks and while fishing |
+| Reliable traffic from the host | 64–820 bytes, many sizes | about 20 per second | the same (the host also sends the island: residents, the world) |
 
 The per-player stream has a fixed size and a fixed rate whether the player moves or stands. It is a periodic state
-snapshot, not a stream of input events or of changes.
+snapshot, not a stream of input events or of changes. Actions add reliable messages on top of it (section 5.5).
+[the bursts: confirmed in the fishing recording, 2026-10-22; a short 2.5 s walk earlier had shown none]
 
 ## 4. Sessions and saving
 
@@ -123,7 +125,49 @@ Which copy the game treats as the truth, from which the others follow, is still 
   - A host-authoritative edit (the plan in LAN-COOP-DESIGN.md 8.10) has to act at the visitor's position **as the
     host sees it**. That position is close enough for choosing a tile (tiles are 5–10 units), but is not exact.
 
-### 5.4 How to measure it again
+### 5.5 Simultaneous actions: fishing together (recorded 2026-10-22)
+
+**Setup.** The user fished with both players at once, with no patch involved (fishing is not one of the actions the
+game blocks for company):
+- The host fished at the river by the log bridge.
+- Panthea, the visitor, fished at a pond a few tiles away.
+
+A recorder logged both copies' datagrams every 0.5 s and screenshots of both windows every 2 s, for about 140 s.
+
+**What happened on screen** [confirmed]:
+
+| Time | Host | Panthea |
+|---|---|---|
+| ~32 s | takes out the fishing rod | |
+| ~44 s | | takes out the fishing rod |
+| ~70 s | Panthea walks past; each copy shows the other player in place | |
+| ~72 s | | the host is visible on her screen holding the rod with the line out |
+| 84–100 s | fishing | casting at a fish shadow in the pond |
+| ~102 s | "I caught a crucian carp!" | still fishing; her game runs on |
+| ~120 s | | splash and bite |
+| ~124 s | | "I caught a catfish!" |
+
+**What it shows:**
+- **Both players fish at the same time, and each catch is the catcher's own.**
+  - The host's catch dialog did not pause or block Panthea's copy.
+  - Panthea's fish shadow, bite and catch ran on her copy while the host stood elsewhere.
+  - So, like movement, the rod action runs on the copy of the player who holds it.
+  - The other copy only shows that player holding the rod and casting, as part of the replayed state (5.3).
+- **Each action adds a few reliable messages** on top of the 20-per-second snapshots:
+  - Panthea's copy sent bursts of 112 / 176-byte messages while she cast and reeled (102–110 s).
+  - A new 84-byte message size started at her first cast (~100 s) and repeated while she fished.
+  - At her catch (~122 s) it sent a single 224-byte message.
+  - The host's traffic showed no burst of its own around its catch, against its steady stream.
+  - What these messages contain is unknown: pia encrypts them.
+
+**Not covered yet:**
+- Both players at the **same** shadow. The game has `FishNetHostCatchNumResult`, `InsectNetHostCatchNumResult` and
+  `DiveFishNetHostCatchNumResult` messages (strings at main+0x3f908d8, 0x3fee3d1, 0x3f66515). That points to the host
+  keeping the catch counts and deciding who gets a shared fish, but this is [expected, not seen].
+- Whether a shadow that one player catches disappears on the other's screen.
+- Whether the catch reaches the catcher's own save (the encyclopedia, pockets) after the session's commit.
+
+### 5.6 How to measure it again
 
 1. Host and visit with `coop host` / `coop visit`.
 2. Take three `memsnap` snapshots of both copies' guest heaps, with the visitor standing, after walking down (`key 1
@@ -154,3 +198,4 @@ player count. The findings behind each entry are in LAN-COOP-DESIGN.md 8.5–8.1
   where `NetTransportMgr` fills its send buffer, before pia encrypts it.
 - **Where the live outdoor item and rotation state lives.** The host-authoritative relay needs it
   (LAN-COOP-DESIGN.md 8.10).
+- **Two players at one fish shadow.** Who gets the fish, and whether the shadow disappears on both screens (5.5).
