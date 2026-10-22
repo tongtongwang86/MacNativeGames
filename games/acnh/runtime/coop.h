@@ -70,11 +70,12 @@ void ldn_host_station_left(int node);
 void ldn_host_network_updated(const LdnNetworkInfo *info);   /* station: the host sent a new NetworkInfo */
 void ldn_host_lost_host(void);                                /* station: the host went away */
 int coop_lan_send_edit(const void *body, uint32_t n);   /* station: send EDIT to the host; 0 when sent */
+int coop_lan_host_visitors(int ask_to_leave);           /* host: visitors in the session; 1 also asks each to fly home */
 /* coop_edit.c: island edits only the host's copy carries out (docs/LAN-COOP-DESIGN.md 8.12) */
 void coop_edit_received(int node, const void *body, uint32_t n);   /* host, network thread: queue for the game thread */
 void coop_edit_tick(void);                                          /* game thread, once per controller read */
 void coop_edit_set_queue(volatile uint32_t *slots, volatile uint64_t *queue);   /* acnh_patches.c: museum stub's data */
-/* coop_flow.c: Local play from anywhere (1 visit, 2 host); started at the next controller read on the game's thread */
+/* coop_flow.c: Local play from anywhere (1 visit, 2 host, 4 leave, 5 stop hosting); started at the next controller read on the game's thread */
 void coop_flow_request(int what);
 const char *coop_flow_result(void);
 void *runtime_ldn_override(const char *name);

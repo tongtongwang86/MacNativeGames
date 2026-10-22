@@ -249,8 +249,8 @@ static void *input_file(void *arg) {
             coop_flow_actor(a, (int)strtol(end, NULL, 10));
         } else if (!strncmp(line, "coop flow ", 10)) {   /* "coop flow <flowchart>:<entry>" (diagnostics) */
             extern void coop_flow_test(const char *flow_entry); line[strcspn(line, "\r\n")] = 0; coop_flow_test(line + 10);
-        } else if (!strcmp(line, "coop visit\n") || !strcmp(line, "coop host\n") || !strcmp(line, "coop test\n")) {   /* Local play without the airport (coop_flow.c) */
-            extern void coop_flow_request(int what); coop_flow_request(line[5] == 'v' ? 1 : line[5] == 'h' ? 2 : 3);
+        } else if (!strcmp(line, "coop visit\n") || !strcmp(line, "coop host\n") || !strcmp(line, "coop test\n") || !strcmp(line, "coop leave\n") || !strcmp(line, "coop stop\n")) {   /* Local play without the airport (coop_flow.c) */
+            extern void coop_flow_request(int what); coop_flow_request(line[5] == 'v' ? 1 : line[5] == 'h' ? 2 : line[5] == 'l' ? 4 : line[5] == 's' ? 5 : 3);
         } else if (!strcmp(line, "close\n")) { runtime_front_request_close(); break; }
         else runtime_fail("invalid diagnostic input command");
     }

@@ -576,3 +576,37 @@ The first edit done the host-authoritative way (decision on progress data, 4.1).
   - Mac only: the stub sits beside the Mac-only probes.
   - If the host's museum already has the item, the host logs it and records nothing, but the visitor's item is still
     gone.
+
+### 8.13 Leave Island and Stop Hosting in the Local Play window (2026-10-22): works
+
+The ⌘L window now has **Host My Island**, **Stop Hosting** and **Leave Island**. Each button is enabled only where it
+applies: outside a session, as the host, and as a visitor. Each also has a diagnostic command (`coop stop`,
+`coop leave`).
+
+- **Leave Island** runs `Coop_LocalLeave:Coop_Leave` (scripts/make_coop_flows.py):
+  1. "Getting ready to return home…"
+  2. `NetDemoLock` with Situation 1
+  3. the error check
+  4. `NetLeaveSessionVillage`
+
+  These are the steps of the − menu's `System_InetClose` `OkaeriVisitor_Core`. Three things had to change before it
+  worked:
+  - **The menu-choice branch is gone.** `System_InetClose` itself ends on a branch that only that menu sets, so started
+    from the window it stops after the message.
+  - **It has its own flowchart.** A start from `Coop_LocalVisitor` did nothing while the visit event was still in use.
+  - **It runs as the copy's own player.** The request now names this copy's node as the player inside a session
+    (runtime/coop_flow.c). As player 0, which is the host, the session lock fails.
+- **Stop Hosting** works in two steps:
+  1. With visitors present, the host's runtime sends each a `LEAVE` control message (coop_lan.c). Each visitor's copy
+     then runs Leave Island, so everyone saves and flies home as normal.
+  2. Once nobody is left, the host runs `Coop_LocalClose:Coop_Close`: `NetEndSessionVillage`, then `CloseVillageGate`.
+     These are Orville's close-gate steps.
+
+  If a visitor has not left after 2 minutes, the gate stays open and the window says so. Two other ways failed:
+  - Ending the session under a visitor gave her "Communication with the destination locale has been interrupted". It
+    also left the host dropping later joins until a restart.
+  - The − menu's own host ending (`NetDemoLock` with Situation 2) sends visitors "Seems like it's time to go home", but
+    then waits on the flight screen: that menu's own code does the rest after its script.
+- **Tested with two copies on one Mac:**
+  - Leave: Panthea flew home.
+  - Stop: Panthea was sent home, the host saved and closed the gate, and both copies went back to idle.

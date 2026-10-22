@@ -10,7 +10,12 @@ SNPC_dod_10_Airport_LocalHost; a flowchart with Orville's actor is refused away 
   Coop_Visit  save, start local mode, search, the game's island list when several answer, the Dodo Code prompt when the
               island has one, join, lock the session, fly (NetEnterVillage, without the walk through the gate)
   Coop_Host   save, start local mode, open the session (no Dodo Code), open the gate
-in Coop_LocalVisitor and Coop_LocalHost. EventFlow/Info/EventFlowInfoProduct.byml lists them (no subfiles).
+  Coop_Leave  a visitor goes home: "Getting ready to return home...", lock the session, NetLeaveSessionVillage (the
+              minus menu's System_InetClose OkaeriVisitor_Core without its menu-choice branch)
+  Coop_Close  the host ends the session and closes the gate once nobody visits (Orville's close-gate steps)
+in Coop_LocalVisitor, Coop_LocalHost, Coop_LocalLeave and Coop_LocalClose. Leave and close have flowcharts of their own:
+a start from Coop_LocalVisitor did nothing while its visit event was still in use. EventFlow/Info/
+EventFlowInfoProduct.byml lists them (no subfiles).
 It also writes museum/EventFlow/SNPC_owl.bfevfl: Blathers' script with its "is this my island?" branch (which sends a
 visitor to small talk, SNPC_owl_90_OtherTown) going the resident's way, so a visitor can donate. The runtime reads
 museum/ only with ACNH_MP_EDIT "museum", whose patch sends the donation to the host (runtime/coop_edit.c). And
@@ -33,6 +38,7 @@ from evfl.util import IdGenerator, make_index, make_rindex
 
 VISITOR, HOST = 'SNPC_dod_11_Airport_LocalVisitor', 'SNPC_dod_10_Airport_LocalHost'
 VISIT_FLOW, HOST_FLOW = 'Coop_LocalVisitor', 'Coop_LocalHost'
+LEAVE_FLOW, CLOSE_FLOW = 'Coop_LocalLeave', 'Coop_LocalClose'   # own flowcharts: the visit's is still in use on arrival
 
 
 class Builder:
@@ -127,6 +133,27 @@ def add_visit(fc):
     b.entry('Coop_Visit', b.chain(SAVE_STEPS, after_save))
 
 
+def add_leave(fc):
+    """System_InetClose's OkaeriVisitor_Core (the minus menu's "go home") up to its menu-choice branch, which only that
+    menu sets, then straight to leaving."""
+    b = Builder(fc, 'Coop_Leave_')
+    stay = b.chain([('MessageSuspend', {}), ('MessageUnlockNext', {})])
+    leave = b.chain([('MessageSuspend', {}), ('NetLeaveSessionVillage', {'Command': 'cLeaveSession', 'IsErrorHandling': False})])
+    b.entry('Coop_Leave', b.chain([('MessageLockNext', {'WaitIconType': 1}),
+                                   ('OpenMessageWindow', {'MessageID': 'TalkSys/SYS_Network:005', 'IsCloseMessageWindow': False}),
+                                   ('NetDemoLock', {'Situation': 1}), ('MessageUnlockNext', {})],
+                                  b.switch('CheckErrorType', {0: stay, 1: leave}, ErrorType=2)))
+
+
+def add_close(fc):
+    """The host closes the gate with nobody visiting, as at the airport (SNPC_dod_AirPort
+    EntryPoint_CloseGateAndResetNetwork without Orville's turns): NetEndSessionVillage, CloseVillageGate. Stop Hosting
+    first has every visitor leave (runtime/coop_flow.c): ending the session under a visitor shows them a communication
+    error, and the minus menu's own ending (NetDemoLock 2) needs that menu's code to finish."""
+    b = Builder(fc, 'Coop_Close_')
+    b.entry('Coop_Close', b.chain([('NetEndSessionVillage', END), ('CloseVillageGate', {})]))
+
+
 def add_host(fc):
     b = Builder(fc, 'Coop_Host_')
     open_gate = b.chain([('NetCreateSessionVillage', {'Type': 'cOpenLocal', 'IsOver8': False}), ('MessageSuspend', {}),
@@ -176,7 +203,8 @@ def main():
     ap.add_argument('--out', type=Path, default=here / 'build/romfs-coop')
     a = ap.parse_args()
     (a.out / 'EventFlow/Info').mkdir(parents=True, exist_ok=True)
-    for name, source, add, entry in ((VISIT_FLOW, VISITOR, add_visit, 'Coop_Visit'), (HOST_FLOW, HOST, add_host, 'Coop_Host')):
+    for name, source, add, entries in ((VISIT_FLOW, VISITOR, add_visit, ('Coop_Visit',)), (HOST_FLOW, HOST, add_host, ('Coop_Host',)),
+                                       (LEAVE_FLOW, VISITOR, add_leave, ('Coop_Leave',)), (CLOSE_FLOW, HOST, add_close, ('Coop_Close',))):
         ef = evfl.EventFlow()
         ef.read((a.romfs / f'EventFlow/{source}.bfevfl').read_bytes())
         fc = ef.flowchart   # a flowchart of its own: only the system actor (Orville, MainNpc, would not bind outside the airport)
@@ -189,7 +217,7 @@ def main():
             ef.write(f)
         check = evfl.EventFlow()
         check.read((a.out / f'EventFlow/{name}.bfevfl').read_bytes())
-        assert entry in [e.name for e in check.flowchart.entry_points], name
+        assert set(entries) <= {e.name for e in check.flowchart.entry_points}, name
         print(f'{name}: {len(check.flowchart.events)} events, actions {[h.v for h in check.flowchart.actors[0].actions]}')
     owl = evfl.EventFlow()
     owl.read((a.romfs / 'EventFlow/SNPC_owl.bfevfl').read_bytes())
@@ -221,6 +249,8 @@ def main():
     info = copy.deepcopy(info)
     info[VISIT_FLOW] = {'Coop_Visit': []}
     info[HOST_FLOW] = {'Coop_Host': [], 'Coop_Test': []}
+    info[LEAVE_FLOW] = {'Coop_Leave': []}
+    info[CLOSE_FLOW] = {'Coop_Close': []}
     version = raw[2] | raw[3] << 8
     with open(a.out / 'EventFlow/Info/EventFlowInfoProduct.byml', 'wb') as f:
         byml.Writer(info, be=False, version=version).write(f)

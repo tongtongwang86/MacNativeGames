@@ -26,28 +26,59 @@ typedef struct { SafeString flowchart, entry; uint32_t actor; uint8_t player, fl
 _Static_assert(sizeof(FlowRequest) == 0x30, "flow request");
 
 static char last_result[96] = "";
-static _Atomic int pending;   /* 0 none, 1 visit, 2 host, 3 test */
+static _Atomic int pending;   /* 0 none, 1 visit, 2 host, 3 test, 4 leave (visitor), 5 stop hosting */
 static char test_override[128];
 static uint32_t actor_override; static int player_override = -1;   /* "coop actor <hex> <player>" (diagnostics) */
 void coop_flow_actor(uint32_t actor, int player) { actor_override = actor; player_override = player; fprintf(stderr, "[coop] request actor %#x player %d\n", actor, player); }
 void coop_flow_test(const char *flow_entry) { snprintf(test_override, sizeof test_override, "%s", flow_entry); atomic_store(&pending, 3); }
 
+static const char *const what_name[] = {"", "visit", "host", "test", "leave", "stop hosting"};
+static _Atomic uint64_t stop_after_leave;   /* Stop Hosting asked the visitors to leave at this time (ns); 0 none */
 void coop_flow_request(int what) {
+    int self = coop_lan_self_node();
+    /* Leave and stop only inside a session, as the visitor and as the host. */
+    if (what == 4 || what == 5) {
+        if (self < 0 || (what == 4) != (self > 0)) {
+            snprintf(last_result, sizeof last_result, "%s", self < 0 ? "Not in a local play session" : what == 4 ? "You are hosting: use Stop Hosting" : "You are visiting: use Leave Island");
+            fprintf(stderr, "[coop] %s request ignored: %s\n", what_name[what], last_result);
+            return;
+        }
+        if (what == 5 && coop_lan_host_visitors(0) > 0) {   /* visitors first fly home themselves, then the gate closes */
+            int n = coop_lan_host_visitors(1);
+            stop_after_leave = runtime_now_ns();
+            snprintf(last_result, sizeof last_result, "Sending %d visitor%s home, then closing the gate", n, n == 1 ? "" : "s");
+            fprintf(stderr, "[coop] stop hosting: %s\n", last_result);
+            return;
+        }
+        atomic_store(&pending, what);
+        fprintf(stderr, "[coop] %s requested from the Local play menu\n", what_name[what]);
+        return;
+    }
     /* Running the steps again inside a session restarts local play and breaks it for everyone (the game's own
        airport never offers it then): refused until the session ends. */
-    if (coop_lan_self_node() >= 0) {
+    if (self >= 0) {
         snprintf(last_result, sizeof last_result, "%s", coop_lan_self_node() == 0 ? "Already hosting: close the gate at the airport to stop"
                                                                                 : "Already on an island: leave it first");
-        fprintf(stderr, "[coop] %s request ignored: %s\n", what == 1 ? "visit" : "host", last_result);
+        fprintf(stderr, "[coop] %s request ignored: %s\n", what_name[what], last_result);
         return;
     }
     atomic_store(&pending, what);
-    fprintf(stderr, "[coop] %s requested from the Local play menu\n", what == 1 ? "visit" : "host");
+    fprintf(stderr, "[coop] %s requested from the Local play menu\n", what_name[what]);
 }
 const char *coop_flow_result(void) { return last_result; }
 
 void coop_flow_tick(void) {
     coop_edit_tick();   /* coop_edit.c: museum donations between visitor and host */
+    uint64_t asked = stop_after_leave;
+    if (asked) {   /* Stop Hosting: close the gate once the visitors have gone (they save and fly home first) */
+        if (coop_lan_self_node() != 0) stop_after_leave = 0;
+        else if (coop_lan_host_visitors(0) == 0) { stop_after_leave = 0; atomic_store(&pending, 5); fprintf(stderr, "[coop] stop hosting: visitors gone, closing the gate\n"); }
+        else if (runtime_now_ns() - asked > 120000000000ull) {
+            stop_after_leave = 0;
+            snprintf(last_result, sizeof last_result, "A visitor did not leave within 2 minutes: the gate stays open");
+            fprintf(stderr, "[coop] stop hosting: %s\n", last_result);
+        }
+    }
     int what = atomic_exchange(&pending, 0);
     if (!what) return;
     uint8_t *main = runtime_module_base("main");
@@ -68,11 +99,14 @@ void coop_flow_tick(void) {
     if (what == 3) { if (!t || !strchr(t, ':')) return; snprintf(test_flow, sizeof test_flow, "%.*s", (int)(strchr(t, ':') - t), t); snprintf(test_entry, sizeof test_entry, "%s", strchr(t, ':') + 1); }
     const char *e = getenv("ACNH_COOP_FLOW_ACTOR");
     rq = (FlowRequest){
-        .flowchart = {vtable + 0x10, what == 1 ? "Coop_LocalVisitor" : what == 2 ? "Coop_LocalHost" : test_flow},
-        .entry = {vtable + 0x10, what == 1 ? "Coop_Visit" : what == 2 ? "Coop_Host" : test_entry},
+        .flowchart = {vtable + 0x10, what == 1 ? "Coop_LocalVisitor" : what == 2 ? "Coop_LocalHost" : what == 4 ? "Coop_LocalLeave" : what == 5 ? "Coop_LocalClose" : test_flow},
+        .entry = {vtable + 0x10, what == 1 ? "Coop_Visit" : what == 2 ? "Coop_Host" : what == 4 ? "Coop_Leave" : what == 5 ? "Coop_Close" : test_entry},
         .actor = actor_override ? actor_override : e ? (uint32_t)strtoul(e, NULL, 0) : 0,
-        .player = player_override >= 0 ? (uint8_t)player_override : 0, .status = status};   /* 0xff (no player) makes the Net actions do nothing */
+        /* the player the steps act for: this copy's own. Outside a session that is player 0; in one it is this copy's
+           node (a visitor's leave as player 0, the host, fails its session lock). 0xff (no player) makes the Net
+           actions do nothing. */
+        .player = player_override >= 0 ? (uint8_t)player_override : coop_lan_self_node() > 0 ? (uint8_t)coop_lan_self_node() : 0, .status = status};
     ((void (*)(uint64_t, FlowRequest *))(uintptr_t)(main + START_FLOW))(manager, &rq);
-    snprintf(last_result, sizeof last_result, "%s requested", what == 1 ? "Visit" : what == 2 ? "Host" : "Test");
+    snprintf(last_result, sizeof last_result, "%s requested", what == 1 ? "Visit" : what == 2 ? "Host" : what == 4 ? "Leave" : what == 5 ? "Stop hosting" : "Test");
     fprintf(stderr, "[coop] %s (%s / %s)\n", last_result, rq.flowchart.str, rq.entry.str);
 }

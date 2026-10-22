@@ -1,7 +1,9 @@
 /* The Local Play window (Mac, ⌘L; docs/LAN-COOP-DESIGN.md section 7): host your island or visit one from anywhere,
    without walking to the airport. The islands answering on the network (LAN, ZeroTier, other copies on this Mac) are
-   listed by coop_lan.c; islands on networks without discovery are added by address. Host and Visit queue the game's
-   own Local Play steps (coop_flow.c); the game saves first, as at the airport. */
+   listed by coop_lan.c; islands on networks without discovery are added by address. Host, Visit, Stop Hosting and
+   Leave Island queue the game's own Local Play steps (coop_flow.c); the game saves first, as at the airport. Each
+   button is enabled only where it applies: Host and Visit outside a session, Stop Hosting as the host, Leave Island as
+   a visitor. */
 #import <Cocoa/Cocoa.h>
 #include "coop.h"
 
@@ -9,7 +11,7 @@
 @property(strong) NSWindow *window;
 @property(strong) NSTableView *table;
 @property(strong) NSTextField *status, *address, *result;
-@property(strong) NSButton *visit, *remove;
+@property(strong) NSButton *visit, *remove, *hostButton, *stopButton, *leaveButton;
 @property(strong) NSTimer *timer;
 @end
 
@@ -33,6 +35,9 @@
     NSInteger r = self.table.selectedRow;
     self.visit.enabled = r >= 0 && r < count && islands[r].seen_ns;
     self.remove.enabled = r >= 0 && r < count && islands[r].manual;
+    int self_node = coop_lan_self_node();
+    self.hostButton.enabled = self_node < 0; self.stopButton.enabled = self_node == 0; self.leaveButton.enabled = self_node > 0;
+    if (self_node >= 0) self.visit.enabled = NO;
 }
 - (void)reload {
     char keep[64] = ""; NSInteger r = self.table.selectedRow;
@@ -46,6 +51,8 @@
 }
 - (void)tick { coop_browser_refresh(); [self performSelector:@selector(reload) withObject:nil afterDelay:0.8]; }
 - (void)host:(id)s { (void)s; coop_flow_request(2); self.result.stringValue = @"Opening your island… (the game saves first)"; }
+- (void)stopHosting:(id)s { (void)s; coop_flow_request(5); self.result.stringValue = @"Ending the session and closing the gate… (visitors fly home)"; }
+- (void)leaveIsland:(id)s { (void)s; coop_flow_request(4); self.result.stringValue = @"Flying home… (everyone saves)"; }
 - (void)visitIsland:(id)s {
     (void)s; NSInteger r = self.table.selectedRow; if (r < 0 || r >= count) return;
     coop_browser_select(islands[r].address);   /* the game's search then finds only this island */
@@ -64,10 +71,13 @@
 }
 - (void)show {
     if (!self.window) {
-        NSTextField *hint = [NSTextField wrappingLabelWithString:@"Host your island or visit one from anywhere, without going to the airport. Islands on this network (and on ZeroTier) show up by themselves; add others by address (ip or ip:port). Both copies need the same game version."];
+        NSTextField *hint = [NSTextField wrappingLabelWithString:@"Host your island or visit one from anywhere, without going to the airport, and stop hosting or fly home the same way. Islands on this network (and on ZeroTier) show up by themselves; add others by address (ip or ip:port). Both copies need the same game version."];
         hint.textColor = NSColor.secondaryLabelColor; [hint.widthAnchor constraintEqualToConstant:560].active = YES;
         self.status = [NSTextField labelWithString:@""]; self.status.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-        NSButton *host = [NSButton buttonWithTitle:@"Host My Island" target:self action:@selector(host:)];
+        self.hostButton = [NSButton buttonWithTitle:@"Host My Island" target:self action:@selector(host:)];
+        self.stopButton = [NSButton buttonWithTitle:@"Stop Hosting" target:self action:@selector(stopHosting:)];
+        self.leaveButton = [NSButton buttonWithTitle:@"Leave Island" target:self action:@selector(leaveIsland:)];
+        NSStackView *host = [NSStackView stackViewWithViews:@[self.hostButton, self.stopButton, self.leaveButton]];
         self.table = [NSTableView new]; self.table.dataSource = self; self.table.delegate = self; self.table.usesAlternatingRowBackgroundColors = YES;
         [self.table addTableColumn:[self column:@"island" title:@"Island" width:150]];
         [self.table addTableColumn:[self column:@"player" title:@"Host" width:120]];
