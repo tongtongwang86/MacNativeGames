@@ -293,6 +293,15 @@ resident. Large: it changes how the game identifies a visitor at arrival, and ne
   subnet (section 6).
 - **New requirement: an island browser** in the port's own UI, to discover and join hosts without walking to the
   airport every time (section 7).
+- **Progress data (decided 2026-10-22):**
+  - **Each player's own progress stays theirs.** Critterpedia, catalog, recipes, Nook Miles and pockets stay in their
+    own `personal.dat`. The game's save commit already writes them; the runtime does not sync them.
+  - **The island's shared progress has one copy, in the host's `main.dat`.** This covers the museum, Town Hall and
+    buildings. Only the host's game changes it: a visitor's request, such as a donation, is sent to the host's copy,
+    which carries it out with the visitor credited, and the host saves it at the commit.
+  - **No merging of saves after a session.**
+  - **Accepted consequence of visitors (D4 a):** a visitor's Critterpedia shows their home museum's "donated" marks,
+    not the shared museum's.
 
 ---
 
