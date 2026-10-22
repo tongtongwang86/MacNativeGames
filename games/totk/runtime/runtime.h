@@ -91,7 +91,14 @@ void runtime_boot_count(const char *stage,uint64_t done,uint64_t total);   /* a 
 int runtime_output_res(unsigned *w,unsigned *h);
 uint64_t runtime_output_res_extra_bytes(void);
 int runtime_output_res_toggle(void);                    /* legacy two-state output size switch */
-int runtime_output_mode_cycle(void);                    /* key 3: MetalFX 2K -> native 2K -> off */
+/* Picture modes (runtime/output_modes.h): 1080p, MetalFX, 1440p ... up to the largest output; 0 modes where it cannot switch */
+int runtime_output_mode_count(void);
+const char *runtime_output_mode_name(int mode);
+int runtime_output_mode_get(void);                      /* the mode in force, -1 for none of them */
+int runtime_output_mode_set(int mode);
+int runtime_output_mode_cycle(void);                    /* key 3: the next mode */
+int runtime_mfx_upscale_get(void);                      /* MetalFX upscaling to the window, at any size */
+void runtime_mfx_upscale_set(int on);
 uint64_t runtime_output_size_current(void);              /* configured canvas: width in low 32 bits, height in high 32 bits */
 void runtime_warm_progress(uint64_t done,uint64_t total,uint64_t shaders,uint64_t shader_total,uint64_t pipelines,uint64_t pipeline_total);
 void runtime_warm_done(void);
@@ -102,6 +109,10 @@ void runtime_shortcut_help_toggle(void);
 int fps_overlay_toggle_hints(void);   /* shared key 1 toggle for FPS, shader and system-load overlays */
 int runtime_aspect_toggle(void);   /* runtime/aspect_patch.h: key 4, 16:9 <-> ultrawide (Mac, 1.2.1 / 1.4.3); 0 where unavailable */
 float runtime_aspect_now(void);     /* the ratio in force, 0 = the game's own 16:9 */
+int runtime_aspect_on(void);        /* key 4's shape is on (Settings window) */
+void runtime_aspect_window(double w,double h);
+int runtime_ios_full_resolution(void);            /* iOS: the drawable at the screen's pixels, MetalFX scaling to it */
+void runtime_ios_set_full_resolution(int on);   /* the window's / screen's pixel size: the ratio the picture follows */
 int hud_compact(void);   /* gfx/nvn/fps_overlay.c: the overlay lines go to the window's corner panel (TOTK_HUD=corners: in the picture) */
 int hud_snapshot(int line, char *out, size_t n, int *highlight);   /* line 0..2: FPS, shaders, load; 0 = not published */
 
@@ -139,6 +150,11 @@ void runtime_motion_feed(const double acc_g[3], const double gyro_rad_s[3], uint
 int runtime_motion_axes(const char *spec);   /* TOTK_GYRO_AXES ("-x,y,-z"): 1 set, 0 unset, -1 malformed */
 void runtime_motion_deadzone_default(double deg_s);   /* when TOTK_GYRO_DEADZONE is unset: 1.2 for HID motion, else 0 */
 void runtime_motion_live(int on);   /* a controller with motion attached (1) / detached (0) */
+/* iPhone / iPad (ios/Sources/device_motion.m): the device's own motion sensors as the six-axis sensor, held in landscape
+   like a Switch in handheld mode. Paused while a controller gives motion (gamepad_feedback.m); off from the Settings. */
+void runtime_device_motion_controller(int attached);
+void runtime_device_motion_enable(int on);
+int runtime_device_motion_enabled(void);
 void runtime_feedback_quiet(void);   /* focus lost: stop rumbling */
 #ifdef __OBJC__
 @class GCController;

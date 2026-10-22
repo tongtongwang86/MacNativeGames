@@ -87,6 +87,18 @@ void runtime_front_text_test(const char *op,const char *text){(void)text;fprintf
 @end
 static TOTKVsync *vsyncTarget;
 
+/* The drawable at 720 rows (the system compositor scales it to the screen) or at the screen's own pixels with MetalFX
+   scaling the picture to it (the Settings sheet's Upscaling; the same output stage as the Mac's MetalFX 2K). */
+static CGSize drawableCompact,drawableNative;static int fullResolution;
+void dm_gfx_set_flag(const char *name,int v);
+int runtime_ios_full_resolution(void){return fullResolution;}
+void runtime_ios_set_full_resolution(int on){
+ fullResolution=!!on;
+ dispatch_async(dispatch_get_main_queue(),^{metalLayer.drawableSize=fullResolution?drawableNative:drawableCompact;
+  fprintf(stderr,"[totk] view drawable %.0fx%.0f (%s)\n",metalLayer.drawableSize.width,metalLayer.drawableSize.height,fullResolution?"MetalFX to the screen":"720p, scaled by the system");});
+ dm_gfx_set_flag("mfx_output",fullResolution);dm_gfx_set_flag("mfx_upscale",fullResolution);   /* the output stage runs only with MetalFX upscaling on */
+}
+
 /* Called on the main thread by the app before the game thread starts. */
 void runtime_ios_attach_layer(CAMetalLayer *layer,UIView *host){
  bootStartNS=runtime_now_ns();
@@ -96,11 +108,14 @@ void runtime_ios_attach_layer(CAMetalLayer *layer,UIView *host){
  /* TOTK_IOS_DRAWABLE_H (default 720; 0 = native pixels): build the drawable this many pixels tall at the view's aspect, so the
     game picture (1280x720 canvas) lands about 1:1 and the system compositor scales it to the screen instead of our GPU. */
  double vw=round(host.bounds.size.width*s),vh=round(host.bounds.size.height*s);
+ /* The picture takes the screen's shape (aspect_patch.h); landscape only, so the longer side is the width. */
+ runtime_aspect_window(vw>vh?vw:vh,vw>vh?vh:vw);
  const char *dh=getenv("TOTK_IOS_DRAWABLE_H");long want=dh?strtol(dh,NULL,10):720;
  /* the 16:9 picture should get about want rows: a screen narrower than 16:9 (an iPad, about 4:3; 2026-10-17) holds it by
     width, so there the drawable is want*16/9 columns wide (1281x890 on a 2360x1640 iPad); an iPhone keeps want rows */
+ drawableNative=CGSizeMake(vw,vh);
  if(want>0){double h=vw/vh<16.0/9.0?round(want*16.0/9.0*vh/vw):(double)want;if(h<vh){vw=round(vw*h/vh);vh=h;}}
- metalLayer.drawableSize=CGSizeMake(vw,vh);
+ metalLayer.drawableSize=drawableCompact=CGSizeMake(vw,vh);
  fprintf(stderr,"[totk] view drawable %.0fx%.0f (screen scale %.1f, TOTK_IOS_DRAWABLE_H=%ld)\n",vw,vh,s,want);
  bootOverlay=[[UIView alloc] initWithFrame:host.bounds];bootOverlay.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
  bootOverlay.backgroundColor=[UIColor colorWithRed:0.035 green:0.075 blue:0.09 alpha:1];

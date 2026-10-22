@@ -2,6 +2,7 @@
 #import <GameController/GameController.h>
 #include <math.h>
 #include "runtime.h"
+#include "../../vendor/gamesettings/gamesettings.h"
 
 /* Layout inside the safe area (clear of the iPhone's notch, rounded corners and home indicator), like a Switch
    controller: ZL/L and R/ZR along the top with − and + between them, and two columns mirroring each other: on the left
@@ -103,6 +104,10 @@ static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger l
     for (int i = 0; i < kButtonCount; i++) b[i] = all[i];
 }
 
+/* The Settings gear, top centre between − and + (vendor/gamesettings opens the sheet). */
+- (CGPoint)gear { CGRect a = self.area; return CGPointMake(CGRectGetMidX(a), CGRectGetMinY(a) + a.size.height * .12); }
+- (BOOL)gearAt:(CGPoint)p { CGPoint g = self.gear; return hypot(p.x - g.x, p.y - g.y) < kButtonSize * .6; }
+
 - (uint64_t)buttonAt:(CGPoint)p {
     TouchButton b[kButtonCount]; [self buttons:b]; CGFloat hit = self.hitRadius; uint64_t bits = 0;
     for (int i = 0; i < kButtonCount; i++) if (hypot(p.x - b[i].at.x, p.y - b[i].at.y) < MIN(hit, b[i].size * .75)) bits |= b[i].bit;
@@ -129,7 +134,9 @@ static void stick_axes(CGPoint from, CGPoint to, CGFloat radius, int32_t *x, int
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event; concealed = NO; [hideTimer invalidate]; hideTimer = nil;
     for (UITouch *t in touches) {
-        CGPoint p = [t locationInView:self]; NSValue *v = [NSValue valueWithCGPoint:p]; [points setObject:v forKey:t];
+        CGPoint p = [t locationInView:self];
+        if ([self gearAt:p]) { gamesettings_show(); continue; }
+        NSValue *v = [NSValue valueWithCGPoint:p]; [points setObject:v forKey:t];
         if ([self buttonAt:p]) continue;
         [(p.x < CGRectGetMidX(self.bounds) ? leftOrigins : rightOrigins) setObject:v forKey:t];
     }
@@ -174,5 +181,9 @@ static void draw_stick(CGContextRef c, CGPoint o, CGPoint p, CGFloat r) {
         CGContextSetFillColorWithColor(c, fill); CGContextFillEllipseInRect(c, box); CGContextStrokeEllipseInRect(c, box);
         CGSize z = [b[i].label sizeWithAttributes:attrs]; [b[i].label drawAtPoint:CGPointMake(b[i].at.x - z.width / 2, b[i].at.y - z.height / 2) withAttributes:attrs];
     }
+    CGPoint g = self.gear; CGFloat gs = kButtonSize * .8; CGRect gb = CGRectMake(g.x - gs / 2, g.y - gs / 2, gs, gs);
+    CGContextSetFillColorWithColor(c, fill); CGContextFillEllipseInRect(c, gb); CGContextStrokeEllipseInRect(c, gb);
+    UIImage *gear = [[UIImage systemImageNamed:@"gearshape.fill"] imageWithTintColor:ink renderingMode:UIImageRenderingModeAlwaysOriginal];
+    [gear drawInRect:CGRectInset(gb, gs * .22, gs * .22)];
 }
 @end
