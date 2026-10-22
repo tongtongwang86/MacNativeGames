@@ -133,6 +133,7 @@ static NSString *shortcut_text(void){
  uint64_t size=runtime_output_size_current();unsigned w=(uint32_t)size,h=(uint32_t)(size>>32);
  int mode=runtime_output_mode_get();
  NSString *picture=mode>=0?@(runtime_output_mode_name(mode)):[NSString stringWithFormat:@"%u×%u",w,h];
+ if(runtime_mfx_upscale_get())picture=[picture stringByAppendingString:@" + MetalFX"];
  return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  显示 / 隐藏所有提示\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  画面比例：窗口 / 16:9","Shortcuts\n1  Show / hide all overlays\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Picture shape: the window's / 16:9")),[NSString stringWithUTF8String:interp],picture];
 }
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){int compact=hud_compact();self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:compact?0.72:0.86].CGColor;self.layer.cornerRadius=compact?7:14;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:compact?0.14:0.2].CGColor;
@@ -208,6 +209,8 @@ void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(),
    runtime_front_run); shape is stepped with its key action until it matches. */
 static int picture_get(void){int m=runtime_output_mode_get();return m<0?0:m;}
 static void picture_set(int v){runtime_output_mode_set(v);}
+static int metalfx_get(void){return runtime_mfx_upscale_get();}
+static void metalfx_set(int v){runtime_mfx_upscale_set(v);}
 static int interp_get(void){return mfx_enabled();}
 static void interp_set(int v){dm_gfx_set_flag("mfx_interp",v);}
 static int shape_get(void){return runtime_aspect_on()?0:1;}
@@ -215,11 +218,13 @@ static void shape_set(int v){if(shape_get()!=v)runtime_aspect_toggle();}
 static int overlay_get(void){return fps_overlay_hints_enabled();}
 static void overlay_set(int v){if(overlay_get()!=v)runtime_shortcut_help_toggle();}
 static const char *picture_choices[16]={"1080p"};   /* one entry where the output cannot switch */
+static const char *const metalfx_choices[]={"Off","On"};
 static const char *const interp_choices[]={"Off","30 + 30","Half the refresh rate","Unlimited"};
 static const char *const shape_choices[]={"The window's shape","16:9 (the game's own)"};
 static const char *const overlay_choices[]={"Hidden","Shown"};
 static gamesettings_choice graphics_settings[]={
- {"picture","Picture",picture_choices,1,picture_get,picture_set,"MetalFX scales 1080p to the window; a size draws the game's frame and UI at that size, its 3D scene at about 5/6 of it. Key 3."},
+ {"size","Picture size",picture_choices,1,picture_get,picture_set,"The game draws its frame and UI at this size, its 3D scene at about 5/6 of it. Key 3."},
+ {"metalfx","MetalFX upscaling",metalfx_choices,2,metalfx_get,metalfx_set,"MetalFX enlarges the picture to the window, at any size (instead of plain scaling), and upscales the 3D scene."},
  {"interpolation","Frame interpolation",interp_choices,4,interp_get,interp_set,"MetalFX generates in-between frames. Key 2."},
  {"shape","Picture shape",shape_choices,2,shape_get,shape_set,"The camera follows the window as you resize it or go full screen (1.2.1, 1.4.3). Key 4."},
  {"overlay","FPS and shortcut overlay",overlay_choices,2,overlay_get,overlay_set,"Key 1."},

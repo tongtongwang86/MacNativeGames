@@ -97,6 +97,8 @@ const char *runtime_output_mode_name(int mode);
 int runtime_output_mode_get(void);                      /* the mode in force, -1 for none of them */
 int runtime_output_mode_set(int mode);
 int runtime_output_mode_cycle(void);                    /* key 3: the next mode */
+int runtime_mfx_upscale_get(void);                      /* MetalFX upscaling to the window, at any size */
+void runtime_mfx_upscale_set(int on);
 uint64_t runtime_output_size_current(void);              /* configured canvas: width in low 32 bits, height in high 32 bits */
 void runtime_warm_progress(uint64_t done,uint64_t total,uint64_t shaders,uint64_t shader_total,uint64_t pipelines,uint64_t pipeline_total);
 void runtime_warm_done(void);
