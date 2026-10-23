@@ -873,3 +873,24 @@ screen, and appears where it is put down.
   an op on one copy for such tests.
 - **Not done.** A player outside the room gets nothing (the edits are dropped, and the host's copy saves the room);
   the decorating cursor is missing on this port in single player too, which is not a co-op problem.
+
+### 8.19 Tom Nook, Isabelle and the Nook Stop terminal with company (2026-10-23)
+
+Group `nook`: script overlays in build/romfs-coop/nook/ (scripts/make_coop_flows.py, `redirect_case` patches a
+switch's case table in place), served only with the group (runtime/romfs.c).
+
+| Script | Switch | Was | Now |
+|---|---|---|---|
+| SNPC_rco (Tom Nook) | Event27 NetHasVisitor, case 0 | "abuzz with … off-island company" (SP_rco_00_Common:801) for everyone while anyone visits | his usual talk (Event52) |
+| SNPC_rco | Event0 IsMyVillage, case 1 | a visitor's small talk (SP_rco_10_ForVisitor) | the resident's talk (Event133) |
+| Obj_RcoMachine (terminal) | Event8 IsMyVillage, case 1 | "Only registered residents of <island>" (OBJ_RcoMachine:001_03) | the house-level check (Event164) |
+| Obj_RcoMachine | Event164 PlayerHouseLevel, case 0 | "You must be registered as a resident" (001_02): a visitor has no house there | the menu (Event45) |
+| SNPC_sza (Isabelle) | Event0 IsMyVillage, case 1 | a visitor's small talk (SP_sza_0_common:911_03) | the resident's talk (Event8) |
+| SNPC_sza_00_Common | Event47 NetHasVisitor, case 0 | "a bit overwhelmed at the moment" (801) for everyone while anyone visits | her usual talk (Event40) |
+
+- Tested by the user: Tom Nook talks to both players; the visitor gets the terminal menu and Nook Shopping.
+  Isabelle's patches are not confirmed yet.
+- Still refused: Invite Camper (Obj_RcoMachine_Amiibo Event40 NetHasVisitor, left alone), and Nook Shopping orders
+  for a visitor ("You can't place orders while you're visiting another player's island", game code, not a script).
+- Anything a visitor changes on the island through these menus happens only on her copy; the host's copy saves the
+  island.

@@ -166,9 +166,8 @@ def add_host(fc):
     b.entry('Coop_Test', b.action('OpenMessageWindow', None, MessageID='TalkSys/SYS_Save:001', IsCloseMessageWindow=True))   # diagnostics
 
 
-def visitor_refusal(data, patched=False):
-    """The donation script's NetHasVisitor switch: (its name, the refusal's event index, the other case's index).
-    Read only, with entry-point variables skipped (the evfl package asserts there are none)."""
+def read_flow(data):
+    """An EventFlow read only, with entry-point variables skipped (the evfl package asserts there are none)."""
     import evfl.entry_point as ep
     from evfl.util import SeekContext
     keep = ep.EntryPoint._do_read
@@ -184,7 +183,30 @@ def visitor_refusal(data, patched=False):
         ef = evfl.EventFlow(); ef.read(data)
     finally:
         ep.EntryPoint._do_read = keep
-    events = ef.flowchart.events
+    return ef
+
+
+def redirect_case(raw, name, event, query, case, to):
+    """Patch switch <event> (asking <query>) of a flowchart in place so its case <case> goes where case <to> goes. The
+    case table is rows {u32 value, u16 event index, u16 0} in the order the file lists them."""
+    events = read_flow(bytes(raw)).flowchart.events
+    sw = [e for e in events if e.name == event]
+    assert len(sw) == 1 and isinstance(sw[0].data, SwitchEvent) and sw[0].data.actor_query.v.v == query, f'{name}: {event} is not a {query} switch'
+    cases = sw[0].data.cases
+    table = b''.join(struct.pack('<IHH', v, events.index(cases[v].v), 0) for v in cases)
+    at = [i for i in range(0, len(raw) - len(table) + 1, 4) if raw[i:i + len(table)] == table]
+    assert len(at) == 1, f'{name}: the case table of {event} not found once'
+    row = at[0] + 8 * list(cases).index(case)
+    target = cases[to].v
+    struct.pack_into('<H', raw, row + 4, events.index(target))
+    again = [e for e in read_flow(bytes(raw)).flowchart.events if e.name == event][0].data.cases
+    assert again[case].v.name == target.name, f'{name}: {event} not patched'
+    print(f'{name}: {event} ({query.replace("EventFlowQuery", "")}) case {case} now goes to {target.name}')
+
+
+def visitor_refusal(data, patched=False):
+    """The donation script's NetHasVisitor switch: (its name, the refusal's event index, the other case's index)."""
+    events = read_flow(data).flowchart.events
     sws = [e for e in events if isinstance(e.data, SwitchEvent) and e.data.actor_query.v.v == 'EventFlowQueryNetHasVisitor']
     assert len(sws) == 1 and set(sws[0].data.cases) == {0, 1}, 'SNPC_owl_01_Museum_Donation: expected one NetHasVisitor switch'
     cases = sws[0].data.cases
@@ -194,6 +216,9 @@ def visitor_refusal(data, patched=False):
     refuse = cases[0].v
     assert isinstance(refuse.data, ActionEvent) and refuse.data.params.data['MessageID'].endswith(':101'), 'refusal moved'
     return sws[0].name, events.index(refuse), events.index(cases[1].v)
+
+
+patched_nook = set()
 
 
 def main():
@@ -243,6 +268,20 @@ def main():
     (a.out / f'museum/{donation}').write_bytes(raw)
     check = visitor_refusal(bytes(raw), patched=True)
     print(f'SNPC_owl_01_Museum_Donation: {sw} goes on to the donation with visitors ({check})')
+    # Tom Nook, Isabelle and the Nook Stop terminal (nook/, ACNH_MP_EDIT "nook"; LAN-COOP-DESIGN.md 8.19)
+    for flow, event, query, case, to in (
+            ('SNPC_rco', 'Event27', 'EventFlowQueryNetHasVisitor', 0, 1),   # "abuzz with off-island company" (801) -> his usual talk
+            ('SNPC_rco', 'Event0', 'EventFlowQueryIsMyVillage', 1, 0),      # a visitor's small talk -> the resident's
+            ('Obj_RcoMachine', 'Event8', 'EventFlowQueryIsMyVillage', 1, 0),   # "Only registered residents" -> the menu
+            ('Obj_RcoMachine', 'Event164', 'EventFlowQueryPlayerHouseLevel', 0, 1),   # no house here: "must be registered" -> the menu
+            ('SNPC_sza', 'Event0', 'EventFlowQueryIsMyVillage', 1, 0),      # Isabelle: a visitor's small talk -> the resident's
+            ('SNPC_sza_00_Common', 'Event47', 'EventFlowQueryNetHasVisitor', 0, 1)):   # "a bit overwhelmed" (801) -> her usual talk
+        out = a.out / f'nook/EventFlow/{flow}.bfevfl'
+        out.parent.mkdir(parents=True, exist_ok=True)
+        raw = bytearray(out.read_bytes() if out.exists() and flow in patched_nook else (a.romfs / f'EventFlow/{flow}.bfevfl').read_bytes())
+        patched_nook.add(flow)
+        redirect_case(raw, flow, event, query, case, to)
+        out.write_bytes(raw)
     info_path = a.romfs / 'EventFlow/Info/EventFlowInfoProduct.byml'
     raw = info_path.read_bytes()
     info = byml.Byml(raw).parse()

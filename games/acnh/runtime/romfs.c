@@ -121,12 +121,17 @@ unsigned runtime_romfs_open(uint64_t *out, const char *path, int mode) {
     const char *p = rom_path(path);
     if (!m || !p) return NOT_FOUND;
     int fd = -1;
-    /* museum/: the visitor-donation scripts (ACNH_MP_EDIT "museum", coop_edit.c), only with the patch that sends the
-       donation to the host; without it a visitor's donation would record nothing */
-    static int museum = -1;
-    if (museum < 0) { const char *e = getenv("ACNH_MP_EDIT"); museum = e && (!strcmp(e, "full") || strstr(e, "museum")); }
-    if (museum && m == &rmounts[0] && coop_fd >= 0) {
-        char mp[600]; snprintf(mp, sizeof mp, "museum/%s", p);
+    /* Script overlays that only go with an ACNH_MP_EDIT group (scripts/make_coop_flows.py):
+         museum/   the visitor-donation scripts ("museum", coop_edit.c), only with the patch that sends the donation to
+                   the host; without it a visitor's donation would record nothing
+         nook/     Tom Nook and the Nook Stop terminal serve a visitor as a resident, and Tom Nook serves the host while
+                   someone visits ("nook") */
+    static const char *const groups[][2] = {{"museum", "museum/"}, {"nook", "nook/"}};
+    static int on[2] = {-1, -1};
+    for (unsigned g = 0; g < 2 && fd < 0; g++) {
+        if (on[g] < 0) { const char *e = getenv("ACNH_MP_EDIT"); on[g] = e && (!strcmp(e, "full") || strstr(e, groups[g][0])); }
+        if (!on[g] || m != &rmounts[0] || coop_fd < 0) continue;
+        char mp[600]; snprintf(mp, sizeof mp, "%s%s", groups[g][1], p);
         fd = openat(coop_fd, mp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     }
     if (fd < 0) fd = m == &rmounts[0] && coop_fd >= 0 ? openat(coop_fd, p, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
