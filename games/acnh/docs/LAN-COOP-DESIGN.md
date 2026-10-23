@@ -888,8 +888,7 @@ switch's case table in place), served only with the group (runtime/romfs.c).
 | SNPC_sza (Isabelle) | Event0 IsMyVillage, case 1 | a visitor's small talk (SP_sza_0_common:911_03) | the resident's talk (Event8) |
 | SNPC_sza_00_Common | Event47 NetHasVisitor, case 0 | "a bit overwhelmed at the moment" (801) for everyone while anyone visits | her usual talk (Event40) |
 
-- Tested by the user: Tom Nook talks to both players; the visitor gets the terminal menu and Nook Shopping.
-  Isabelle's patches are not confirmed yet.
+- Tested by the user: Tom Nook and Isabelle talk to both players; the visitor gets the terminal menu and Nook Shopping.
 - Still refused: Invite Camper (Obj_RcoMachine_Amiibo Event40 NetHasVisitor, left alone), and Nook Shopping orders
   for a visitor ("You can't place orders while you're visiting another player's island", game code, not a script).
 - Anything a visitor changes on the island through these menus happens only on her copy; the host's copy saves the
