@@ -801,3 +801,11 @@ do her d-pad room options (light, storage, decorating mode). The outdoor patches
     - A counter at main+0x2267b10 stayed at 0 during her presses, so one of those two fails for her, or the selector
       is not reached.
     - Next: trap main+0x22676e4 on the visitor and read those two values.
+- **Update: trap round 2 (visitor's copy, inside the owner's house).**
+  - **D-pad.** The selector main+0x22676e4 runs every frame, and so do main+0x2267ac0..main+0x2267b00. The room
+    branch at main+0x2267b10 never ran, outdoors or indoors, so she stops at main+0x2267b08 (stage table room bit)
+    or main+0x2267b0c (the byte at player+0x17ac).
+  - **Placing.** None of the eight `mov wN, #0x28` sites in player and placement code ran at the refusal, so code
+    0x28 reaches the menu queue (main+0x2cb1700 pops a message and stores its word at +0x40 into +0x26e0) through
+    a table or a register.
+  - Both handed to read-only agents with these facts.
