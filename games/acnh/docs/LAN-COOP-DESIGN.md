@@ -699,3 +699,20 @@ group `visitor-turn`.
   while the player plays the push animation. This happens both ways, host and visitor, so the replay of push / pull
   does not run the item's slide. Next to look at: the push and pull states (ids 0x49–0x50) and what their enter / run
   do when the player is remote (+0x178 == 1), compared with the turn's.
+- **Saves checked (2026-10-22): the visitor's pick-up is kept on both sides.**
+  - The host's `main.dat` this morning had a cell `{0x0055, 1, 0, 3}` at main.dat+0x267df0: the placed train set.
+  - It is gone from the save written during the session (17:42) and from the one written when Panthea left (17:43).
+  - Panthea's `personal.dat` has item 0x0055 (value 3) in pocket slot 17 in both saves.
+  - Her turn of the train set could not be checked separately: the item it was applied to is now in her pockets.
+- **The push / pull jump: where it is.**
+  - The push state's entry (main+0x22969b4) and its helper main+0x22e2708 work like the turn's (main+0x22e5938). On
+    the pushing player's own copy (+0x178 == 0) they compute the target (player position plus 5 units in the facing
+    direction) into the action record at player+0x191d to +0x1930, then commit the job on every copy (main+0x1293068).
+  - The push run (main+0x22969f4 → main+0x22e2adc) only moves the pushing player on their own copy; it never moves
+    the item.
+  - So the item's movement comes from the committed job: the owner station runs the job's action delegate (job+0x78),
+    and other stations go through main+0x1291558 / main+0x1291608 / main+0x1296450.
+  - In the base game nobody moves furniture with company, so the non-owner path was never used for a push. It
+    evidently places the item at the end instead of sliding it.
+  - Next: compare what the owner's delegate and the non-owner path do for group 0x12 push vs turn (the turn animates
+    on both copies).
