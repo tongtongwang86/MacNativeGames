@@ -372,6 +372,17 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
     /* Y indoors: the Y decision main+0x232583c gives up when main+0x23f3d30(player) is false, which in a room is
        main+0x15e638c = house interior and "own house" (main+0x2813cd8). */
     {0x23f3f40, 0x360001e0, 0xd503201f, "house"},   /* tbz w0, #0, 0x23f3f7c (not own house: no) -> nop (then b: yes) */
+    /* Placing from pockets indoors: "You can't use this item right now" (SYS_Telepathy 404, code 0x28) is the default
+       code of an item with no actions; the pocket submenu builder main+0x307cf70 adds the place entries only for a
+       player in their own house (main+0x2813cd8). */
+    {0x307dc50, 0x360005a0, 0xd503201f, "house"},   /* tbz w0, #0, 0x307dd04 (not own house: no place entries) -> nop */
+    /* The main island's house d-pad goes through the selector's generic part (main+0x2267eec on; the room branch
+       main+0x2267b10 is the Slumber Island house only), as actions 0x45 / 0x3d / 0x3c / 4 of main+0x2df6328. Action 0x3d
+       (storage) asks IsInMyHouse then main+0x256b250 >= 2. Action 0x45 (decorating mode: main+0x2dfb4f8, own house on own
+       island) stays closed: a visitor entering decorating mode hid the host and froze him, as the host's own decorating
+       mode did to the visitor (main+0x2df6d60 tbnz -> b opened it). */
+    {0x2df6d28, 0x3607d000, 0xd503201f, "house"},   /* 0x3d: tbz (not own house: stop) -> nop */
+    {0x2df6d38, 0x54ffcf83, 0xd503201f, "house"},   /* 0x3d: b.lo (main+0x256b250 < 2: stop) -> nop */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */

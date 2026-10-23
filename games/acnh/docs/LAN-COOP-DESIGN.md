@@ -809,3 +809,17 @@ do her d-pad room options (light, storage, decorating mode). The outdoor patches
     0x28 reaches the menu queue (main+0x2cb1700 pops a message and stores its word at +0x40 into +0x26e0) through
     a table or a register.
   - Both handed to read-only agents with these facts.
+- **Update: placing and storage indoors work** (patches found by two more read-only agents, then tested).
+  - **Placing from pockets.** "You can't use this item right now" (SYS_Telepathy 404, code 0x28) is the default
+    code of an item whose action list is empty. The pocket submenu builder main+0x307cf70 adds the place entries
+    only for a player in their own house. Patch: main+0x307dc50 `tbz` → `nop`.
+  - **The d-pad.** On the main island the house d-pad goes through the selector's generic part as actions of
+    main+0x2df6328. Action 0x3d (storage) asks IsInMyHouse, then main+0x256b250 >= 2. Patches: main+0x2df6d28 and
+    main+0x2df6d38 → `nop`.
+  - **The Slumber Island branch.** The room branch at main+0x2267b10 (stage-table bit 0x20, cCloudIsland) is for the
+    Slumber Island house only. The selector patches made there earlier do nothing on the main island.
+  - **Decorating mode** is action 0x45, asking main+0x2dfb4f8 (own house on own island). Opening it for the visitor
+    (main+0x2df6d60) let her enter it, but that hid the host and froze him, the same freeze as the host's
+    decorating mode gave her. So it stays closed both ways for now.
+  - **Still to do:** the light (d-pad up) does nothing for the visitor. The user wants decorating mode with company,
+    so the freeze has to be understood and fixed.
