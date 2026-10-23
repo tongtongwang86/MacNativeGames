@@ -750,3 +750,24 @@ slide smoothly on the other player's screen too.
   elsewhere), write watches on its push-only position copy (both copies set it through main+0x21d6d60 →
   main+0x13773a4), a trap on main+0x13773a4 to get the item actor, its state table (item actor +0x70; 13 states), and
   recordings of the per-player network data.
+
+### 8.17 Houses: what is known (2026-10-22), not working yet
+
+Inside the host's house, the visitor's push, pull, turn, Y pick-up and placing from pockets all fail silently, and so
+do her d-pad room options (light, storage, decorating mode). The outdoor patches (8.15, 8.16) do not cover them.
+
+- **IsInMyVillage callers.** With a trap on IsInMyVillage printing each new caller once, the house test showed only
+  one new caller: main+0x2dfb52c in main+0x2dfb4f8, reached from main+0x220e9c0 → main+0x22676e4 → main+0x2df6328.
+  Making it answer "yes" changed nothing visible, so it was taken out again. The indoor refusals are therefore
+  decided mostly by other tests: room or house ownership, or the d-pad dispatcher's own checks.
+- **The d-pad / room dispatcher, main+0x2df6328.** It is a large switch on the action, with a separate check on each
+  branch (main+0x2dfb464, main+0x0264a5f0, main+0x02813cd8, main+0x0256b250, main+0x032f8xxx …). It stores a
+  refusal code at player+0xf08:
+  - code 4 when there is company and the player is on their own island (the host);
+  - code 0x87 for decorating mode with company ("It's rude to redecorate when you have company!").
+- **The host's decorating mode with company is unsafe.** Lifting those two codes let the host enter decorating mode
+  with the visitor in the house. The visitor vanished on her own screen and could not move after the host came out,
+  so both codes stay.
+- **Next.** Trap main+0x2df6328 on the visitor's copy to log the action id (x1) and which check returns, for each d-pad
+  press and furniture attempt. Then do the same for the indoor furniture job start (main+0x21cd2c0 and its placement
+  check main+0x1375040 → main+0x1412c8c), comparing host and visitor.
