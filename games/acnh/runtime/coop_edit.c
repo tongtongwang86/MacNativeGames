@@ -24,9 +24,12 @@
 #define MUSEUM_RECORD 0x26bdd90
 #define DONOR_SLOT 0x24819f0
 #define MUSEUM_SIZE 0x3404
-enum { EDIT_MUSEUM = 1 };
+enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2 };
 typedef struct __attribute__((packed)) { uint8_t kind, pad[7]; uint64_t item; } EditBody;
 _Static_assert(sizeof(EditBody) == 16, "edit body");
+/* One decorating-mode change of a room tile: op 1 clears the tile, 5 puts the record there (the furniture ops' codes) */
+typedef struct __attribute__((packed)) { uint8_t kind, op, layer, flag; uint32_t slot, map; int16_t x, z; uint64_t record; } RoomEdit;
+_Static_assert(sizeof(RoomEdit) == 24, "room edit");
 
 static volatile uint32_t *slots;   /* [0] credit (host's slot + 1), [1] ring head */
 static volatile uint64_t *ring;
@@ -35,7 +38,9 @@ void coop_edit_set_queue(volatile uint32_t *s, volatile uint64_t *q) { slots = s
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static EditBody pending[32]; static int npending;
+static void room_received(int node, const RoomEdit *e);
 void coop_edit_received(int node, const void *body, uint32_t n) {
+    if (n == sizeof(RoomEdit) && *(const uint8_t *)body == EDIT_ROOM) { room_received(node, body); return; }
     if (n != sizeof(EditBody)) { fprintf(stderr, "[coop] edit from node %d: %u bytes, ignored\n", node, n); return; }
     pthread_mutex_lock(&lock);
     if (npending < (int)(sizeof pending / sizeof *pending)) memcpy(&pending[npending++], body, sizeof(EditBody));
@@ -81,10 +86,12 @@ static void host_donate(uint8_t *main, uint64_t item) {
     fprintf(stderr, "[coop] museum: recorded a visitor's donation, item %#llx, credited to resident slot %d\n", (unsigned long long)item, donor);
 }
 
+static void room_tick(uint8_t *main, int self);
 void coop_edit_tick(void) {
-    if (!slots) return;
     uint8_t *main = runtime_module_base("main");
     int self = coop_lan_self_node();
+    room_tick(main, self);
+    if (!slots) return;
     if (self <= 0) {
         slots[0] = 0; ring_tail = slots[1];
         if (self == 0) {
@@ -122,5 +129,122 @@ void coop_fill_pusher(uint8_t *player) {
     for (unsigned i = 0; i < 8; i++) {
         uint64_t p = i;
         if (((uint32_t (*)(void *))(uintptr_t)(main + PLAYER_PUSHING))(&p) & 1) { *player = (uint8_t)i; return; }
+    }
+}
+
+/* Decorating mode in company (acnh_patches.c group "decor-sync"; LAN-COOP-DESIGN.md 8.18). The decorating editor moves
+   the room's furniture actors itself, and each actor writes its tile into the room's item layer
+   (main+0x137ec00 -> main+0x137d500 -> ... -> main+0x1950560 put a record / main+0x19508a0 clear a tile, both
+   (ctx, layer, ...) with ctx {vtable, u32 map slot @8 (0 = the current map), u32 map id @0xc, u8 @0x10} and a tile
+   {vtable, s32 x @8, s32 z @0xc}). Nothing of it reaches the other copies, which replay only the ordinary furniture
+   actions (the furniture ops of main+0x21cfab0, run by every copy). So the stubs on those two layer writes queue the
+   writes made from the editor's code (a return address in main+0x13c0000..0x13f8000 on the call chain) and this file
+   sends them; a copy that receives one carries it out with the ordinary furniture ops' own handlers, which create or
+   remove the actor and write the layer: op 1 (main+0x21d0acc, packet {u8 1, s16 x @2, s16 z @4, u8 layer @6}) and op 5
+   (main+0x21dc0e8, clears the tile, then puts the record: {u8 5, record @2, s16 x @0xa, s16 z @0xc, u8 layer @0xe,
+   options @0xf..0x13, player @0x68 = 0xff}). Both read only the packet at job+0x28, so a zeroed handler and job do. */
+#define EDITOR_LO 0x13c0000
+#define EDITOR_HI 0x13f8000
+#define OP_REMOVE 0x21d0acc
+#define OP_REPLACE 0x21dc0e8
+static int room_session;   /* in a session: the stubs do any work at all */
+static RoomEdit room_out[64]; static int nroom_out;
+static RoomEdit room_in[64]; static int nroom_in;
+static int applying;
+
+static int from_editor(uint64_t lr) {
+    uint8_t *main = runtime_module_base("main");
+    uint64_t lo = (uint64_t)(uintptr_t)main + EDITOR_LO, hi = (uint64_t)(uintptr_t)main + EDITOR_HI;
+    if (lr >= lo && lr < hi) return 1;
+    uint64_t *fp = __builtin_frame_address(0);
+    for (int i = 0; i < 24 && fp; i++) {
+        uint64_t *next = (uint64_t *)(uintptr_t)fp[0], ret = fp[1];
+        if (ret >= lo && ret < hi) return 1;
+        if (next <= fp || (uint8_t *)next - (uint8_t *)fp > 0x100000) break;
+        fp = next;
+    }
+    return 0;
+}
+static void room_queue(uint8_t *ctx, uint8_t op, uint32_t layer, const uint8_t *pos, uint64_t record, uint64_t lr) {
+    if (!room_session || applying || !ctx || !pos || !from_editor(lr)) return;
+    RoomEdit e = {.kind = EDIT_ROOM, .op = op, .layer = (uint8_t)layer, .flag = ctx[0x10], .slot = *(uint32_t *)(ctx + 8),
+                  .map = *(uint32_t *)(ctx + 0xc), .x = (int16_t)*(int32_t *)(pos + 8), .z = (int16_t)*(int32_t *)(pos + 0xc), .record = record};
+    fprintf(stderr, "[coop] room: decorating %s slot %u map %#x layer %u (%d,%d) %016llx\n", op == 5 ? "put" : "clear",
+            e.slot, e.map, e.layer, e.x, e.z, (unsigned long long)record);
+    if (nroom_out < 64) room_out[nroom_out++] = e;
+}
+void coop_room_set(uint8_t *ctx, uint32_t layer, const uint64_t *record, const uint8_t *pos, uint64_t lr) {
+    if (record) room_queue(ctx, 5, layer, pos, *record, lr);
+}
+void coop_room_clear(uint8_t *ctx, uint32_t layer, const uint8_t *pos, uint64_t unused, uint64_t lr) {
+    (void)unused; room_queue(ctx, 1, layer, pos, 0, lr);
+}
+void coop_room_op_seen(void *handler, uint8_t *job, uint64_t a2, uint64_t a3, uint64_t lr) {
+    (void)handler; (void)a2; (void)a3; (void)lr;
+    uint8_t *p = room_session && job ? *(uint8_t **)(job + 0x28) : NULL;
+    if (!p) return;
+    fprintf(stderr, "[coop] room: furniture op %u: record %016llx (%d,%d) layer %u options %02x %02x %02x %02x %02x player %u\n",
+            p[0], (unsigned long long)*(uint64_t *)(void *)(p + 2), *(int16_t *)(void *)(p + 0xa), *(int16_t *)(void *)(p + 0xc),
+            p[0xe], p[0xf], p[0x10], p[0x11], p[0x12], p[0x13], p[0x68]);
+}
+
+static int room_in_node[64];
+static void room_received(int node, const RoomEdit *e) {   /* network thread */
+    pthread_mutex_lock(&lock);
+    if (nroom_in < 64) { room_in[nroom_in] = *e; room_in_node[nroom_in] = node; nroom_in++; }
+    else fprintf(stderr, "[coop] room: edit from node %d dropped: queue full\n", node);
+    pthread_mutex_unlock(&lock);
+}
+
+/* The map the furniture ops act on, as main+0x21d0acc finds it: the scene object *(main+0x4ab16b0) names a scene
+   (vtable +0x18 of *(main+0x4ab15d0), hashed by main+0x5bd550); scene 0x758f7eaf takes its map from *(main+0x4ac2a10),
+   any other from main+0x54bf480; the map id is that object's +0x38. */
+static uint32_t current_map(uint8_t *main) {
+    uint8_t *scene = **(uint8_t ***)(void *)(main + 0x4ab16b0), *cur = main + 0x54bf480;
+    if (scene && *(uint64_t *)(void *)(scene + 0x330)) {
+        void *names = **(void ***)(void *)(main + 0x4ab15d0);
+        uint64_t *name = ((uint64_t *(*)(void *, uint32_t))(*(void ***)names)[0x18 / 8])(names, *(uint32_t *)(void *)(scene + 0x338));
+        if (name && ((int (*)(uint64_t, int))(uintptr_t)(main + 0x5bd550))(*name, 0) == 0x758f7eaf) cur = *(uint8_t **)(void *)(main + 0x4ac2a10);
+    }
+    return cur ? *(uint32_t *)(void *)(cur + 0x38) : 0xffffffffu;
+}
+static void room_apply(uint8_t *main, const RoomEdit *e) {
+    static uint8_t handler[0x378], job[0x40], packet[0x70];
+    uint32_t map = current_map(main);
+    if (e->slot != 0 || e->map != map) {
+        fprintf(stderr, "[coop] room: %s (%d,%d) for map %#x slot %u not applied: this copy is in map %#x\n", e->op == 5 ? "put" : "clear", e->x, e->z, e->map, e->slot, map);
+        return;
+    }
+    memset(handler, 0, sizeof handler); memset(job, 0, sizeof job); memset(packet, 0, sizeof packet);
+    *(uint8_t **)(void *)(job + 0x28) = packet;
+    packet[0] = e->op; packet[0x68] = 0xff;
+    if (e->op == 5) {
+        memcpy(packet + 2, &e->record, 8); memcpy(packet + 0xa, &e->x, 2); memcpy(packet + 0xc, &e->z, 2); packet[0xe] = e->layer;
+    } else {
+        memcpy(packet + 2, &e->x, 2); memcpy(packet + 4, &e->z, 2); packet[6] = e->layer;
+    }
+    applying = 1;
+    ((void (*)(void *, void *))(uintptr_t)(main + (e->op == 5 ? OP_REPLACE : OP_REMOVE)))(handler, job);
+    applying = 0;
+    fprintf(stderr, "[coop] room: applied %s (%d,%d) layer %u %016llx\n", e->op == 5 ? "put" : "clear", e->x, e->z, e->layer, (unsigned long long)e->record);
+}
+static void room_tick(uint8_t *main, int self) {
+    room_session = self >= 0;
+    if (!room_session) { nroom_out = 0; return; }
+    /* this copy's decorating: drop writes that a later one in the same batch replaces, then send */
+    for (int i = 0; i < nroom_out; i++) {
+        RoomEdit *e = &room_out[i]; int later = 0;
+        for (int j = i + 1; j < nroom_out && !later; j++)
+            later = room_out[j].slot == e->slot && room_out[j].map == e->map && room_out[j].layer == e->layer && room_out[j].x == e->x && room_out[j].z == e->z;
+        if (later) continue;
+        if (self == 0) coop_lan_broadcast_edit(e, sizeof *e, -1);
+        else if (coop_lan_send_edit(e, sizeof *e)) fprintf(stderr, "[coop] room: could not send an edit to the host\n");
+    }
+    nroom_out = 0;
+    RoomEdit in[64]; int from[64], n;
+    pthread_mutex_lock(&lock); n = nroom_in; memcpy(in, room_in, sizeof *in * (size_t)n); memcpy(from, room_in_node, sizeof *from * (size_t)n); nroom_in = 0; pthread_mutex_unlock(&lock);
+    for (int i = 0; i < n; i++) {
+        if (self == 0) coop_lan_broadcast_edit(&in[i], sizeof in[i], from[i]);   /* the host passes a visitor's edit on */
+        room_apply(main, &in[i]);
     }
 }

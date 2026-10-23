@@ -238,7 +238,7 @@ static void *host_main(void *arg) {
         }
         if (p[2].revents & POLLIN) accept_station(tcp);
         for (int i = 3; i < np; i++) if (p[i].revents) {
-            int k = k2fd[i - 3]; uint8_t type; uint32_t n; uint8_t body[16];
+            int k = k2fd[i - 3]; uint8_t type; uint32_t n; uint8_t body[32];
             pthread_mutex_lock(&lock);
             if (members[k].fd == p[i].fd) {
                 int node = members[k].node;
@@ -410,6 +410,7 @@ static void *station_main(void *arg) {
         if (recv_msg(fd, &type, body, sizeof body, &n)) break;
         if (type == MSG_UPDATE && n == sizeof(LdnNetworkInfo)) ldn_host_network_updated((LdnNetworkInfo *)body);
         else if (type == MSG_LEAVE) { fprintf(stderr, "[coop] the host is closing the island: flying home\n"); coop_flow_request(4); }
+        else if (type == MSG_EDIT) coop_edit_received(0, body, n);   /* room edits the host or another visitor made */
         else if (type == MSG_NODES && n == sizeof(NodeEntry) * COOP_NODES) {
             NodeEntry *e = (NodeEntry *)body; struct sockaddr_in host; socklen_t hl = sizeof host; getpeername(fd, (struct sockaddr *)&host, &hl);
             pthread_mutex_lock(&lock);
@@ -472,6 +473,13 @@ int coop_lan_send_edit(const void *body, uint32_t n) {   /* station: to the host
     int r = station_running && station_fd >= 0 ? send_msg(station_fd, MSG_EDIT, body, n) : -1;
     pthread_mutex_unlock(&lock);
     return r;
+}
+int coop_lan_broadcast_edit(const void *body, uint32_t n, int except_node) {   /* host: to every visitor but one (game thread) */
+    int sent = 0;
+    pthread_mutex_lock(&lock);
+    for (int k = 0; k < COOP_NODES; k++) if (hosting && members[k].fd >= 0 && members[k].node != except_node && !send_msg(members[k].fd, MSG_EDIT, body, n)) sent++;
+    pthread_mutex_unlock(&lock);
+    return sent;
 }
 void coop_lan_disconnect(void) {
     pthread_mutex_lock(&lock); int fd = station_fd, running = station_running; station_fd = -1; station_running = 0; set_self(-1); pthread_mutex_unlock(&lock);

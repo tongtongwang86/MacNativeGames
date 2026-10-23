@@ -751,7 +751,7 @@ slide smoothly on the other player's screen too.
   main+0x13773a4), a trap on main+0x13773a4 to get the item actor, its state table (item actor +0x70; 13 states), and
   recordings of the per-player network data.
 
-### 8.17 Houses (2026-10-22): push, pull, turn, Y, placing, the d-pad and decorating work; decorating changes do not sync yet
+### 8.17 Houses (2026-10-22): push, pull, turn, Y, placing, the d-pad and decorating work
 
 Inside the host's house, the visitor's push, pull, turn, Y pick-up and placing from pockets all fail silently, and so
 do her d-pad room options (light, storage, decorating mode). The outdoor patches (8.15, 8.16) do not cover them.
@@ -838,3 +838,32 @@ do her d-pad room options (light, storage, decorating mode). The outdoor patches
   - **Still wrong.** Furniture moved in decorating mode changes only on the copy that decorated; the other player
     does not see it, not even after leaving and re-entering. The decorating cursor also does not show. Both are
     being traced.
+
+### 8.18 Decorating mode changes show on every copy, as they happen (2026-10-22): works
+
+Group `decor-sync` (with `house`). Tested by the user: an item picked up in decorating mode disappears on the other
+screen, and appears where it is put down.
+
+- **Why nothing reached the other copy.**
+  - Ordinary furniture actions are replayed: each copy runs the other player's action, and that runs a furniture op of
+    main+0x21cfab0 (op byte at *(job+0x28), 0..5; op 1 removes, op 5 clears a tile and puts a record), which
+    creates or removes the actor and writes the room's item layer.
+  - The decorating editor (code in main+0x13c0000..0x13f8000) instead moves the actors itself, and each actor writes
+    its tile (main+0x137ec00 → main+0x137d500 → main+0x1950560 put / main+0x19508a0 clear). No action, nothing to replay.
+  - Found with snapshots of the host's memory around one move (the record changed in two in-memory copies of the room
+    at once, and a third copy on leaving decorating mode) and write traps on the moved tile on both copies.
+- **Room item layer.** 20 records per row (row stride 0xa0), 8 bytes each: u16 item, u8, u8 (the turn: e.g.
+  0x00020055 faces 2), u16, u16; 0xfffe empty; the other tiles of a large item hold 0xfffd records {0xfffd, 0, item,
+  dx, dz}. The two layer writes take (ctx, layer, …): ctx {vtable, u32 map slot @8 (0 = the current map), u32 map id
+  @0xc, u8 @0x10} and a tile {vtable, s32 x @8, s32 z @0xc}.
+- **What the patch does.**
+  - Stubs on the two layer writes (acnh_patches.c decor_install) pass their arguments to coop_edit.c, which keeps the
+    writes whose call chain passes through the editor's code, and sends them (host → every visitor; visitor → host,
+    which applies and passes them on). Message: EDIT kind 2 {op, layer, map slot, map id, x, z, record}.
+  - The receiving copy runs op 1 (main+0x21d0acc) for a clear and op 5 (main+0x21dc0e8) for a put, with a zeroed
+    handler and a job whose +0x28 points to the packet, on the game thread. A write is applied only when this copy is
+    in the same map (map id as main+0x21d0acc finds it).
+  - The ops' own layer writes do not pass the editor, so nothing is sent back.
+  - Two more stubs log the place ops' packets (op 0, op 5) for diagnosis: `[coop] room: furniture op …`.
+- **Not done.** A player outside the room gets nothing (the edits are dropped, and the host's copy saves the room);
+  the decorating cursor is missing on this port in single player too, which is not a co-op problem.

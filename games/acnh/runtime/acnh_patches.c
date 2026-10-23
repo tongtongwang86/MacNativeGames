@@ -503,6 +503,60 @@ static void push_install(Module *m, uint64_t s, uint64_t data_off) {
     }
     fprintf(stderr, "[acnh] local play editing: pushed furniture slides on every copy\n");
 }
+
+/* Decorating mode in company (ACNH_MP_EDIT group "decor-sync"; LAN-COOP-DESIGN.md 8.18): stubs on the room item
+   layer's two writes (main+0x1950560 put a record, main+0x19508a0 clear a tile) hand their arguments to coop_edit.c,
+   which sends the ones the decorating editor makes; two more on the place ops (0, 5) log their packets. Each stub
+   keeps x0..x8, calls the hook with x0..x3 and the return address, then runs the site's first instruction (all four
+   are `sub sp, sp, #n`) and goes on:
+     stp x29, x30, [sp, #-0x60]!; stp x0, x1, [sp, #0x10]; stp x2, x3, [sp, #0x20]; stp x4, x5, [sp, #0x30]
+     stp x6, x7, [sp, #0x40]; str x8, [sp, #0x50]; mov x4, x30; adrp x16, <data>; ldr x16, [x16, #slot]; blr x16
+     ldr x8, [sp, #0x50]; ldp x6, x7, [sp, #0x40]; ldp x4, x5, [sp, #0x30]; ldp x2, x3, [sp, #0x20]
+     ldp x0, x1, [sp, #0x10]; ldp x29, x30, [sp], #0x60; <the site's instruction>; b <site + 4> */
+static const struct { uint64_t site; uint32_t word; void *hook; } decor_sites[] = {
+    {0x1950560u, 0xd10143ffu, (void *)coop_room_set},      /* sub sp, sp, #0x50 */
+    {0x19508a0u, 0xd10103ffu, (void *)coop_room_clear},    /* sub sp, sp, #0x40 */
+    {0x21da650u, 0xd10303ffu, (void *)coop_room_op_seen},  /* op 0, sub sp, sp, #0xc0 */
+    {0x21dc0e8u, 0xd10383ffu, (void *)coop_room_op_seen},  /* op 5, sub sp, sp, #0xe0 */
+};
+#define DECOR_STUB (PUSH_STUB + 128)   /* 80 bytes per site */
+#define DECOR_HOOK 0x308
+static void decor_install(Module *m, uint64_t s, uint64_t data_off) {
+    const char *e = getenv("ACNH_MP_EDIT");
+    if (!e || (strcmp(e, "full") && !strstr(e, "decor-sync"))) return;
+    for (size_t k = 0; k < sizeof decor_sites / sizeof *decor_sites; k++, s += 80) {
+    uint64_t site = decor_sites[k].site, slot = DECOR_HOOK + 8 * k;
+    if (data_off + slot + 8 > m->size) runtime_fail("ACNH_MP_EDIT decor-sync: no data page after main");
+    *(uint64_t *)(void *)(m->base + data_off + slot) = (uint64_t)(uintptr_t)decor_sites[k].hook;
+    uint32_t w; memcpy(&w, m->base + site, 4);
+    if (w != decor_sites[k].word) runtime_fail("ACNH_MP_EDIT decor-sync: a room layer function differs (another game version?)");
+    if (s + 80 > m->ro_off) runtime_fail("ACNH_MP_EDIT decor-sync: no room in main's text padding");
+    for (unsigned b = 0; b < 80; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT decor-sync: text padding in use");
+    uint32_t stub[20] = {
+        0xa9ba7bfdu,                                                   /* stp x29, x30, [sp, #-0x60]! */
+        0xa90107e0u,                                                   /* stp x0, x1, [sp, #0x10] */
+        0xa9020fe2u,                                                   /* stp x2, x3, [sp, #0x20] */
+        0xa90317e4u,                                                   /* stp x4, x5, [sp, #0x30] */
+        0xa9041fe6u,                                                   /* stp x6, x7, [sp, #0x40] */
+        0xf9002be8u,                                                   /* str x8, [sp, #0x50] */
+        0xaa1e03e4u,                                                   /* mov x4, x30 */
+        (adrp_x10(s + 28, data_off) & ~31u) | 16,                      /* adrp x16, <data> */
+        0xf9400000u | (uint32_t)(slot / 8) << 10 | 16 << 5 | 16,       /* ldr x16, [x16, #slot] */
+        0xd63f0200u,                                                   /* blr x16 */
+        0xf9402be8u,                                                   /* ldr x8, [sp, #0x50] */
+        0xa9441fe6u,                                                   /* ldp x6, x7, [sp, #0x40] */
+        0xa94317e4u,                                                   /* ldp x4, x5, [sp, #0x30] */
+        0xa9420fe2u,                                                   /* ldp x2, x3, [sp, #0x20] */
+        0xa94107e0u,                                                   /* ldp x0, x1, [sp, #0x10] */
+        0xa8c67bfdu,                                                   /* ldp x29, x30, [sp], #0x60 */
+        w,
+        aspect_branch(s + 68, site + 4),
+        0, 0};
+    memcpy(m->base + s, stub, sizeof stub);
+    uint32_t b = aspect_branch(site, s); memcpy(m->base + site, &b, 4);
+    }
+    fprintf(stderr, "[acnh] local play editing: decorating-mode changes go to the other copies\n");
+}
 #endif
 
 void runtime_game_patches(Module *m) {
@@ -522,6 +576,7 @@ void runtime_game_patches(Module *m) {
     site_probe(m, ASPECT_STUBS_END(m) + SIZE_STUBS, (m->file_size + 0x3fff) & ~0x3fffULL);
     museum_install(m, ASPECT_STUBS_END(m) + MUSEUM_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
     push_install(m, ASPECT_STUBS_END(m) + PUSH_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
+    decor_install(m, ASPECT_STUBS_END(m) + DECOR_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
 #endif
 }
 
