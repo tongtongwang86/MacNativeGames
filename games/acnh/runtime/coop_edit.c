@@ -17,6 +17,7 @@
 #include "coop.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SAVE_ROOT_SLOT 0x4ab3640
@@ -147,6 +148,7 @@ void coop_fill_pusher(uint8_t *player) {
 #define EDITOR_HI 0x13f8000
 #define OP_REMOVE 0x21d0acc
 #define OP_REPLACE 0x21dc0e8
+#define OP_PLACE 0x21da650   /* op 0, placing from pockets: the same packet as op 5, without the clear */
 static int room_session;   /* in a session: the stubs do any work at all */
 static RoomEdit room_out[64]; static int nroom_out;
 static RoomEdit room_in[64]; static int nroom_in;
@@ -188,10 +190,10 @@ void coop_room_op_seen(void *handler, uint8_t *job, uint64_t a2, uint64_t a3, ui
             p[0xe], p[0xf], p[0x10], p[0x11], p[0x12], p[0x13], p[0x68]);
 }
 
-static int room_in_node[64];
+static int room_in_node[64]; static uint8_t room_in_opts[64][6];   /* [0] set: options @0xf..0x13 from [1..5] (diagnostics) */
 static void room_received(int node, const RoomEdit *e) {   /* network thread */
     pthread_mutex_lock(&lock);
-    if (nroom_in < 64) { room_in[nroom_in] = *e; room_in_node[nroom_in] = node; nroom_in++; }
+    if (nroom_in < 64) { room_in[nroom_in] = *e; room_in_node[nroom_in] = node; room_in_opts[nroom_in][0] = 0; nroom_in++; }
     else fprintf(stderr, "[coop] room: edit from node %d dropped: queue full\n", node);
     pthread_mutex_unlock(&lock);
 }
@@ -208,23 +210,30 @@ static uint32_t current_map(uint8_t *main) {
     }
     return cur ? *(uint32_t *)(void *)(cur + 0x38) : 0xffffffffu;
 }
-static void room_apply(uint8_t *main, const RoomEdit *e) {
+static void room_apply(uint8_t *main, const RoomEdit *e, const uint8_t *opts) {
     static uint8_t handler[0x378], job[0x40], packet[0x70];
     uint32_t map = current_map(main);
-    if (e->slot != 0 || e->map != map) {
+    if (e->slot != 0 || (e->map != map && e->map != 0xffffffffu)) {   /* 0xffffffff: coop room, the current map */
         fprintf(stderr, "[coop] room: %s (%d,%d) for map %#x slot %u not applied: this copy is in map %#x\n", e->op == 5 ? "put" : "clear", e->x, e->z, e->map, e->slot, map);
         return;
     }
     memset(handler, 0, sizeof handler); memset(job, 0, sizeof job); memset(packet, 0, sizeof packet);
     *(uint8_t **)(void *)(job + 0x28) = packet;
-    packet[0] = e->op; packet[0x68] = 0xff;
+    int wall = e->op == 5 && e->layer >= 2;
+    packet[0] = wall ? 0 : e->op; packet[0x68] = 0xff;
     if (e->op == 5) {
         memcpy(packet + 2, &e->record, 8); memcpy(packet + 0xa, &e->x, 2); memcpy(packet + 0xc, &e->z, 2); packet[0xe] = e->layer;
+        /* wall items: hanging items placed from pockets came as layer 2 with options 00 00 01 (back wall) and layer 3
+           with 01 00 01 (side wall); options all 0 put them on the floor */
+        if (e->layer >= 2) { packet[0xf] = (uint8_t)(e->layer - 2); packet[0x11] = 1; }
+        if (opts && opts[0]) memcpy(packet + 0xf, opts + 1, 5);
     } else {
         memcpy(packet + 2, &e->x, 2); memcpy(packet + 4, &e->z, 2); packet[6] = e->layer;
     }
     applying = 1;
-    ((void (*)(void *, void *))(uintptr_t)(main + (e->op == 5 ? OP_REPLACE : OP_REMOVE)))(handler, job);
+    /* a wall item put by op 5 faced the room as on the back wall even with the options and record a placement from
+       pockets has (op 0 hangs it right), so wall items go through op 0 */
+    ((void (*)(void *, void *))(uintptr_t)(main + (wall ? OP_PLACE : e->op == 5 ? OP_REPLACE : OP_REMOVE)))(handler, job);
     applying = 0;
     fprintf(stderr, "[coop] room: applied %s (%d,%d) layer %u %016llx\n", e->op == 5 ? "put" : "clear", e->x, e->z, e->layer, (unsigned long long)e->record);
 }
@@ -241,10 +250,26 @@ static void room_tick(uint8_t *main, int self) {
         else if (coop_lan_send_edit(e, sizeof *e)) fprintf(stderr, "[coop] room: could not send an edit to the host\n");
     }
     nroom_out = 0;
-    RoomEdit in[64]; int from[64], n;
-    pthread_mutex_lock(&lock); n = nroom_in; memcpy(in, room_in, sizeof *in * (size_t)n); memcpy(from, room_in_node, sizeof *from * (size_t)n); nroom_in = 0; pthread_mutex_unlock(&lock);
+    RoomEdit in[64]; int from[64], n; uint8_t opts[64][6];
+    pthread_mutex_lock(&lock); n = nroom_in; memcpy(in, room_in, sizeof *in * (size_t)n); memcpy(from, room_in_node, sizeof *from * (size_t)n); memcpy(opts, room_in_opts, sizeof *opts * (size_t)n); nroom_in = 0; pthread_mutex_unlock(&lock);
     for (int i = 0; i < n; i++) {
-        if (self == 0) coop_lan_broadcast_edit(&in[i], sizeof in[i], from[i]);   /* the host passes a visitor's edit on */
-        room_apply(main, &in[i]);
+        if (self == 0 && from[i] >= 0) coop_lan_broadcast_edit(&in[i], sizeof in[i], from[i]);   /* the host passes a visitor's edit on */
+        room_apply(main, &in[i], opts[i]);
     }
+}
+
+/* "coop room <op> <layer> <x> <z> <hex record> [<hex options @0xf..0x13>]" (input.c, diagnostics): run furniture op
+   1 or 5 on this copy as a received edit would, in the current map, e.g. to try the options of a wall item */
+void coop_room_debug(const char *args) {
+    unsigned op, layer; int x, z; unsigned long long record = 0, o = 0; char ob[16] = "";
+    int n = sscanf(args, "%u %u %d %d %llx %15s", &op, &layer, &x, &z, &record, ob);
+    if (n < 4 || (op != 1 && op != 5)) { fprintf(stderr, "[coop] room: coop room <1|5> <layer> <x> <z> <record> [<options>]\n"); return; }
+    RoomEdit e = {.kind = EDIT_ROOM, .op = (uint8_t)op, .layer = (uint8_t)layer, .slot = 0, .map = 0xffffffffu, .x = (int16_t)x, .z = (int16_t)z, .record = record};
+    pthread_mutex_lock(&lock);
+    if (nroom_in < 64) {
+        room_in[nroom_in] = e; room_in_node[nroom_in] = -2; room_in_opts[nroom_in][0] = n == 6;
+        if (n == 6) { o = strtoull(ob, NULL, 16); for (int i = 0; i < 5; i++) room_in_opts[nroom_in][1 + i] = (uint8_t)(o >> (8 * (4 - i))); }
+        nroom_in++;
+    }
+    pthread_mutex_unlock(&lock);
 }

@@ -865,5 +865,11 @@ screen, and appears where it is put down.
     in the same map (map id as main+0x21d0acc finds it).
   - The ops' own layer writes do not pass the editor, so nothing is sent back.
   - Two more stubs log the place ops' packets (op 0, op 5) for diagnosis: `[coop] room: furniture op …`.
+- **Wall items** (tested by the user: back and side walls hang right on the other screen). They are on layers 2 and
+  up; placed from pockets they came with options 00 00 01 (layer 2, back wall) and 01 00 01 (layer 3, side wall), and
+  with options 0 op 5 put them on the floor. With those options op 5 still turned side-wall items toward the room,
+  while op 0 (main+0x21da650, placing from pockets, same packet without the clear) hangs them right, so a wall put
+  goes through op 0 with the options set from the layer. `coop room <op> <layer> <x> <z> <record> [<options>]` runs
+  an op on one copy for such tests.
 - **Not done.** A player outside the room gets nothing (the edits are dropped, and the host's copy saves the room);
   the decorating cursor is missing on this port in single player too, which is not a co-op problem.

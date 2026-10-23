@@ -247,6 +247,8 @@ static void *input_file(void *arg) {
         } else if (!strncmp(line, "coop actor ", 11)) {   /* "coop actor <hex actor handle> <player index>" (diagnostics) */
             extern void coop_flow_actor(uint32_t actor, int player); char *end; uint32_t a = (uint32_t)strtoul(line + 11, &end, 16);
             coop_flow_actor(a, (int)strtol(end, NULL, 10));
+        } else if (!strncmp(line, "coop room ", 10)) {   /* "coop room <op> <layer> <x> <z> <record> [<options>]" (coop_edit.c, diagnostics) */
+            extern void coop_room_debug(const char *args); coop_room_debug(line + 10);
         } else if (!strncmp(line, "coop flow ", 10)) {   /* "coop flow <flowchart>:<entry>" (diagnostics) */
             extern void coop_flow_test(const char *flow_entry); line[strcspn(line, "\r\n")] = 0; coop_flow_test(line + 10);
         } else if (!strcmp(line, "coop visit\n") || !strcmp(line, "coop host\n") || !strcmp(line, "coop test\n") || !strcmp(line, "coop leave\n") || !strcmp(line, "coop stop\n")) {   /* Local play without the airport (coop_flow.c) */
