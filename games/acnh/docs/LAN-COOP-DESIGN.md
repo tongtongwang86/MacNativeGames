@@ -771,3 +771,17 @@ do her d-pad room options (light, storage, decorating mode). The outdoor patches
 - **Next.** Trap main+0x2df6328 on the visitor's copy to log the action id (x1) and which check returns, for each d-pad
   press and furniture attempt. Then do the same for the indoor furniture job start (main+0x21cd2c0 and its placement
   check main+0x1375040 → main+0x1412c8c), comparing host and visitor.
+- **Update, same day: group `house` (patches found by two read-only agents).**
+  - **The house test.** main+0x2813cd8 is "is this the player's own house": the stage is a house interior and the
+    room's house index equals the player's. The two rules patched for outdoors (8.15) ask it right after
+    IsInMyVillage. Patches:
+    - main+0x141317c: placement rule, `tbz` → `nop`
+    - main+0x140f050: pick-up rule, `tbnz` → `b`
+  - **Placing from pockets.** main+0x32f82c0 is "this house belongs to someone else". Patch: main+0x33543f8, pocket
+    placement, `tbz` → `b`.
+  - **The d-pad.** The d-pad selector main+0x22676e4 drops decorating mode (action 0xef) and probably storage (0xf0)
+    unless this copy is the session's host. Patches: main+0x2267d28 and main+0x2267da8 → `nop`; main+0x2df5a1c → `b`.
+    The company codes 4 and 0x87 stay.
+  - **Tested:** inside the host's house the visitor now pushes, pulls and turns furniture, and it slides on both
+    screens. Still failing: Y pick-up indoors (no response), and placing from pockets ("You can't use this item right
+    now."). The host's decorating mode with company is still refused, as intended.

@@ -355,6 +355,20 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
        the push-anim stub (pusher filled in) the item then slides on every copy (LAN-COOP-DESIGN.md 8.16). */
     {0x13ab684, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ab724 (skip setting the flag) -> b 0x13ab71c (set it) */
     {0x13aba04, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
+    /* Houses (group "house"; LAN-COOP-DESIGN.md 8.17). Found by two read-only agents from the decompiled code.
+       main+0x2813cd8 is "is this the player's own house" (house interior stage, room's house index == the player's); the
+       two rules already patched for outdoors ask it right after IsInMyVillage, and main+0x32f82c0 "this house belongs to
+       someone else" stops placing from pockets. Each is true / false as needed on the owner's copy, so only a visitor
+       changes. The d-pad selector main+0x22676e4 drops decorating mode (action 0xef) and, probably, storage (0xf0) unless
+       this copy is the session's host (station +0x473 == host station +0x472); main+0x2df5480 has another such test.
+       The company refusals in main+0x2df6328 stay (codes 4 and 0x87): lifting them let the host decorate with a visitor
+       present and left her stuck. */
+    {0x141317c, 0x36001ce0, 0xd503201f, "house"},   /* placement rule: tbz (not my house: fail) -> nop */
+    {0x140f050, 0x37000480, 0x14000024, "house"},   /* pick-up rule: tbnz (my house: go on) -> b */
+    {0x33543f8, 0x36000060, 0x14000003, "house"},   /* pocket placement: tbz (someone else's house: code 0x11) -> b */
+    {0x2267da8, 0x54000a21, 0xd503201f, "house"},   /* d-pad 0xf0: b.ne (not the host: drop) -> nop */
+    {0x2267d28, 0x54000e21, 0xd503201f, "house"},   /* d-pad 0xef decorating: b.ne (not the host: drop) -> nop */
+    {0x2df5a1c, 0x54000100, 0x14000008, "house"},   /* main+0x2df5480: b.eq (the host: go on) -> b */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
