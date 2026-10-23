@@ -369,6 +369,9 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
     {0x2267da8, 0x54000a21, 0xd503201f, "house"},   /* d-pad 0xf0: b.ne (not the host: drop) -> nop */
     {0x2267d28, 0x54000e21, 0xd503201f, "house"},   /* d-pad 0xef decorating: b.ne (not the host: drop) -> nop */
     {0x2df5a1c, 0x54000100, 0x14000008, "house"},   /* main+0x2df5480: b.eq (the host: go on) -> b */
+    /* Y indoors: the Y decision main+0x232583c gives up when main+0x23f3d30(player) is false, which in a room is
+       main+0x15e638c = house interior and "own house" (main+0x2813cd8). */
+    {0x23f3f40, 0x360001e0, 0xd503201f, "house"},   /* tbz w0, #0, 0x23f3f7c (not own house: no) -> nop (then b: yes) */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */

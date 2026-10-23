@@ -785,3 +785,19 @@ do her d-pad room options (light, storage, decorating mode). The outdoor patches
   - **Tested:** inside the host's house the visitor now pushes, pulls and turns furniture, and it slides on both
     screens. Still failing: Y pick-up indoors (no response), and placing from pockets ("You can't use this item right
     now."). The host's decorating mode with company is still refused, as intended.
+- **Update: Y pick-up indoors works.**
+  - The fix: main+0x23f3f40 `tbz` → `nop`. The Y decision main+0x232583c gives up when main+0x23f3d30(player) is
+    false; in a room that is main+0x15e638c, "house interior and own house".
+  - **Still failing: placing from pockets indoors.** The message is `SYS_Telepathy:404` "You can't use this item
+    right now.", refusal code 0x28 (the table at main+0x49ccfe0 maps codes to labels).
+    - It is shown by main+0x2cb24fc, from code word +0x26e0 of a per-player menu object (caller main+0x2b0cb08).
+    - Writers of +0x26e0: main+0x2cb2048 (`str w8, [x9, #0x26e0]`, from a callback's result) and resets at
+      main+0x2cb01b4 and main+0x2cb25c4.
+    - Next: find what main+0x2cb2048's callback asks (probably an ownership test).
+  - **Still failing: the d-pad room options.**
+    - The visitor's room bits are set like anyone's (the mapper main+0x2462d20 has no ownership test).
+    - In the selector main+0x22676e4, the room path is main+0x2267ac0..main+0x2267b10. It requires the current stage
+      to have the room bit in the stage table, and the byte the selector reads through x21 (player+0x17ac) to be 0.
+    - A counter at main+0x2267b10 stayed at 0 during her presses, so one of those two fails for her, or the selector
+      is not reached.
+    - Next: trap main+0x22676e4 on the visitor and read those two values.
