@@ -221,3 +221,23 @@ player count. The findings behind each entry are in LAN-COOP-DESIGN.md 8.5–8.1
 - **Where the live outdoor item and rotation state lives.** The host-authoritative relay needs it
   (LAN-COOP-DESIGN.md 8.10).
 - **Two players at one fish shadow.** Who gets the fish, and whether the shadow disappears on both screens (5.5).
+
+## 10. Particle effects (Vfx2) on the Mac port (2026-10-23)
+
+- **Library.** NintendoWare Vfx2 (main+0x4722f37). Effects come from `Effect/Park_Static.Nin_NX_NVN.szs` (a VFXB ptcl)
+  through ELink2 (`ELink2/ELink2DB.szs`); e.g. the decorating cursor is the ELink user `FtrEditCursor` with emitter
+  sets `Ftr_CursorWait` / `Select` / `Drag` / `Rotate`.
+- **Draw path.** VfxMgr::calc main+0x3a075b0; DrawSortBuffer main+0x23e460 → per emitter main+0x222208 → main+0x21f9b0
+  → main+0x247e0c, a wrapper of nvnCommandBufferDrawArraysInstanced (4-vertex strip per particle, per-particle data in
+  vertex streams with divisor 1, stride 16). Emitter sets are created at main+0x23cdd0. The Vfx2 warning printf
+  main+0x22c410 is stubbed to `ret`.
+- **Why no effect showed (fixed).** The draws all reached the renderer and landed in the right place, but each particle
+  was discarded in its fragment shader: the vertex shaders write only .xyz of a colour varying and the fragment
+  multiplies the texture alpha by its .w. The Maxwell GPU starts every generic vertex output at (0, 0, 0, 1); Metal's
+  zeroed output gave w = 0. The Metal renderer now starts each float4 vertex output with w = 1
+  (`vs_default_outputs` in `games/totk/third_party/d2r_gfx/gfx/nvn/nvn_mtl.m`). Tested by the user: dust, footprints,
+  watering-can water and the decorating cursor show.
+- **How it was found.** Site probes on the draw path (the game draws ~350 particles a second); `passdump` (its draw
+  lines now print the instance count and base instance) to find the particle shaders; `DM_NVN_HILITE` on their fragment
+  keys (geometry shows); edits to the translated `.metal` in `build/shader-cache/rt-*` to print intermediate values as
+  colour.

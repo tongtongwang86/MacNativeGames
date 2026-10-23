@@ -4758,8 +4758,27 @@ static MTLCompileOptions *totk_precise_opts(void) {
    memory pressure in the middle of a compile (iPad, 2026-10-18: "Compilation failed due to an interrupted connection:
    XPC_ERROR_CONNECTION_INTERRUPTED" while the shader warm-up was running); it restarts on the next request, so such a
    failure is retried instead of being taken as a broken shader. */
-static id<MTLLibrary> totk_msl_library(NSString *src, NSError **err) {
+/* Vertex outputs a translated shader leaves unwritten (2026-10-23, ACNH particles): the Maxwell GPU starts every generic
+   output attribute at (0, 0, 0, 1), so a vertex shader that writes only .xyz of a varying hands the fragment w = 1, while
+   Metal's zeroed main0_out gave 0. ACNH's Vfx2 particle shaders write a colour varying's xyz only and multiply the
+   texture alpha by its w, so every particle (dust, footprints, water, the decorating cursor) was discarded. Each float4
+   user(locn) output now starts with w = 1; components the shader writes are unchanged. */
+static NSString *vs_default_outputs(NSString *src) {
+    NSString *init = @"main0_out out = {};";
+    if (![src containsString:@"vertex main0_out main0("] || ![src containsString:init]) return src;
+    NSRange st = [src rangeOfString:@"struct main0_out\n{"]; if (st.location == NSNotFound) return src;
+    NSRange end = [src rangeOfString:@"};" options:0 range:NSMakeRange(st.location, src.length - st.location)]; if (end.location == NSNotFound) return src;
+    NSString *body = [src substringWithRange:NSMakeRange(st.location, end.location - st.location)];
+    static NSRegularExpression *field; static dispatch_once_t once;
+    dispatch_once(&once, ^{ field = [NSRegularExpression regularExpressionWithPattern:@"float4\\s+(\\w+)\\s*\\[\\[user\\(locn\\d+\\)\\]\\]" options:0 error:nil]; });
+    NSMutableString *set = [NSMutableString string];
+    for (NSTextCheckingResult *m in [field matchesInString:body options:0 range:NSMakeRange(0, body.length)])
+        [set appendFormat:@" out.%@.w = 1.0;", [body substringWithRange:[m rangeAtIndex:1]]];
+    return set.length ? [src stringByReplacingOccurrencesOfString:init withString:[init stringByAppendingString:set]] : src;
+}
+static id<MTLLibrary> totk_msl_library(NSString *source, NSError **err) {
     NSError *e = nil;
+    NSString *src = vs_default_outputs(source);
     for (int attempt = 1;; attempt++) {
         id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:totk_precise_opts() error:&e];
         BOOL interrupted = !lib && [e.localizedDescription containsString:@"XPC_ERROR_CONNECTION_INTERRUPTED"];
@@ -9930,8 +9949,8 @@ frz_plain:;
     if (anom_on() && g_anom_rec) anom_note(pr, dw, di);   // TOTK_ANOMALY
     if (passdump()) {   // 通道首次绘制的特征（判读入是否可省：全屏、无混合、写满通道、不依赖深度）；DM_NVN_PASSDUMP_ALL 时每次绘制都记 | Characteristics of a render pass's first draw (to judge whether the load can be omitted: full screen, no blending, writes all channels, does not depend on depth); with DM_NVN_PASSDUMP_ALL every draw is recorded
         static uint64_t last_pass = ~0ull; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL || getenv("TOTK_INPUT_FILE") != NULL;
-        if (all) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x front=%d dr=%g,%g clamp=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : 0, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
-                    dw ? dw->count : di->count, dw ? 1 : di->instances, S.color.blend_en, (unsigned long long)*(uint64_t *)&S.blend[0], (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.df, (int)S.poly.cull,
+        if (all) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x front=%d dr=%g,%g clamp=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : dw->base_instance, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
+                    dw ? dw->count : di->count, dw ? dw->instances : di->instances, S.color.blend_en, (unsigned long long)*(uint64_t *)&S.blend[0], (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.df, (int)S.poly.cull,
                     (int)S.ds.st, (int)S.ds.sf_f, (int)S.ds.sf_b, (int)S.ds.fail_f, (int)S.ds.zfail_f, (int)S.ds.zpass_f,
                     (int)S.ds.fail_b, (int)S.ds.zfail_b, (int)S.ds.zpass_b, S.st_vmask[0], S.st_vmask[1], S.st_wmask[0], S.st_wmask[1], S.st_ref[0], S.st_ref[1],
                     di ? (unsigned long long)di->ibuf : 0ull, di ? di->itype : 0, S.chmask.mask, (int)S.poly.front, S.dr[0], S.dr[1], (int)S.depth_clamp);
