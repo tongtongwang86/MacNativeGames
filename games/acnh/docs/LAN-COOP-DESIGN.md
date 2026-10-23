@@ -716,3 +716,37 @@ group `visitor-turn`.
     evidently places the item at the end instead of sliding it.
   - Next: compare what the owner's delegate and the non-owner path do for group 0x12 push vs turn (the turn animates
     on both copies).
+
+### 8.16 Pushed and pulled furniture slides on every copy (2026-10-22): works
+
+Enabled with `ACNH_MP_EDIT` group `push-anim`. Tested with two copies: pushing and pulling, by host and visitor, both
+slide smoothly on the other player's screen too.
+
+- **How a push moves the item.** Turning and pick-up animate on every copy; push and pull did not.
+  - The furniture job's handler (group 0x12, main+0x21cfab0) runs on the copy that started the push. On the other
+    copies, the network message reaches main+0x21d97d8. Both end in main+0x21d63b0, which calls the item's move
+    setter:
+    - main+0x13773a4 (push)
+    - main+0x1377a28 (pull)
+  - The setter stores the target (item+0x8c0 / +0x8c8), the pushing player (item+0x848) and the cells, then puts the
+    item actor in state 5 (push, run main+0x13ab740) or 6 (pull, run main+0x13ac0d0).
+  - Each frame the item **follows the pushing player**. main+0x244c554(player) answers "in a pull / push / turn state
+    (0x4c / 0x50 / 0x54)", and main+0x241b698(player) gives that player's movement this frame from the per-player
+    network data (`*(main+0x53f4718)`, 0xd0 bytes per player, movement at +0x54 of the current half). Every copy has
+    that data.
+- **Why it jumped.** It took two fixes; each user test showed the next step.
+  1. **No pusher on the other copies.** The pushing player comes from byte +0x68 of the action data. Only the copy that
+     started the push fills it, so elsewhere it is 0xff, the item has no one to follow, and it snapped at the end.
+     **Fix:** a stub on both setters' first instruction calls `coop_fill_pusher` (runtime/coop_edit.c), which fills a
+     missing player with the one now pushing, pulling or turning (asked through main+0x244c554).
+  2. **The pusher's push starts later on the other copies.** The replayed player enters the push state about 0.25 s
+     after the item's move starts.
+     - If the pusher is not pushing yet, the item waits only when flag item+0xab0 is set, and gives up after 8 frames.
+       The flag was set only for an unknown or non-resident pusher; otherwise the move ended at once. With the pusher
+       filled in, the jump moved from the end to the start.
+     - **Fix:** always set the flag (main+0x13ab684, and main+0x13ac014 for pull), and wait up to 60 frames
+       (main+0x13aba04 and main+0x13ac394: `cmp w8, #8` → `#60`).
+- **Found by:** recording the item's transform on both copies during a push (smooth on the pusher's copy, one step
+  elsewhere), write watches on its push-only position copy (both copies set it through main+0x21d6d60 →
+  main+0x13773a4), a trap on main+0x13773a4 to get the item actor, its state table (item actor +0x70; 13 states), and
+  recordings of the per-player network data.

@@ -110,3 +110,17 @@ void coop_edit_tick(void) {
         else fprintf(stderr, "[coop] museum: sent donation %#llx to the host\n", (unsigned long long)e.item);
     }
 }
+
+/* Pushed furniture on the other copies (acnh_patches.c push-anim): main+0x13773a4 starts an item's move with the
+   pushing player taken from the action data, which only the copy that started the push fills; a missing one (> 7)
+   becomes the player now in a pull / push / turn state, as main+0x244c554 sees it, so the item follows that player's
+   movement as it does on the pusher's own copy. */
+#define PLAYER_PUSHING 0x244c554
+void coop_fill_pusher(uint8_t *player) {
+    if (*player < 8) return;
+    uint8_t *main = runtime_module_base("main");
+    for (unsigned i = 0; i < 8; i++) {
+        uint64_t p = i;
+        if (((uint32_t (*)(void *))(uintptr_t)(main + PLAYER_PUSHING))(&p) & 1) { *player = (uint8_t)i; return; }
+    }
+}

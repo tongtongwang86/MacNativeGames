@@ -75,6 +75,7 @@ int coop_lan_host_visitors(int ask_to_leave);           /* host: visitors in the
 void coop_edit_received(int node, const void *body, uint32_t n);   /* host, network thread: queue for the game thread */
 void coop_edit_tick(void);                                          /* game thread, once per controller read */
 void coop_edit_set_queue(volatile uint32_t *slots, volatile uint64_t *queue);   /* acnh_patches.c: museum stub's data */
+void coop_fill_pusher(uint8_t *player);   /* acnh_patches.c's push stub: a pushed item's missing player (game thread) */
 /* coop_flow.c: Local play from anywhere (1 visit, 2 host, 4 leave, 5 stop hosting); started at the next controller read on the game's thread */
 void coop_flow_request(int what);
 const char *coop_flow_result(void);

@@ -347,6 +347,17 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
        furniture-class item answers no. */
     {0x14130ec, 0x36002160, 0xd503201f, "visitor-turn"},   /* tbz w0, #0, 0x1413518 (not my village: fail) -> nop */
     {0x140efbc, 0x37000080, 0x14000004, "visitor-turn"},   /* tbnz w0, #0, 0x140efcc (my village: go on) -> b */
+    /* A pushed item's move state (item state 5: enter main+0x13ab3a0, run main+0x13ab740) follows the pushing player
+       while that player is in a pull / push / turn state. When the pusher is not (yet) in one: with item+0xab0 set it
+       waits, giving up after 8 frames of the item's state; with it clear it ends the move at once (the item jumps). The
+       flag was set only for a pusher that is unknown or not a resident. On the other copies the replayed pusher enters
+       the push state about 0.25 s after the move starts, so: always set the flag, and wait up to 60 frames (2 s). With
+       the push-anim stub (pusher filled in) the item then slides on every copy (LAN-COOP-DESIGN.md 8.16). */
+    {0x13ab684, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ab724 (skip setting the flag) -> b 0x13ab71c (set it) */
+    {0x13aba04, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
+    /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
+    {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
+    {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
 };
 static void mp_edit_apply(Module *m) {
     const char *e = getenv("ACNH_MP_EDIT"); if (!e || !*e || !strcmp(e, "0")) return;
@@ -406,6 +417,54 @@ static void museum_install(Module *m, uint64_t s, uint64_t data_off) {
     coop_edit_set_queue((volatile uint32_t *)(void *)(m->base + data_off + MUSEUM_CREDIT), (volatile uint64_t *)(void *)(m->base + data_off + MUSEUM_RING));
     fprintf(stderr, "[acnh] local play editing: visitor museum donations go to the host\n");
 }
+
+/* Pushed / pulled furniture slides on every copy (ACNH_MP_EDIT group "push-anim"; LAN-COOP-DESIGN.md 8.16). A push
+   gives the item a move (main+0x13773a4(item, cells, &player, data, 0): target at item+0x8c0, pushing player at
+   item+0x848, item state 5), and while it runs the item follows the pushing player's per-frame movement
+   (main+0x13ab740: main+0x244c554(player) "in pull / push / turn state", main+0x241b698 that player's movement, both
+   from the per-player network data, which every copy has). The player byte comes from the action data's +0x68, which
+   only the copy that started the push has; elsewhere it is 0xff, so the item does not follow and jumps at the end.
+   This stub on main+0x13773a4's first instruction calls coop_fill_pusher(&player) (coop_edit.c), which fills a missing
+   player with the one now pushing, pulling or turning. The pull's setter, main+0x1377a28 (item state 6), has the same
+   arguments and first instruction and gets the same stub.
+     stp x29, x30, [sp, #-0x40]!; stp x0, x1, [sp, #0x10]; stp x2, x3, [sp, #0x20]; str x4, [sp, #0x30]; mov x0, x2
+     adrp x16, <data>; ldr x16, [x16, #PUSH_HOOK]; blr x16; ldr x4, [sp, #0x30]; ldp x2, x3, [sp, #0x20]
+     ldp x0, x1, [sp, #0x10]; ldp x29, x30, [sp], #0x40; <the site's instruction>; b <site + 4> */
+static const uint64_t push_sites[] = {0x13773a4u, 0x1377a28u};   /* push setter, pull setter */
+#define PUSH_SITE_WORD 0xd10243ffu   /* sub sp, sp, #0x90 */
+#define PUSH_STUB (MUSEUM_STUB + 64)   /* 64 bytes per site */
+#define PUSH_HOOK 0x300
+static void push_install(Module *m, uint64_t s, uint64_t data_off) {
+    const char *e = getenv("ACNH_MP_EDIT");
+    if (!e || (strcmp(e, "full") && !strstr(e, "push-anim"))) return;
+    if (data_off + PUSH_HOOK + 8 > m->size) runtime_fail("ACNH_MP_EDIT push-anim: no data page after main");
+    *(uint64_t *)(void *)(m->base + data_off + PUSH_HOOK) = (uint64_t)(uintptr_t)coop_fill_pusher;
+    for (size_t k = 0; k < sizeof push_sites / sizeof *push_sites; k++, s += 64) {
+    uint64_t site = push_sites[k];
+    uint32_t w; memcpy(&w, m->base + site, 4);
+    if (w != PUSH_SITE_WORD) runtime_fail("ACNH_MP_EDIT push-anim: the item move function differs (another game version?)");
+    if (s + 64 > m->ro_off) runtime_fail("ACNH_MP_EDIT push-anim: no room in main's text padding");
+    for (unsigned b = 0; b < 64; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT push-anim: text padding in use");
+    uint32_t stub[14] = {
+        0xa9bc7bfdu,                                                   /* stp x29, x30, [sp, #-0x40]! */
+        0xa90107e0u,                                                   /* stp x0, x1, [sp, #0x10] */
+        0xa9020fe2u,                                                   /* stp x2, x3, [sp, #0x20] */
+        0xf9001be4u,                                                   /* str x4, [sp, #0x30] */
+        0xaa0203e0u,                                                   /* mov x0, x2 */
+        (adrp_x10(s + 20, data_off) & ~31u) | 16,                      /* adrp x16, <data> */
+        0xf9400000u | (PUSH_HOOK / 8) << 10 | 16 << 5 | 16,            /* ldr x16, [x16, #PUSH_HOOK] */
+        0xd63f0200u,                                                   /* blr x16 */
+        0xf9401be4u,                                                   /* ldr x4, [sp, #0x30] */
+        0xa9420fe2u,                                                   /* ldp x2, x3, [sp, #0x20] */
+        0xa94107e0u,                                                   /* ldp x0, x1, [sp, #0x10] */
+        0xa8c47bfdu,                                                   /* ldp x29, x30, [sp], #0x40 */
+        PUSH_SITE_WORD,
+        aspect_branch(s + 52, site + 4)};
+    memcpy(m->base + s, stub, sizeof stub);
+    uint32_t b = aspect_branch(site, s); memcpy(m->base + site, &b, 4);
+    }
+    fprintf(stderr, "[acnh] local play editing: pushed furniture slides on every copy\n");
+}
 #endif
 
 void runtime_game_patches(Module *m) {
@@ -424,6 +483,7 @@ void runtime_game_patches(Module *m) {
     output_install(m, ASPECT_STUBS_END(m) + 32, (m->file_size + 0x3fff) & ~0x3fffULL);
     site_probe(m, ASPECT_STUBS_END(m) + SIZE_STUBS, (m->file_size + 0x3fff) & ~0x3fffULL);
     museum_install(m, ASPECT_STUBS_END(m) + MUSEUM_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
+    push_install(m, ASPECT_STUBS_END(m) + PUSH_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
 #endif
 }
 
