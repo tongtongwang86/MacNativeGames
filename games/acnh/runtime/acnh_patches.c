@@ -361,14 +361,18 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
        someone else" stops placing from pockets. Each is true / false as needed on the owner's copy, so only a visitor
        changes. The d-pad selector main+0x22676e4 drops decorating mode (action 0xef) and, probably, storage (0xf0) unless
        this copy is the session's host (station +0x473 == host station +0x472); main+0x2df5480 has another such test.
-       The company refusals in main+0x2df6328 stay (codes 4 and 0x87): lifting them let the host decorate with a visitor
-       present and left her stuck. */
+       The company refusals in main+0x2df6328 (codes 4 and 0x87) are lifted below, together with the fix for the freeze
+       they used to cause. */
     {0x141317c, 0x36001ce0, 0xd503201f, "house"},   /* placement rule: tbz (not my house: fail) -> nop */
     {0x140f050, 0x37000480, 0x14000024, "house"},   /* pick-up rule: tbnz (my house: go on) -> b */
     {0x33543f8, 0x36000060, 0x14000003, "house"},   /* pocket placement: tbz (someone else's house: code 0x11) -> b */
     {0x2267da8, 0x54000a21, 0xd503201f, "house"},   /* d-pad 0xf0: b.ne (not the host: drop) -> nop */
     {0x2267d28, 0x54000e21, 0xd503201f, "house"},   /* d-pad 0xef decorating: b.ne (not the host: drop) -> nop */
     {0x2df5a1c, 0x54000100, 0x14000008, "house"},   /* main+0x2df5480: b.eq (the host: go on) -> b */
+    /* The light (d-pad up, command 0x15, main+0x2df5480): a copy that is not the session's host branches at
+       main+0x2df59d8 straight to IsInMyHouse and main+0x256b250 == 1, and stops at either. */
+    {0x2df5a28, 0x36000f60, 0xd503201f, "house"},   /* tbz (not own house: stop) -> nop */
+    {0x2df5a38, 0x54000ee0, 0xd503201f, "house"},   /* b.eq (main+0x256b250 == 1: stop) -> nop */
     /* Y indoors: the Y decision main+0x232583c gives up when main+0x23f3d30(player) is false, which in a room is
        main+0x15e638c = house interior and "own house" (main+0x2813cd8). */
     {0x23f3f40, 0x360001e0, 0xd503201f, "house"},   /* tbz w0, #0, 0x23f3f7c (not own house: no) -> nop (then b: yes) */
@@ -379,10 +383,16 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
     /* The main island's house d-pad goes through the selector's generic part (main+0x2267eec on; the room branch
        main+0x2267b10 is the Slumber Island house only), as actions 0x45 / 0x3d / 0x3c / 4 of main+0x2df6328. Action 0x3d
        (storage) asks IsInMyHouse then main+0x256b250 >= 2. Action 0x45 (decorating mode: main+0x2dfb4f8, own house on own
-       island) stays closed: a visitor entering decorating mode hid the host and froze him, as the host's own decorating
-       mode did to the visitor (main+0x2df6d60 tbnz -> b opened it). */
+       island) and the company refusals are opened. Entering decorating mode used to freeze the other player: the enter
+       function of cInteriorMode's VisibleOff state (main+0x23081f0) hides every other player (model+0x5f02 = 1, then
+       vtable+0x4e8(model, 0)), and it runs on the other copy too, for the replayed player, so that copy hid and froze
+       its own player. Skipping the loop keeps everyone visible and moving. */
     {0x2df6d28, 0x3607d000, 0xd503201f, "house"},   /* 0x3d: tbz (not own house: stop) -> nop */
     {0x2df6d38, 0x54ffcf83, 0xd503201f, "house"},   /* 0x3d: b.lo (main+0x256b250 < 2: stop) -> nop */
+    {0x2df6b48, 0x540003e3, 0x1400001f, "house"},   /* company refusal (code 4): b.lo -> b 0x2df6bc4 */
+    {0x2df6bb8, 0x54000063, 0x14000003, "house"},   /* company refusal (code 0x87, rude to redecorate): b.lo -> b */
+    {0x2df6d60, 0x3707ea00, 0x17ffff50, "house"},   /* 0x45: tbnz (own house on own island: go on) -> b */
+    {0x2308480, 0x540005a0, 0x1400002d, "house"},   /* VisibleOff enter: b.eq (loop over other players) -> b past it */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */

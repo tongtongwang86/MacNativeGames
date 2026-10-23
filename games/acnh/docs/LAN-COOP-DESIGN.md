@@ -751,7 +751,7 @@ slide smoothly on the other player's screen too.
   main+0x13773a4), a trap on main+0x13773a4 to get the item actor, its state table (item actor +0x70; 13 states), and
   recordings of the per-player network data.
 
-### 8.17 Houses: what is known (2026-10-22), not working yet
+### 8.17 Houses (2026-10-22): push, pull, turn, Y, placing, the d-pad and decorating work; decorating changes do not sync yet
 
 Inside the host's house, the visitor's push, pull, turn, Y pick-up and placing from pockets all fail silently, and so
 do her d-pad room options (light, storage, decorating mode). The outdoor patches (8.15, 8.16) do not cover them.
@@ -823,3 +823,18 @@ do her d-pad room options (light, storage, decorating mode). The outdoor patches
     decorating mode gave her. So it stays closed both ways for now.
   - **Still to do:** the light (d-pad up) does nothing for the visitor. The user wants decorating mode with company,
     so the freeze has to be understood and fixed.
+- **Update: the light, and decorating mode with company** (tested by the user: both work, nobody disappears or freezes).
+  - **The light** (d-pad up, command 0x15, handler main+0x2df5480). On a copy that is not the session's host the
+    handler branches at main+0x2df59d8 straight to IsInMyHouse (main+0x2813cd8) and main+0x256b250 == 1, and stops
+    at either. The earlier patch at main+0x2df5a1c covered only the host's own path. Patches: main+0x2df5a28 `tbz`
+    and main+0x2df5a38 `b.eq` → `nop`.
+  - **Why decorating mode froze the other player.** Entering cInteriorMode's VisibleOff state (enter
+    main+0x23081f0) loops over the other players and hides each one (model+0x5f02 = 1 at main+0x2308520, then
+    vtable+0x4e8(model, 0)). The state is replayed on the other copy too, for the replayed player, so that copy hid
+    and froze its own player, who stayed stuck after the mode ended.
+  - **Patches.** main+0x2308480 `b.eq` → `b` skips the loop body, so nobody is hidden. With that, the company refusals
+    are lifted (main+0x2df6b48 and main+0x2df6bb8 `b.lo` → `b`, codes 4 and 0x87, "It's rude to redecorate when you
+    have company!") and the visitor's own-house test (main+0x2df6d60 `tbnz` → `b`).
+  - **Still wrong.** Furniture moved in decorating mode changes only on the copy that decorated; the other player
+    does not see it, not even after leaving and re-entering. The decorating cursor also does not show. Both are
+    being traced.
