@@ -694,3 +694,8 @@ group `visitor-turn`.
   - that the host's copy shows the change and keeps it after the host saves;
   - that the picked-up item stays in Panthea's pockets after she leaves;
   - how placed furniture is stored live (the third agent stopped before finishing).
+- **Confirmed by the user:** the visitor's turns and Y pick-ups show on the host's screen with their animation.
+  **Pushing or pulling (A)** moves the item on both copies, but on the other player's screen it jumps to its new place
+  while the player plays the push animation. This happens both ways, host and visitor, so the replay of push / pull
+  does not run the item's slide. Next to look at: the push and pull states (ids 0x49–0x50) and what their enter / run
+  do when the player is remote (+0x178 == 1), compared with the turn's.
