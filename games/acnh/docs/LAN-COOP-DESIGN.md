@@ -659,3 +659,38 @@ state (`ACNH_TRACE_SITE`). Corrections to 8.10 first.
     script name, or watch the job's state word (+0x2c of its 0x518-byte entry) to find what writes "failed".
 - **Seen by the user:** when the host moves furniture, the host's screen shows the smooth push, but on the visitor's
   screen the furniture jumps to its new place while the host's character plays the animation.
+
+### 8.15 Visitor turns and Y pick-ups of the owner's furniture: works (2026-10-22)
+
+Found by two read-only agents working from the decompiled code (notes kept outside the repo), then tested with two
+copies. **Panthea turned the host's train set and picked up a placed item with Y.** Enabled with `ACNH_MP_EDIT`
+group `visitor-turn`.
+
+- **The "lock" is the field-action job system.** It is a singleton at `*(main+0x50a8970)` (created by main+0x1290c84),
+  and is neither the script runner nor the AI. Every furniture action starts a job first:
+  - turn: main+0x21cd2c0 (`entry+0x658`, direction)
+  - push: main+0x21cb9e4
+  - pull: main+0x21cc798
+  - Y: main+0x21cdc60
+
+  On a visitor's copy the job asks the host (command 1). The host answers granted, or denied when the furniture is
+  already locked (main+0x1296670). The job state (+0x2c) reads 0 = no job, 1 = granted, 2 = denied, 3 = pending.
+- **Why a visitor got nothing: two IsInMyVillage tests stopped her copy before any job started**, so no request ever
+  reached the host:
+  - The placement check main+0x1412c8c (reached through main+0x1375040; used by turn, push and pull) requires
+    IsInMyVillage on maps with flag bit 3.
+    Patch: main+0x14130ec `tbz w0, #0` → `nop`.
+  - main+0x140ea70 (may this item be picked up; used by Y) answers no for "not my village and furniture-class".
+    Patch: main+0x140efbc `tbnz w0, #0` → `b`.
+
+  Both tests are always true on the island's own copy, so the host's behaviour does not change. IsInMyVillage itself
+  stays as it is: it has about 200 callers.
+- **Corrections to 8.14:**
+  - Player byte +0x191e is not furniture data. It is byte 0x3e of the action record, "the job was started", written
+    in hold-wait. Its 0 on the visitor was the result of the failed start, so the patch at main+0x22e4dd8 was dropped.
+  - The state ids are 0-based, with the name table at main+0x4807320: cFtrRotateReady 0x51, cFtrRotateDisable
+    0x52, cFtrRotateReadyWait 0x53, cFtrRotate 0x54, cPickupWait 0x22, cFtrPickup 0x25.
+- **Still to check:**
+  - that the host's copy shows the change and keeps it after the host saves;
+  - that the picked-up item stays in Panthea's pockets after she leaves;
+  - how placed furniture is stored live (the third agent stopped before finishing).

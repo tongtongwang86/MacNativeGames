@@ -338,6 +338,15 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
     {0x307d9ec, 0x97d3a8d5, 0x52800020, "furniture"},   /* bl IsInMyVillage -> mov w0, #1 */
     {0x307e5a0, 0x97d3a5e8, 0x52800020, "furniture"},   /* bl IsInMyVillage -> mov w0, #1 */
     {0x307e918, 0x97d3a50a, 0x52800020, "furniture"},   /* bl IsInMyVillage -> mov w0, #1 */
+    /* Visitor turns, pushes, pulls and Y pick-ups of the owner's furniture (LAN-COOP-DESIGN.md 8.14, 8.15). Each
+       furniture action first starts a job of the field-action system (*(main+0x50a8970): a visitor's job asks the
+       host, which grants unless the furniture is locked). Two IsInMyVillage(player) tests stop a visitor's copy from
+       starting the job at all; both are true on the island's own copy, so these change nothing for the host.
+       main+0x1412c8c (placement check, via main+0x1375040; used by turn / push / pull): on a map with flag bit 3 it
+       requires IsInMyVillage. main+0x140ea70 (may this item be picked up; used by Y): not in my village and a
+       furniture-class item answers no. */
+    {0x14130ec, 0x36002160, 0xd503201f, "visitor-turn"},   /* tbz w0, #0, 0x1413518 (not my village: fail) -> nop */
+    {0x140efbc, 0x37000080, 0x14000004, "visitor-turn"},   /* tbnz w0, #0, 0x140efcc (my village: go on) -> b */
 };
 static void mp_edit_apply(Module *m) {
     const char *e = getenv("ACNH_MP_EDIT"); if (!e || !*e || !strcmp(e, "0")) return;
