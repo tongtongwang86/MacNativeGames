@@ -893,3 +893,21 @@ switch's case table in place), served only with the group (runtime/romfs.c).
   for a visitor ("You can't place orders while you're visiting another player's island", game code, not a script).
 - Anything a visitor changes on the island through these menus happens only on her copy; the host's copy saves the
   island.
+
+### 8.20 Nook Shopping orders with company, delivered to the host's mailbox (2026-10-23)
+
+Group `mail`. Tested by the user: both players order; the visitor's order is recorded in the host's copy.
+
+- **The refusal.** The order check main+0x2b75620 reads the session object `**(main+0x4ab1760)`: with +0x80 below 2
+  (no session) it runs the offline checks at main+0x2b75908; in a session every path refuses with DIALOG_Msg 1122
+  ("visiting another player's island", not the host), 1121 (company, the host with 2 or more players) or 1123 ("the
+  airport gate is open", the host alone). Patch: main+0x2b757b4 `b.lo` → `b` (the offline checks in a session too).
+  The dialog labels come from a table of 20 strings at main+0x555ee00 (index at catalog+0x1c66c).
+- **Placing an order** (main+0x2b7daa4, after dialog 1108): main+0x2579c50 charges the wallet, then
+  main+0x1a49ab0(&item, &date, &player) puts the order in one of 5 slots of that player's personal data
+  (base+0xa900 + i*0x2ec), which the daily delivery turns into a letter.
+- **The relay.** The stub on the record call main+0x2b7e064 goes to coop_order_record (coop_edit.c): outside a
+  session and on the host it records as before; on a visitor's copy (her wallet already charged) it sends the item to
+  the host (EDIT kind 3), whose copy records it for the host player with today's date (`**(main+0x4ab2278) + 0x4060`).
+  It arrives in the host's mailbox the next day. The host's 5 slots count both players' orders; when they are full the
+  order is lost (logged), her Bells still spent.

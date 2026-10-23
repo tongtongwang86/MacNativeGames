@@ -25,7 +25,7 @@
 #define MUSEUM_RECORD 0x26bdd90
 #define DONOR_SLOT 0x24819f0
 #define MUSEUM_SIZE 0x3404
-enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2 };
+enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2, EDIT_ORDER = 3 };
 typedef struct __attribute__((packed)) { uint8_t kind, pad[7]; uint64_t item; } EditBody;
 _Static_assert(sizeof(EditBody) == 16, "edit body");
 /* One decorating-mode change of a room tile: op 1 clears the tile, 5 puts the record there (the furniture ops' codes) */
@@ -87,21 +87,50 @@ static void host_donate(uint8_t *main, uint64_t item) {
     fprintf(stderr, "[coop] museum: recorded a visitor's donation, item %#llx, credited to resident slot %d\n", (unsigned long long)item, donor);
 }
 
+/* Nook Shopping orders (acnh_patches.c group "mail"; LAN-COOP-DESIGN.md 8.20). Placing an order charges the player's
+   wallet (main+0x2579c50), then main+0x1a49ab0(&item, &date, &player) puts it in one of 5 order slots of that player's
+   personal data (base+0xa900 + i*0x2ec), delivered as a letter the next day. A visitor has no mailbox on the island, so
+   her order is recorded by the host's copy as the host's own: it arrives in the host's mailbox. Her copy still charges
+   her wallet; the record call is replaced (coop_order_record) and sends the item (EDIT kind 3). The host records it with
+   today's date ({u16 year, u8 month, u8 day} at **(main+0x4ab2278) + 0x4060, as the order action reads it). */
+#define ORDER_RECORD 0x1a49ab0
+#define CLOCK_SLOT 0x4ab2278
+typedef int (*order_fn)(const void *, const void *, const void *);
+int coop_order_record(const uint64_t *item, const uint32_t *date, const uint8_t *player) {
+    uint8_t *main = runtime_module_base("main");
+    if (coop_lan_self_node() <= 0) return ((order_fn)(uintptr_t)(main + ORDER_RECORD))(item, date, player);
+    EditBody e = {.kind = EDIT_ORDER, .item = *item};
+    if (coop_lan_send_edit(&e, sizeof e)) { fprintf(stderr, "[coop] order: could not send %#llx to the host\n", (unsigned long long)*item); return 0; }
+    fprintf(stderr, "[coop] order: sent %#llx to the host's mailbox\n", (unsigned long long)*item);
+    return 1;
+}
+static void host_order(uint8_t *main, uint64_t item) {
+    uint8_t *clock = **(uint8_t ***)(void *)(main + CLOCK_SLOT);
+    uint32_t date = 0; if (clock) memcpy(&date, clock + 0x4060, 4);
+    uint8_t host = 0;
+    int ok = ((order_fn)(uintptr_t)(main + ORDER_RECORD))(&item, &date, &host);
+    fprintf(stderr, ok ? "[coop] order: a visitor's order %#llx is in the host's mail for tomorrow\n"
+                       : "[coop] order: the host's 5 order slots are full, a visitor's order %#llx is lost\n", (unsigned long long)item);
+}
+
 static void room_tick(uint8_t *main, int self);
 void coop_edit_tick(void) {
     uint8_t *main = runtime_module_base("main");
     int self = coop_lan_self_node();
     room_tick(main, self);
-    if (!slots) return;
     if (self <= 0) {
-        slots[0] = 0; ring_tail = slots[1];
+        if (slots) { slots[0] = 0; ring_tail = slots[1]; }
         if (self == 0) {
             EditBody e[32]; int n;
             pthread_mutex_lock(&lock); n = npending; memcpy(e, pending, sizeof(EditBody) * (size_t)n); npending = 0; pthread_mutex_unlock(&lock);
-            for (int i = 0; i < n; i++) if (e[i].kind == EDIT_MUSEUM) host_donate(main, e[i].item);
+            for (int i = 0; i < n; i++) {
+                if (e[i].kind == EDIT_MUSEUM) host_donate(main, e[i].item);
+                else if (e[i].kind == EDIT_ORDER) host_order(main, e[i].item);
+            }
         }
         return;
     }
+    if (!slots) return;   /* museum: the visitor's side below */
     static unsigned frames; static int last_credit = -2;
     if (frames++ % 30 == 0) {   /* the host's resident slot, as this copy's island data has it */
         int c = donor_slot(main, 0);

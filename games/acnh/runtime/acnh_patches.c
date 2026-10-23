@@ -393,6 +393,12 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
     {0x2df6bb8, 0x54000063, 0x14000003, "house"},   /* company refusal (code 0x87, rude to redecorate): b.lo -> b */
     {0x2df6d60, 0x3707ea00, 0x17ffff50, "house"},   /* 0x45: tbnz (own house on own island: go on) -> b */
     {0x2308480, 0x540005a0, 0x1400002d, "house"},   /* VisibleOff enter: b.eq (loop over other players) -> b past it */
+    /* Nook Shopping with company (group "mail"; LAN-COOP-DESIGN.md 8.20). The order check main+0x2b75620 reads the
+       session *(main+0x4ab1760) +0x80: below 2 (no session) it runs the offline checks at main+0x2b75908; in a session
+       every path refuses: DIALOG_Msg 1122 ("visiting another player's island") on a copy that is not the host, 1121
+       (company) on the host with 2 or more players, else 1123 ("the airport gate is open"). The offline checks now run
+       in a session too, and the visitor's order goes to the host's copy (order_install, coop_edit.c). */
+    {0x2b757b4, 0x54000aa3, 0x14000055, "mail"},   /* b.lo 0x2b75908 (no session: offline checks) -> b */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
@@ -557,6 +563,29 @@ static void decor_install(Module *m, uint64_t s, uint64_t data_off) {
     }
     fprintf(stderr, "[acnh] local play editing: decorating-mode changes go to the other copies\n");
 }
+
+/* Nook Shopping orders (group "mail"): the order's record call main+0x2b7e064 `bl main+0x1a49ab0(&item, &date, &player)`
+   (it puts the order in the ordering player's personal data, delivered as mail the next day) goes to coop_order_record
+   (coop_edit.c), which records it as before outside a session and on the host, and on a visitor's copy sends it to the
+   host instead. The stub: adrp x16, <data>; ldr x16, [x16, #ORDER_HOOK]; br x16 (the bl's return address stays). */
+#define ORDER_SITE 0x2b7e064u
+#define ORDER_RECORD 0x1a49ab0u
+#define ORDER_STUB (DECOR_STUB + 80 * 4)
+#define ORDER_HOOK 0x328
+static void order_install(Module *m, uint64_t s, uint64_t data_off) {
+    const char *e = getenv("ACNH_MP_EDIT");
+    if (!e || (strcmp(e, "full") && !strstr(e, "mail"))) return;
+    uint32_t w; memcpy(&w, m->base + ORDER_SITE, 4);
+    if (w != aspect_branch(ORDER_SITE, ORDER_RECORD) + 0x80000000u) runtime_fail("ACNH_MP_EDIT mail: the order's record call differs (another game version?)");
+    if (s + 16 > m->ro_off) runtime_fail("ACNH_MP_EDIT mail: no room in main's text padding");
+    for (unsigned b = 0; b < 16; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT mail: text padding in use");
+    if (data_off + ORDER_HOOK + 8 > m->size) runtime_fail("ACNH_MP_EDIT mail: no data page after main");
+    *(uint64_t *)(void *)(m->base + data_off + ORDER_HOOK) = (uint64_t)(uintptr_t)coop_order_record;
+    uint32_t stub[3] = {(adrp_x10(s, data_off) & ~31u) | 16, 0xf9400000u | (ORDER_HOOK / 8) << 10 | 16 << 5 | 16, 0xd61f0200u};
+    memcpy(m->base + s, stub, sizeof stub);
+    uint32_t bl = aspect_branch(ORDER_SITE, s) + 0x80000000u; memcpy(m->base + ORDER_SITE, &bl, 4);
+    fprintf(stderr, "[acnh] local play editing: a visitor's Nook Shopping orders go to the host's mailbox\n");
+}
 #endif
 
 void runtime_game_patches(Module *m) {
@@ -577,6 +606,7 @@ void runtime_game_patches(Module *m) {
     museum_install(m, ASPECT_STUBS_END(m) + MUSEUM_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
     push_install(m, ASPECT_STUBS_END(m) + PUSH_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
     decor_install(m, ASPECT_STUBS_END(m) + DECOR_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
+    order_install(m, ASPECT_STUBS_END(m) + ORDER_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
 #endif
 }
 
