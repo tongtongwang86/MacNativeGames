@@ -192,6 +192,20 @@ A recorder logged both copies' datagrams every 0.5 s and screenshots of both win
   - +0x4: 0x400 dates, u32 = year | month << 16 | day << 24;
   - +0x1004: 0x400 items, in donation order, ending at the first 0xfffe;
   - +0x3004: 0x400 donor bytes, each the donor's resident slot.
+- **Player event flags** (`cPlayer:` flags) are in `personal.dat` from 0xC280, right after the player name: one u16 per
+  index, 0x800 entries. The index is the u16 at row +12 of `Bcsv/EventFlagsPlayerParam.bcsv` (rows of 212 bytes from
+  0x6c, name at +18), e.g. RcoGetTvForCongratsHouse 211, HasLookMyHouseExplain 585, SeqHotelIntroductionDone 1814,
+  HotelSpeakTokpm 1817. Code: action main+0xc163b0 / query main+0xc5a0a0 → main+0x264b380 / main+0x264a5f0, array at
+  `*(h+0x18308) + *(h+0x18300)` of the player's save object. EventFlagSystemBool answers 0 when a flag is set (as
+  NetHasVisitor and the other queries do), so a script's case 0 is the "yes" path.
+- **Murmur3 regions of `main.dat`**: 0x114 (0x1e339c bytes, hash at 0x110), 0x1e34b4 (0x3d089c, hash at 0x1e34b0), then
+  pairs of 0x37acc / 0x3ce5c (one per resident slot: the residents' copies of personal data), and 0x958f54 (0x57f3c).
+  `personal.dat`: 0x114 (0x37acc) and 0x37be4 (0x3ce5c).
+- **The island's item layer** in `main.dat` starts near 0x22f800, in the second region (section 7). Plants are field
+  items named in `Bcsv/FgMainParam.bcsv` (540 rows of 244 bytes from 0xe4: id at +32, label at +112): e.g. trees
+  0xea60 PltTreeOak3, 0xea69 PltTreeCedar3; flowers 0xeb8a / 0xeb8d / 0xeb90 PltFlwYuri2 White / Red / Yellow (bloomed
+  lilies); weeds 0xec7f..0xec85 PltWeedAut*. On the test island, replacing its 150 weeds with lilies (template record
+  8a eb 00 00 30 02 00 00, the island's own lilies) took Isabelle's evaluation from 2 to 3 stars.
 - **In memory** the game keeps several copies of each of these in save format:
   - museum: four on the host (two live, two refreshed when it saves) and two on a visitor;
   - pockets: two on the player's own copy.
