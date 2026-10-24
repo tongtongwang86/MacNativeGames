@@ -212,6 +212,12 @@ A recorder logged both copies' datagrams every 0.5 s and screenshots of both win
   - Live edits (`poke`) must change all of the live ones. That is how a bluegill and a salmon were put in Panthea's
     pockets for the donation test (LAN-COOP-DESIGN.md 8.12).
 
+- **Photos.** The phone camera saves through caps:su (SaveScreenShotEx*) and then opens caps:u; runtime/caps.m saves
+  each photo as a PNG in `<profile>/album/` and reports an empty album (before, the runtime stopped: service not
+  implemented).
+- **Testing on another day.** `TOTK_TIME_OFFSET=<seconds>` shifts the clock the game sees (runtime/time_host.c);
+  start both copies with the same offset. A day starts at 5 AM.
+
 ## 7. The island's item layer
 
 - Each cell is 8 bytes: u16 item, u8, u8, u32. 0xfffe is empty; 0xfffd is an extension cell that holds its column / row

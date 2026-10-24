@@ -955,5 +955,11 @@ IsMyVillage 1 (a visitor) goes the resident's way.
   Obj_HotelAmiiboDevice (Event52 IsMyVillage, Event53 IsSharePlay, Event57 NetHasVisitor).
 - **Guests:** NNPC_HotelGuest Event1; NNPC_HotelGuest_NoRoom Event14 / 45 IsMyVillage, Event18 / 46 NetHasVisitor,
   Event19 / 47 IsSharePlay.
+- **The decorating job** (Leilani's room editing) works for the host with a visitor on the island: the guest room is a
+  map of its own inside the session (map id 0xf1a102a6 on the test island), so the session stays up and the visitor's
+  copy even receives the host's room edits (not applied: she is in another map). Leilani's AI (AI_NPC_Kpm Event6
+  NetIsConnected) skipped her reserved scenes while connected, so she never walked into the room and the job could
+  not end ("Leilani disappeared and I can't leave"); its case 0 now goes the offline way. The hotel story is per
+  player: a visitor without its introduction gets Leilani's idle line, so she cannot start or join a job yet.
 - **Not done: the rooms.** Choosing a room in System_HotelRoomVisit ends the session (Event42
   NetEndSessionVillage) before the room scene loads; the corridor's ProhibitEnter messages are left as they are.

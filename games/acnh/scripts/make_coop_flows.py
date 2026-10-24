@@ -292,6 +292,7 @@ def main():
             ('SNPC_kpm', 'Event538', 'EventFlowQueryIsVillageGateOpened', 0, 1),  # after the greeting: "company droppin' by?" -> her talk
             ('SNPC_kpm', 'Event873', 'EventFlowQueryNetHasVisitor', 0, 1),
             ('SNPC_kpm', 'Event323', 'EventFlowQueryIsSharePlay', 0, 1),         # "hangin' out with yer friend" -> her menu
+            ('AI_NPC_Kpm', 'Event6', 'EventFlowQueryNetIsConnected', 0, 1),      # online she skips her reserved scenes (walking into the room for the decorating job) -> as offline
             ('SNPC_kpm', 'Event614', 'EventFlowQueryIsSharePlay', 0, 1),         # "Looks like yer playin' together" -> her talk
             ('Obj_HotelTradeBox', 'Event3', 'EventFlowQueryIsMyVillage', 1, 0),  # a visitor: "can't use" -> the DIY trade
             ('Obj_HotelMannequin', 'Event3', 'EventFlowQueryIsMyVillage', 1, 0),  # a visitor: rental only -> the full menu
