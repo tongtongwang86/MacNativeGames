@@ -219,6 +219,7 @@ def visitor_refusal(data, patched=False):
 
 
 patched_nook = set()
+patched_hotel = set()
 
 
 def main():
@@ -280,6 +281,35 @@ def main():
         out.parent.mkdir(parents=True, exist_ok=True)
         raw = bytearray(out.read_bytes() if out.exists() and flow in patched_nook else (a.romfs / f'EventFlow/{flow}.bfevfl').read_bytes())
         patched_nook.add(flow)
+        redirect_case(raw, flow, event, query, case, to)
+        out.write_bytes(raw)
+    # The hotel lobby with company (hotel/, ACNH_MP_EDIT "hotel"; LAN-COOP-DESIGN.md 8.22). These queries answer 0 for
+    # "yes": NetHasVisitor 0 = someone visits, IsSharePlay 0 = playing together, IsVillageGateOpened 0 = open.
+    for flow, event, query, case, to in (
+            ('SNPC_kpm', 'Event211', 'EventFlowQueryNetHasVisitor', 0, 1),       # Leilani: "hangin' out with yer friend" / guest welcome -> her talk
+            ('SNPC_kpm', 'Event344', 'EventFlowQueryIsVillageGateOpened', 0, 1),  # "Don't ye have company to see to?" -> room editing
+            ('SNPC_kpm', 'Event611', 'EventFlowQueryNetHasVisitor', 0, 1),       # greeting with company -> the usual greeting
+            ('SNPC_kpm', 'Event538', 'EventFlowQueryIsVillageGateOpened', 0, 1),  # after the greeting: "company droppin' by?" -> her talk
+            ('SNPC_kpm', 'Event873', 'EventFlowQueryNetHasVisitor', 0, 1),
+            ('SNPC_kpm', 'Event323', 'EventFlowQueryIsSharePlay', 0, 1),         # "hangin' out with yer friend" -> her menu
+            ('SNPC_kpm', 'Event614', 'EventFlowQueryIsSharePlay', 0, 1),         # "Looks like yer playin' together" -> her talk
+            ('Obj_HotelTradeBox', 'Event3', 'EventFlowQueryIsMyVillage', 1, 0),  # a visitor: "can't use" -> the DIY trade
+            ('Obj_HotelMannequin', 'Event3', 'EventFlowQueryIsMyVillage', 1, 0),  # a visitor: rental only -> the full menu
+            ('Obj_HotelSignboard', 'Event3', 'EventFlowQueryIsMyVillage', 1, 0),
+            ('Obj_HotelAmiiboDevice', 'Event52', 'EventFlowQueryIsMyVillage', 1, 0),
+            ('Obj_HotelAmiiboDevice', 'Event53', 'EventFlowQueryIsSharePlay', 0, 1),
+            ('Obj_HotelAmiiboDevice', 'Event57', 'EventFlowQueryNetHasVisitor', 0, 1),
+            ('NNPC_HotelGuest', 'Event1', 'EventFlowQueryIsMyVillage', 1, 0),    # hotel guests talk to a visitor as to a resident
+            ('NNPC_HotelGuest_NoRoom', 'Event14', 'EventFlowQueryIsMyVillage', 1, 0),
+            ('NNPC_HotelGuest_NoRoom', 'Event18', 'EventFlowQueryNetHasVisitor', 0, 1),
+            ('NNPC_HotelGuest_NoRoom', 'Event19', 'EventFlowQueryIsSharePlay', 0, 1),
+            ('NNPC_HotelGuest_NoRoom', 'Event45', 'EventFlowQueryIsMyVillage', 1, 0),
+            ('NNPC_HotelGuest_NoRoom', 'Event46', 'EventFlowQueryNetHasVisitor', 0, 1),
+            ('NNPC_HotelGuest_NoRoom', 'Event47', 'EventFlowQueryIsSharePlay', 0, 1)):
+        out = a.out / f'hotel/EventFlow/{flow}.bfevfl'
+        out.parent.mkdir(parents=True, exist_ok=True)
+        raw = bytearray(out.read_bytes() if out.exists() and flow in patched_hotel else (a.romfs / f'EventFlow/{flow}.bfevfl').read_bytes())
+        patched_hotel.add(flow)
         redirect_case(raw, flow, event, query, case, to)
         out.write_bytes(raw)
     # The host's mailbox for a visitor (mail/, ACNH_MP_EDIT "mail"; LAN-COOP-DESIGN.md 8.21): Ftr_MailBox goes on only

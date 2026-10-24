@@ -939,3 +939,21 @@ presents; the host's copy keeps the change.
 - **Only while open.** Her own postbox is loaded on her copy too; outside the mailbox the game uses it as before (mail
   it gives her during a visit stays hers). Her changes are also sent when the mailbox closes.
 - **Known limit.** With both players in the mailbox at once the last change wins.
+
+### 8.22 The hotel lobby with company (2026-10-23)
+
+Group `hotel`: script overlays in build/romfs-coop/hotel/ (make_coop_flows.py). In these scripts NetHasVisitor,
+IsSharePlay and IsVillageGateOpened answer 0 for "yes"; each "yes" now goes where the game goes alone, and
+IsMyVillage 1 (a visitor) goes the resident's way.
+
+- **Leilani (SNPC_kpm):** Event211 / 611 / 873 NetHasVisitor, Event323 / 614 IsSharePlay, Event344 / 538
+  IsVillageGateOpened ("hangin' out with yer friend", "playin' together", "Don't ye have company to see to?", "company
+  droppin' by?"). Tested: both players reach her usual talk. On the test save that talk still ends with "company
+  droppin' by?", her line before the story flags cPlayer:RcoGetTvForCongratsHouse and cPlayer:HasLookMyHouseExplain,
+  as in single player.
+- **Lobby objects:** Obj_HotelTradeBox, Obj_HotelMannequin, Obj_HotelSignboard (Event3 IsMyVillage);
+  Obj_HotelAmiiboDevice (Event52 IsMyVillage, Event53 IsSharePlay, Event57 NetHasVisitor).
+- **Guests:** NNPC_HotelGuest Event1; NNPC_HotelGuest_NoRoom Event14 / 45 IsMyVillage, Event18 / 46 NetHasVisitor,
+  Event19 / 47 IsSharePlay.
+- **Not done: the rooms.** Choosing a room in System_HotelRoomVisit ends the session (Event42
+  NetEndSessionVillage) before the room scene loads; the corridor's ProhibitEnter messages are left as they are.

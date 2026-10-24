@@ -126,10 +126,11 @@ unsigned runtime_romfs_open(uint64_t *out, const char *path, int mode) {
                    the host; without it a visitor's donation would record nothing
          nook/     Tom Nook and the Nook Stop terminal serve a visitor as a resident, and Tom Nook serves the host while
                    someone visits ("nook")
-         mail/     the host's mailbox opens for a visitor ("mail", coop_edit.c shows her the host's letters) */
-    static const char *const groups[][2] = {{"museum", "museum/"}, {"nook", "nook/"}, {"mail", "mail/"}};
-    static int on[3] = {-1, -1, -1};
-    for (unsigned g = 0; g < 3 && fd < 0; g++) {
+         mail/     the host's mailbox opens for a visitor ("mail", coop_edit.c shows her the host's letters)
+         hotel/    Leilani and the hotel lobby serve both players while someone visits ("hotel") */
+    static const char *const groups[][2] = {{"museum", "museum/"}, {"nook", "nook/"}, {"mail", "mail/"}, {"hotel", "hotel/"}};
+    static int on[4] = {-1, -1, -1, -1};
+    for (unsigned g = 0; g < 4 && fd < 0; g++) {
         if (on[g] < 0) { const char *e = getenv("ACNH_MP_EDIT"); on[g] = e && (!strcmp(e, "full") || strstr(e, groups[g][0])); }
         if (!on[g] || m != &rmounts[0] || coop_fd < 0) continue;
         char mp[600]; snprintf(mp, sizeof mp, "%s%s", groups[g][1], p);
