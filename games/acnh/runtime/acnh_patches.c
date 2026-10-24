@@ -413,6 +413,17 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
        slot holds the other players' buffer (slot 0) instead and file 1 is not loaded. The read now returns (to the
        function's epilogue) when file 1 is not ready, instead of reading through a null. */
     {0x3675e54, 0x54000121, 0x54000881, "hotel"},  /* b.ne 0x3675e78 (null) -> b.ne 0x3675f64 (return) */
+    /* A room visited from the stairs gets its guest from main+0x1f8f490 (the room's stage, the guest named at hotel
+       manager +0x58, spawned by main+0x1f8e120) only with fewer than 2 players and no job open. Each copy has its own
+       room and NPCs (coop_hotel_npc), so the company check is dropped. */
+    {0x1f8f4b8, 0x540000c8, 0xd503201f, "hotel"},  /* b.hi (2 or more players: no guest) -> nop */
+    /* The room's guest is placed by main+0x1f34d60 (the stairs visit's NPCs, from the stage's NPC setup main+0x1f1ad40)
+       through main+0x1f3be00, its only user. With company that placed a special NPC from the session's shared NPC table
+       (slot id + 0x51) and only on the stage that table names; the room's guest has no entry there, so no guest. Each
+       copy places its own, as alone. */
+    {0x1f3be50, 0x54000069, 0x14000008, "hotel"},  /* b.ls (alone) -> b 0x1f3be70: the guest's own position, not the table's */
+    {0x1f3bf0c, 0x540007a9, 0x14000042, "hotel"},  /* b.ls (alone) -> b 0x1f3c014: no table lookup */
+    {0x1f3c16c, 0x54000d63, 0x1400006b, "hotel"},  /* b.lo (alone) -> b: a guest without a position is placed too */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
@@ -622,6 +633,74 @@ static void hotel_install(Module *m, uint64_t s, uint64_t data_off) {
     if (!e || (strcmp(e, "full") && !strstr(e, "hotel"))) return;
     precall_stub(m, s + 16, data_off, 0x15bf0b0u, 0xd10283ffu, 0x350, (void *)coop_hotel_go, "hotel");    /* sub sp, sp, #0xa0 */
     precall_stub(m, s + 96, data_off, 0x15c7d94u, 0xd10183ffu, 0x358, (void *)coop_hotel_end, "hotel");   /* sub sp, sp, #0x60 */
+    /* main+0x1d44d80(npc), the NPC's registration (vtable 0x495c1e8, after its init main+0x1d3f420 gave it a slot in the
+       shared NPC table): coop_edit.c takes the hotel's NPCs out of that table */
+    precall_stub(m, s + 496, data_off, 0x1d44d80u, 0xd10183ffu, 0x380, (void *)coop_hotel_npc, "hotel");  /* sub sp, sp, #0x60 */
+    /* main+0x282f420(scene manager, &name, ...) requests a stage change by name (a sead string: chars at +8): leaving
+       the hotel, coop_edit.c takes the HHP save slot made for the job out before the game saves */
+    precall_stub(m, s + 736, data_off, 0x282f420u, 0xa9bc7bfdu, 0x398, (void *)coop_hotel_stage, "hotel");   /* stp x29, x30, [sp, #-0x40]! */
+    /* The session's end and every scene's start (main+0x2812e90) reset the hotel manager (main+0x281394c
+       `bl main+0x15bd660`): the call goes through coop_hotel_reset, which keeps the job over a visitor's departure */
+    {
+        uint64_t t = s + 816, site = 0x281394cu;
+        uint32_t w; memcpy(&w, m->base + site, 4);
+        if (w != 0x97b6a745u) runtime_fail("ACNH_MP_EDIT hotel: the hotel manager's reset call differs (another game version?)");
+        if (t + 12 > m->ro_off) runtime_fail("ACNH_MP_EDIT hotel: no room in main's text padding");
+        for (unsigned b = 0; b < 12; b++) if (m->base[t + b]) runtime_fail("ACNH_MP_EDIT hotel: text padding in use");
+        if (data_off + 0x3a0 + 8 > m->size) runtime_fail("ACNH_MP_EDIT hotel: no data page after main");
+        *(uint64_t *)(void *)(m->base + data_off + 0x3a0) = (uint64_t)(uintptr_t)coop_hotel_reset;
+        uint32_t stub[3] = {(adrp_x10(t, data_off) & ~31u) | 16, 0xf9400000u | (0x3a0 / 8) << 10 | 16 << 5 | 16, 0xd61f0200u};   /* adrp x16; ldr x16, [x16, #hook]; br x16 */
+        memcpy(m->base + t, stub, sizeof stub);
+        uint32_t bl = aspect_branch(site, t) | 0x80000000u; memcpy(m->base + site, &bl, 4);   /* b -> bl */
+    }
+    /* NPC AI flowcharts start (main+0x1e8f2b0) with the player byte main+0x538d120 (0xff, no player), which is replaced by
+       the local player only outside a session (main+0x1e8f578 `b.hi` past it when 2 or more play). So with company
+       every player flag an NPC's AI reads answered "not set": Leilani's arrival speech in the room
+       (cPlayerTemp:HotelReserveKpmSpeak) and, after leaving a room from the stairs, her lobby line
+       (cPlayerTemp:HotelReserveKpmStopSpeak) never came, and the camera the room's exit had reserved for that line
+       stayed. The hotel's NPCs are each copy's own (coop_hotel_npc), so in the hotel (coop_hotel_alone, set by
+       coop_hotel_stage) a flowchart given no player gets the local player as alone. */
+    {
+        uint64_t t = s + 832, site = 0x1e8f578u;
+        uint32_t w; memcpy(&w, m->base + site, 4);
+        if (w != 0x54000728u) runtime_fail("ACNH_MP_EDIT hotel: the NPC AI's player choice differs (another game version?)");
+        if (t + 44 > m->ro_off) runtime_fail("ACNH_MP_EDIT hotel: no room in main's text padding");
+        for (unsigned b = 0; b < 44; b++) if (m->base[t + b]) runtime_fail("ACNH_MP_EDIT hotel: text padding in use");
+        *(uint64_t *)(void *)(m->base + data_off + 0x3a8) = (uint64_t)(uintptr_t)&coop_hotel_alone;
+        uint32_t stub[11] = {
+            0x54000048u,                                                   /* b.hi +8 (a session) */
+            aspect_branch(t + 4, 0x1e8f57cu),                              /* b: alone, the local player */
+            (adrp_x10(t + 8, data_off) & ~31u) | 16,                       /* adrp x16, <data> */
+            0xf9400000u | (0x3a8 / 8) << 10 | 16 << 5 | 16,                /* ldr x16, [x16, #&coop_hotel_alone] */
+            0x39400210u,                                                   /* ldrb w16, [x16] */
+            0x340000b0u,                                                   /* cbz w16, keep */
+            0x385f43b0u,                                                   /* ldurb w16, [x29, #-0xc] (the caller's player) */
+            0x7100221fu,                                                   /* cmp w16, #8 */
+            0x54000043u,                                                   /* b.lo keep (a real player) */
+            aspect_branch(t + 36, 0x1e8f57cu),                             /* b: in the hotel, as alone */
+            aspect_branch(t + 40, 0x1e8f65cu)};                            /* keep: b past it, as the session does */
+        memcpy(m->base + t, stub, sizeof stub);
+        uint32_t b = aspect_branch(site, t); memcpy(m->base + site, &b, 4);
+    }
+    /* ACNH_FLOW_LOG=1 (diagnostics): every EventFlow action as it runs. main+0x60f4f0(binding, &name, context, event,
+       out) looks the action up by its name (a sead string: chars at +8) and runs it; coop_flow_log prints the name and
+       the event's (**(context+0x38) + 2: the flowchart's string pool, a u16 length before the characters). */
+    if (getenv("ACNH_FLOW_LOG")) {
+        precall_stub(m, s + 176, data_off, 0x60f4f0u, 0xd101c3ffu, 0x360, (void *)coop_flow_log, "hotel");      /* sub sp, sp, #0x70 */
+        /* main+0x60fb10(binding, &name, context, ...) the same for queries (switch events) */
+        precall_stub(m, s + 256, data_off, 0x60fb10u, 0xd10183ffu, 0x368, (void *)coop_flow_log_query, "hotel");  /* sub sp, sp, #0x60 */
+        /* main+0x160bfc0(model, hidden) sets bit 0 of an actor model's +0x11a0 (vtable +0x4e8): changes are logged */
+        precall_stub(m, s + 336, data_off, 0x160bfc0u, 0xd10143ffu, 0x370, (void *)coop_vis_log, "hotel");  /* sub sp, sp, #0x50 */
+        /* main+0x1da4f60(npc ai, state, args, ...) requests an NPC AI state: logged with the caller */
+        precall_stub(m, s + 416, data_off, 0x1da4f60u, 0xd10183ffu, 0x378, (void *)coop_npc_state_log, "hotel");  /* sub sp, sp, #0x60 */
+        /* main+0x2011dbc(net npc manager, entry, slot) releases an NPC's slot in the shared NPC table (talk end, delete) */
+        precall_stub(m, s + 576, data_off, 0x2011dbcu, 0xa9bd7bfdu, 0x388, (void *)coop_npc_release_log, "hotel");  /* stp x29, x30, [sp, #-0x30]! */
+        /* main+0xf6b738, EventFlowQueryNetDemoType: main+0x1cbecec(*(main+0x527c538)) is in w0 at +0x20 (the session's
+           demo type: System_Network MultiplaySave saves for 1-3 and ends for anything else) */
+        precall_stub(m, s + 656, data_off, 0xf6b758u, 0x52800049u, 0x390, (void *)coop_net_demo_log, "hotel");  /* mov w9, #2 */
+        /* main+0x2df6328(player?, action, ...), the d-pad / room dispatcher (LAN-COOP-DESIGN.md 8.17) */
+        precall_stub(m, s + 880, data_off, 0x2df6328u, 0xd10203ffu, 0x3b0, (void *)coop_dpad_log, "hotel");  /* sub sp, sp, #0x80 */
+    }
 }
 static void postbox_install(Module *m, uint64_t s, uint64_t data_off) {
     const char *e = getenv("ACNH_MP_EDIT");

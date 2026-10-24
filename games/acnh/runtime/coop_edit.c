@@ -25,7 +25,7 @@
 #define MUSEUM_RECORD 0x26bdd90
 #define DONOR_SLOT 0x24819f0
 #define MUSEUM_SIZE 0x3404
-enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2, EDIT_ORDER = 3, EDIT_POSTBOX = 5, EDIT_LETTERS = 6, EDIT_HOTEL_GO = 7, EDIT_HOTEL_END = 8 };
+enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2, EDIT_ORDER = 3, EDIT_POSTBOX = 5, EDIT_LETTERS = 6, EDIT_HOTEL_GO = 7, EDIT_HOTEL_END = 8, EDIT_HOTEL_AREA = 9, EDIT_HOTEL_JOB = 10, EDIT_HOTEL_STATE = 11 };
 typedef struct __attribute__((packed)) { uint8_t kind, pad[7]; uint64_t item; } EditBody;
 _Static_assert(sizeof(EditBody) == 16, "edit body");
 /* One decorating-mode change of a room tile: op 1 clears the tile, 5 puts the record there (the furniture ops' codes) */
@@ -42,7 +42,7 @@ static EditBody pending[32]; static int npending;
 static void room_received(int node, const RoomEdit *e);
 static void post_received(int node, const uint8_t *body, uint32_t n);
 void coop_edit_received(int node, const void *body, uint32_t n) {
-    if (n >= 8 && (*(const uint8_t *)body == EDIT_POSTBOX || *(const uint8_t *)body == EDIT_LETTERS)) { post_received(node, body, n); return; }
+    if (n >= 8 && (*(const uint8_t *)body == EDIT_POSTBOX || *(const uint8_t *)body == EDIT_LETTERS || *(const uint8_t *)body == EDIT_HOTEL_AREA || *(const uint8_t *)body == EDIT_HOTEL_JOB)) { post_received(node, body, n); return; }
     if (n == sizeof(RoomEdit) && *(const uint8_t *)body == EDIT_ROOM) { room_received(node, body); return; }
     if (n != sizeof(EditBody)) { fprintf(stderr, "[coop] edit from node %d: %u bytes, ignored\n", node, n); return; }
     pthread_mutex_lock(&lock);
@@ -126,6 +126,13 @@ static void host_order(uint8_t *main, uint64_t item) {
               letters; every half second the letters that differ from what the host sent go back to the host.
    A handle h: data = *(h+0x10) + *(h+8); +0x28 the change notice (0: none). */
 #define POSTBOX_SIZE 0x47430
+static int hotel_area_send;   /* host: frames until the job's working area goes to the visitors */
+#define HOTEL_AREA 0xcb0   /* a player's hotel save handles: island + player * 0xcb0 + 0x211c90. Each handle is {+8 offset,
+   +0x10 base, +0x28 change notice}, the data at base + offset (the room record 0x1594 bytes at handle +0, the theme at
+   handle +0x78). Copying the host's block gave the visitor the host's base pointers: the stairs (main+0x15d4700 reads
+   every player's room record) crashed on them. Kind 9 is no longer sent; main+0x15bf0b0 on the visitor's copy writes
+   the theme into her own record once the job's fields are set. */
+#define HOTEL_AREA_AT 0x211c90
 #define POST_LETTERS 0x110
 #define POST_LETTER 0x3c8
 #define POST_ORDER 0x46f70
@@ -137,6 +144,11 @@ static uint8_t *post_shadow, *post_base;   /* visitor: the host's postbox as edi
 static int post_valid;
 static uint64_t post_handle[8];
 static uint8_t *post_in; static uint32_t post_in_n;   /* visitor: the latest kind 5 from the network thread */
+static uint8_t *area_in;   /* visitor: the host's hotel working area (kind 9) */
+static uint8_t *job_in;   /* visitor: the host's hotel job (kind 10) */
+#define HOTEL_BITS 0x754   /* a decorating-catalog item bitset */
+#define HOTEL_NAME 64
+#define HOTEL_JOB (8 + 0x50 + 4 + 2 * HOTEL_NAME + 3 * HOTEL_BITS)
 static uint8_t *letters_in[16]; static uint32_t letters_in_n[16]; static int nletters_in;   /* host: kind 6 */
 
 static uint8_t *save_root(uint8_t *main) {
@@ -168,6 +180,8 @@ static void post_received(int node, const uint8_t *body, uint32_t n) {   /* netw
     memcpy(copy, body, n);
     pthread_mutex_lock(&lock);
     if (body[0] == EDIT_POSTBOX) { if (n == 8 + POSTBOX_SIZE) { free(post_in); post_in = copy; post_in_n = n; copy = NULL; } }
+    else if (body[0] == EDIT_HOTEL_AREA) { if (n == 8 + HOTEL_AREA) { free(area_in); area_in = copy; copy = NULL; } }
+    else if (body[0] == EDIT_HOTEL_JOB) { if (n == HOTEL_JOB) { free(job_in); job_in = copy; copy = NULL; } }
     else if (nletters_in < 16) { letters_in[nletters_in] = copy; letters_in_n[nletters_in++] = n; copy = NULL; }
     pthread_mutex_unlock(&lock);
     if (copy) { fprintf(stderr, "[coop] mail: message kind %u from node %d (%u bytes) dropped\n", body[0], node, n); free(copy); }
@@ -179,7 +193,18 @@ static void host_post_notify(uint64_t h) {
     struct { uint64_t off; void *base; uint64_t size; } change = {*(uint64_t *)(uintptr_t)(h + 8), *(void **)(uintptr_t)(h + 0x10), POSTBOX_SIZE};
     ((void (*)(void *, void *))(*(void ***)obj)[0x20 / 8])(obj, &change);
 }
+static void hotel_state_watch(uint8_t *main);
 static void post_host_tick(uint8_t *main) {
+    hotel_state_watch(main);
+    if (hotel_area_send && --hotel_area_send == 0) {
+        uint8_t *island = island_data(main);
+        if (island) {
+            static uint8_t msg[8 + HOTEL_AREA];
+            msg[0] = EDIT_HOTEL_AREA; memcpy(msg + 8, island + HOTEL_AREA_AT, HOTEL_AREA);   /* the host is player 0 */
+            coop_lan_broadcast_edit(msg, sizeof msg, -1);
+            fprintf(stderr, "[coop] hotel: sent the job's working area to the visitors\n");
+        }
+    }
     uint8_t *root = save_root(main);
     uint64_t h = root && coop_postbox_original ? ((postbox_fn)(uintptr_t)coop_postbox_original)(root) : 0;
     uint8_t *data = postbox_data(h);
@@ -227,8 +252,19 @@ static void post_visitor_send(void) {   /* the letters this copy changed since t
     memcpy(post_base, post_shadow, POSTBOX_SIZE);
     fprintf(stderr, "[coop] mail: sent %u changed letter(s) to the host\n", count);
 }
+static void hotel_job_follow(uint8_t *main, const uint8_t *job);
 static void post_visitor_tick(int self) {
     if (self <= 0) { post_valid = 0; post_open = 0; return; }
+    uint8_t *area = NULL;
+    pthread_mutex_lock(&lock); area = area_in; area_in = NULL; pthread_mutex_unlock(&lock);
+    if (area) {
+        uint8_t *island = island_data(runtime_module_base("main"));
+        (void)island;   /* not applied: the block holds save handles (base pointers into the host's memory), not the data */
+        free(area);
+    }
+    uint8_t *job = NULL;
+    pthread_mutex_lock(&lock); job = job_in; job_in = NULL; pthread_mutex_unlock(&lock);
+    if (job) { hotel_job_follow(runtime_module_base("main"), job); free(job); }
     static unsigned frames;
     if (post_valid && frames++ % 15 == 0) post_visitor_send();
     uint8_t *in = NULL;
@@ -253,14 +289,52 @@ static void post_visitor_tick(int self) {
 #define HOTEL_PREPARE 0x15bf0b0
 static void hhp_mount(uint8_t *main);
 static int hotel_following;
+/* The job itself (theme, guest, the catalog's item bitsets) is in the hotel manager, filled on the host by the action
+   SetupHotelThemeMode (main+0xc438cc) from the theme picker: +0x10 theme id, +0x12 theme valid, +0x18 a sead string
+   (chars +0x20, capacity +0x28) with the theme's name, +0x38..+0x57 the key item and flags, +0x58 the guest's name
+   (chars +0x60, capacity +0x68), and three item bitsets the decorating catalog copies (main+0x2d92200): +0xe88
+   recommended and not owned, +0x15f8 recommended, +0x1d68 owned (main+0x15be980 rebuilds them from the theme and the local
+   player's catalogs). The strings at +0x18 and +0x58 (and +0x78, the guest's name that main+0x15bf0b0 looks up) hold
+   pointers to this copy's own buffers: copying the bytes 0x8..0x57 wholesale gave the visitor the host's pointers, and
+   her copy crashed writing the theme's name through one. +0x98 is the edit state (1 before the room, 2
+   while decorating); the catalog and the d-pad decorating menu show the hotel's items only while it is set. The host
+   sends all of it (kind 10) instead of the bare room, and the edit state's changes (kind 11). The visitor writes it
+   into her own manager (the characters into her own string buffers, never a pointer) before main+0x15bf0b0, which
+   takes the theme into her working area only when +0x12 is set. */
+#define HOTEL_STATE 0x98
+/* Leilani's arrival speech starts the job (state 1 -> 2: SNPC_kpm_HotelEdit StartEdit, HotelOrderCallback cEditStart,
+   the decorating music). Her room AI gives it when it sees the lobby's flag (AI_NPC_Kpm_Edit Event15,
+   cPlayerTemp:HotelReserveKpmSpeak), which with company it does only with the NPC AI player stub (coop_hotel_alone,
+   acnh_patches.c). The visitor's copy never had that lobby talk: it runs StartEdit's steps without her lines
+   (make_coop_flows.py Coop_HotelStart) when the host's job starts. */
+#define HOTEL_START_FLOW "Coop_LocalHotel:Coop_HotelStart"
+static void hotel_name_get(uint8_t *manager, int at, uint8_t *out) {
+    const char *chars = *(const char **)(manager + at); int cap = *(int32_t *)(manager + at + 8);
+    memset(out, 0, HOTEL_NAME);
+    if (chars && cap > 0) strncpy((char *)out, chars, (size_t)(cap < HOTEL_NAME ? cap : HOTEL_NAME) - 1);
+}
+static void hotel_name_set(uint8_t *manager, int at, const uint8_t *in) {
+    char *chars = *(char **)(manager + at); int cap = *(int32_t *)(manager + at + 8);
+    if (!chars || cap <= 0) return;
+    size_t n = strnlen((const char *)in, HOTEL_NAME - 1); if (n > (size_t)cap - 1) n = (size_t)cap - 1;
+    memcpy(chars, in, n); chars[n] = 0;
+}
 void coop_hotel_go(uint8_t *manager) {
     /* the HHP save (the decorating catalog) for a session: requesting its load from the controller read blocked the
        game thread; here, in the job's own update, the game requests saves the same way */
     if (!hotel_following && coop_lan_self_node() >= 0) hhp_mount(runtime_module_base("main"));
     if (hotel_following || coop_lan_self_node() != 0 || !manager || !coop_lan_host_visitors(0)) return;
-    EditBody e = {.kind = EDIT_HOTEL_GO, .item = (uint64_t)manager[8] | (uint64_t)*(uint32_t *)(manager + 0xc) << 32};
-    coop_lan_broadcast_edit(&e, sizeof e, -1);
-    fprintf(stderr, "[coop] hotel: the host goes to %s %d, visitors follow\n", manager[8] ? "VIP room" : "room", *(int32_t *)(manager + 0xc));
+    static uint8_t msg[HOTEL_JOB];
+    uint8_t *m = msg + 8;
+    memset(msg, 0, sizeof msg); msg[0] = EDIT_HOTEL_JOB;
+    memcpy(m, manager + 8, 0xc); memcpy(m + 0x30, manager + 0x38, 0x20); m += 0x50;   /* the values only: +0x18 and +0x58 are strings */
+    memcpy(m, manager + HOTEL_STATE, 4); m += 4;
+    hotel_name_get(manager, 0x20, m); m += HOTEL_NAME;
+    hotel_name_get(manager, 0x60, m); m += HOTEL_NAME;
+    memcpy(m, manager + 0xe88, HOTEL_BITS); memcpy(m + HOTEL_BITS, manager + 0x15f8, HOTEL_BITS); memcpy(m + 2 * HOTEL_BITS, manager + 0x1d68, HOTEL_BITS);
+    coop_lan_broadcast_edit(msg, sizeof msg, -1);
+    fprintf(stderr, "[coop] hotel: the host goes to %s %d (theme %u%s \"%s\", guest \"%s\"), visitors follow\n", manager[8] ? "VIP room" : "room",
+            *(int32_t *)(manager + 0xc), *(uint16_t *)(manager + 0x10), manager[0x12] ? "" : " not set", (char *)msg + 8 + 0x54, (char *)msg + 8 + 0x54 + HOTEL_NAME);
 }
 void coop_hotel_end(uint8_t *manager) {
     (void)manager;
@@ -269,16 +343,112 @@ void coop_hotel_end(uint8_t *manager) {
     coop_lan_broadcast_edit(&e, sizeof e, -1);
     fprintf(stderr, "[coop] hotel: the host's job ends, visitors go back to the lobby\n");
 }
+static void hotel_state_watch(uint8_t *main) {   /* host: the edit state's changes go to the visitors */
+    static uint32_t last;
+    uint8_t *manager = *(uint8_t **)(void *)(main + HOTEL_MANAGER);
+    uint32_t state = manager ? *(uint32_t *)(manager + HOTEL_STATE) : 0;
+    if (state == last) return;
+    last = state;
+    /* +0x4c: the item whose music the room plays while decorating (main+0x28a9320; none: the default track) */
+    fprintf(stderr, "[coop] hotel: the edit state is %u (music item %#x)\n", state, manager ? *(uint16_t *)(manager + 0x4c) : 0);
+    if (!coop_lan_host_visitors(0)) return;
+    EditBody e = {.kind = EDIT_HOTEL_STATE, .item = state};
+    coop_lan_broadcast_edit(&e, sizeof e, -1);
+}
+/* Leilani vanished from the host's screen after any talk in the room (and once from the visitor's when she left
+   decorating mode). In a session every NPC gets a slot in the shared NPC table *(main+0x52e4bf0) (0x6d entries: position,
+   stage id, owner station, a state in byte 7 bits 4-5), NPC +0x690 the entry, +0x698 the slot, from its init
+   main+0x1d3f420. A talk's start claims the slot (main+0x2011f64: state 0x20, the NPC net-locked), its end
+   (main+0x1d3e750 case 0xd) releases it (main+0x2011dbc), and with company that release hands the slot over (state 0x10,
+   message 2: the NPC "goes to another map", the protocol for villagers walking between stages) unless the entry's stage
+   is this copy's and this copy has the say; alone it keeps her. Each copy runs its own Leilani in its own room, both in
+   the same slot, so the hand-over took her away; it also wrote her room position into the island's saved record for that
+   slot. The real game never has company in a hotel room, so its NPCs leave that table here: with a job open (edit state
+   1 or 2, set before the stage change on both copies) or in the hotel's stages (coop_hotel_alone; a stairs room's
+   guest), an NPC registering (main+0x1d44d80, after its init) loses its
+   entry and slot as an NPC outside a session has, and every network path skips it (they all return when +0x690 is 0). */
+void coop_hotel_npc(uint8_t *npc) {
+    uint8_t *manager = *(uint8_t **)(void *)(runtime_module_base("main") + HOTEL_MANAGER);
+    uint8_t *entry = npc ? *(uint8_t **)(void *)(npc + 0x690) : NULL;
+    if (coop_hotel_alone && getenv("ACNH_FLOW_LOG"))   /* diagnostics: every NPC the hotel's stages register */
+        fprintf(stderr, "[npc] registers %p in the hotel (slot %d)\n", (void *)npc, npc ? *(int32_t *)(npc + 0x698) : -2);
+    if (!entry || !manager || !(*(uint32_t *)(manager + HOTEL_STATE) || coop_hotel_alone) || coop_lan_self_node() < 0) return;
+    fprintf(stderr, "[coop] hotel: NPC %p leaves the shared NPC table (slot %u, state %#x)\n", (void *)npc, *(uint32_t *)(npc + 0x698), entry[7] & 0x30);
+    *(uint8_t **)(void *)(npc + 0x690) = NULL;
+    *(uint32_t *)(npc + 0x698) = 0xffffffffu;
+    npc[0x286] &= (uint8_t)~4;   /* the session's talk path */
+}
+/* Leaving the hotel in a session, the game saves every ready slot: a visitor's departure (stage IdrAirPortDemoRetire,
+   the save screen NetDemo, then back to the stage before), a dropped visitor (NetDemo, then the island) or the trip
+   home. With a job open that save also took save slot 1, the HHP save hhp_mount created in memory of its own, and never
+   finished: the island's loading screen stayed. That slot is a fresh set-up, not the player's HHP file, so it must not
+   be saved at all: the first stage request outside the hotel (a stage not named IdrHotel...) takes it out (slot status
+   bits 2 and 4), on both copies, and a request back into the hotel with the job still open makes it again.
+   The session's end and every scene's start also reset the hotel manager (main+0x2812e90 -> main+0x15bd660: edit state
+   0, room -1, the job's data cleared) unless the scene is one the job goes on in. After a visitor's departure the host
+   goes back into the room, which then had no job; so on the host from a departure's request until the next hotel stage
+   the reset is skipped while a job is open. A dropped visitor sends the host to the island and the reset runs. */
+static int hhp_ours, hotel_departure;
+uint8_t coop_hotel_alone;   /* read by the stub on main+0x1e8f578 (acnh_patches.c) */
+void coop_hotel_stage(void *mgr, uint8_t *name, void *x2, void *x3, uint64_t lr) {
+    static int log = -1;
+    if (log < 0) log = getenv("ACNH_FLOW_LOG") != NULL;
+    if (log) coop_stage_request_log(mgr, name, x2, x3, lr);
+    const char *stage = name ? *(const char **)(void *)(name + 8) : NULL;
+    if (stage) coop_hotel_alone = !strncmp(stage, "IdrHotel", 8);
+    uint8_t *main = runtime_module_base("main"), *root = save_root(main), *manager = *(uint8_t **)(void *)(main + HOTEL_MANAGER);
+    if (!stage || !root || coop_lan_self_node() < 0) return;
+    int job = manager && *(uint32_t *)(manager + HOTEL_STATE);
+    if (!strncmp(stage, "IdrHotel", 8)) {
+        hotel_departure = 0;
+        if (job && !hhp_ours) hhp_mount(main);
+        return;
+    }
+    if (!strcmp(stage, "IdrAirPortDemoRetire") && job && coop_lan_self_node() == 0) hotel_departure = 1;   /* the visitor's own copy goes home */
+    else if (strcmp(stage, "NetDemo")) hotel_departure = 0;
+    if (!hhp_ours) return;
+    root[0x50d] &= (uint8_t)~6; hhp_ours = 0;
+    fprintf(stderr, "[coop] hotel: leaving the hotel (stage %s), slot 1 (the HHP save made for the job) is taken out before the save\n", stage);
+}
+void coop_hotel_reset(uint8_t *manager) {
+    if (hotel_departure && manager && *(uint32_t *)(manager + HOTEL_STATE)) {
+        fprintf(stderr, "[coop] hotel: a visitor's departure keeps the job (room %d, edit state %u)\n", *(int32_t *)(manager + 0xc), *(uint32_t *)(manager + HOTEL_STATE));
+        return;
+    }
+    ((void (*)(uint8_t *))(uintptr_t)(runtime_module_base("main") + 0x15bd660))(manager);
+}
+static void hotel_set_state(uint8_t *main, uint8_t *manager, uint32_t state) {
+    *(uint32_t *)(manager + HOTEL_STATE) = state;
+    if (state == 2) {   /* as HotelOrderCallback cEditStart (main+0xc34d00) does */
+        uint8_t *o = *(uint8_t **)(void *)(main + 0x5139180);
+        if (o) o[0x54] = 0;
+    }
+}
+static void hotel_job_follow(uint8_t *main, const uint8_t *job) {
+    uint8_t *manager = *(uint8_t **)(void *)(main + HOTEL_MANAGER);
+    if (!manager) { fprintf(stderr, "[coop] hotel: no hotel manager on this copy, cannot follow\n"); return; }
+    const uint8_t *m = job + 8;
+    memcpy(manager + 8, m, 0xc); memcpy(manager + 0x38, m + 0x30, 0x20); m += 0x50;
+    uint32_t state; memcpy(&state, m, 4); m += 4;
+    hotel_name_set(manager, 0x20, m); m += HOTEL_NAME;
+    hotel_name_set(manager, 0x60, m); m += HOTEL_NAME;
+    memcpy(manager + 0xe88, m, HOTEL_BITS); memcpy(manager + 0x15f8, m + HOTEL_BITS, HOTEL_BITS); memcpy(manager + 0x1d68, m + 2 * HOTEL_BITS, HOTEL_BITS);
+    hotel_set_state(main, manager, state);
+    hhp_mount(main);   /* her decorating catalog: the HHP slot, set up fresh as on the host */
+    hotel_following = 1;
+    ((void (*)(void *))(uintptr_t)(main + HOTEL_PREPARE))(manager);
+    hotel_following = 0;
+    coop_flow_test("Coop_LocalHotel:Coop_HotelRoom");
+    fprintf(stderr, "[coop] hotel: following the host to %s %d with the job's theme %u (\"%s\") and catalog\n", manager[8] ? "VIP room" : "room",
+            *(int32_t *)(manager + 0xc), *(uint16_t *)(manager + 0x10), (const char *)job + 8 + 0x54);
+}
 static void hotel_visitor(uint8_t *main, const EditBody *e) {
     uint8_t *manager = *(uint8_t **)(void *)(main + HOTEL_MANAGER);
-    if (e->kind == EDIT_HOTEL_GO) {
-        if (!manager) { fprintf(stderr, "[coop] hotel: no hotel manager on this copy, cannot follow\n"); return; }
-        manager[8] = (uint8_t)e->item; *(int32_t *)(manager + 0xc) = (int32_t)(e->item >> 32);
-        hotel_following = 1;
-        ((void (*)(void *))(uintptr_t)(main + HOTEL_PREPARE))(manager);
-        hotel_following = 0;
-        coop_flow_test("Coop_LocalHotel:Coop_HotelRoom");
-        fprintf(stderr, "[coop] hotel: following the host to %s %d\n", manager[8] ? "VIP room" : "room", *(int32_t *)(manager + 0xc));
+    if (e->kind == EDIT_HOTEL_STATE) {
+        if (!manager) return;
+        if (e->item == 2 && *(uint32_t *)(manager + HOTEL_STATE) != 2) coop_flow_test(HOTEL_START_FLOW);   /* sets it to 2 */
+        else hotel_set_state(main, manager, (uint32_t)e->item);
+        fprintf(stderr, "[coop] hotel: edit state %u as the host\n", (uint32_t)e->item);
     } else {
         coop_flow_test("Coop_LocalHotel:Coop_HotelBack");
         fprintf(stderr, "[coop] hotel: back to the lobby with the host\n");
@@ -316,9 +486,10 @@ static void hhp_mount(uint8_t *main) {
     *(void **)(root + 8) = heap;
     if (!ok) { fprintf(stderr, "[coop] hhp: creating slot 1 failed\n"); return; }
     root[0x50d] |= 2 | 4;
+    hhp_ours = 1;
     uint64_t player = (uint64_t)(coop_lan_self_node() > 0 ? coop_lan_self_node() : 0);
     int slot = ((int (*)(void *))(uintptr_t)(main + DONOR_SLOT))(&player);
-    if (slot < 0) { fprintf(stderr, "[coop] hhp: slot 1 created, but player %llu is not a resident here: nothing to load\n", (unsigned long long)player); return; }
+    if (slot < 0) slot = 0;   /* a visitor is no resident here: the fresh set-up does not read the slot's data */
     /* set up fresh, as the game does for a player whose HHP data was never started (the test host has no HHP file);
        queuing the file load (save request 7, main+0x273bd04) blocked the game thread in a session from both the
        controller read and the job's own update: the save processor holds requests while local play runs */
@@ -347,7 +518,7 @@ void coop_edit_tick(void) {
     {   /* visitor: what the host sends (the hotel job) */
         EditBody e[32]; int n;
         pthread_mutex_lock(&lock); n = npending; memcpy(e, pending, sizeof(EditBody) * (size_t)n); npending = 0; pthread_mutex_unlock(&lock);
-        for (int i = 0; i < n; i++) if (e[i].kind == EDIT_HOTEL_GO || e[i].kind == EDIT_HOTEL_END) hotel_visitor(main, &e[i]);
+        for (int i = 0; i < n; i++) if (e[i].kind == EDIT_HOTEL_STATE || e[i].kind == EDIT_HOTEL_END) hotel_visitor(main, &e[i]);
     }
     if (!slots) return;   /* museum: the visitor's side below */
     static unsigned frames; static int last_credit = -2;

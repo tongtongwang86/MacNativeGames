@@ -85,6 +85,18 @@ void coop_post_open(void);    /* mail stubs: the mailbox screen opens / the mail
 void coop_post_close(void);   /* mail stub on main+0x25f2a00: the postbox handle to use (game thread) */
 void coop_hotel_go(uint8_t *manager);    /* hotel stubs: the host's job opens a room / ends (game thread) */
 void coop_hotel_end(uint8_t *manager);
+void coop_hotel_npc(uint8_t *npc);      /* hotel stub: an NPC registers (game thread) */
+void coop_hotel_stage(void *mgr, uint8_t *name, void *x2, void *x3, uint64_t lr);   /* hotel stub: a stage change is requested (game thread) */
+void coop_hotel_reset(uint8_t *manager);   /* hotel: the hotel manager's reset at a scene's start goes through here (game thread) */
+extern uint8_t coop_hotel_alone;           /* hotel: NPC AI flowcharts get the local player as alone (in the hotel's stages) */
+void coop_flow_log(void *binding, const uint64_t *name, void *context, void *event, uint64_t lr);   /* ACNH_FLOW_LOG */
+void coop_npc_state_log(void *ai, uint64_t state, void *args, uint64_t x3, uint64_t lr);
+void coop_vis_log(uint8_t *model, uint64_t hidden, void *x2, void *x3, uint64_t lr);
+void coop_npc_release_log(void *mgr, uint8_t *entry, uint64_t slot, uint64_t x3, uint64_t lr);
+void coop_net_demo_log(uint64_t type, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t lr);
+void coop_stage_request_log(void *mgr, uint8_t *name, void *x2, void *x3, uint64_t lr);
+void coop_dpad_log(void *x0, uint64_t action, void *x2, void *x3, uint64_t lr);
+void coop_flow_log_query(void *binding, const uint64_t *name, void *context, void *event, uint64_t lr);
 void coop_flow_test(const char *flow_entry);   /* coop_flow.c: start <flowchart>:<entry> on the game thread */
 int coop_order_record(const uint64_t *item, const uint32_t *date, const uint8_t *player);   /* mail stub: a Nook Shopping order (game thread) */
 void coop_room_op_seen(void *handler, uint8_t *job, uint64_t a2, uint64_t a3, uint64_t lr);   /* diagnostics: place ops' packets */

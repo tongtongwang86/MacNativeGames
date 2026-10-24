@@ -989,3 +989,86 @@ IsMyVillage 1 (a visitor) goes the resident's way.
   an empty HHP part. The visitor still sees her own storage.
 - **Not done: the rooms.** Choosing a room in System_HotelRoomVisit ends the session (Event42
   NetEndSessionVillage) before the room scene loads; the corridor's ProhibitEnter messages are left as they are.
+- **Leilani vanished after any talk in the room** (host's screen; once on the visitor's when she left decorating
+  mode), with the same flowchart steps and AI states as alone and no model-hide change. Cause: the shared NPC table
+  `*(main+0x52e4bf0)` (0x6d entries of 0x15 bytes: packed position, 10-bit stage id, owner station, a state in byte 7
+  bits 4-5, a counter; shadow copies at +0x8f8, dirty mask +0x1a70; manager `*(main+0x52eb450)`). In a session the NPC
+  init main+0x1d3f420 gives every NPC a slot (NPC +0x690 the entry, +0x698 the slot; skipped only on stage
+  "Coordinate"). A talk's start (main+0x1d3c9b4) claims it (main+0x2011f64: state 0x20, the NPC net-locked, NPC +0x69c
+  bit 0x4000), its end (main+0x1d3e750 case 0xd) releases it with main+0x2011dbc: alone (session mode <= 1,
+  main+0x2011e70) it keeps the NPC; with company it hands the slot over (main+0x2011ea4: state 0x10, message 2, the
+  protocol for villagers walking to another map) unless the entry's stage is this copy's and this copy owns it. Each
+  copy runs its own Leilani in its own room, both in the same slot, so the hand-over took her away; the keep path
+  would also have written her room position into the island save's record for that slot. The real game never has
+  company in a hotel room, so the hotel's NPCs leave the table: a stub on the NPC registration main+0x1d44d80(npc)
+  (vtable 0x495c1e8, after the init) clears +0x690, sets +0x698 to -1 and clears the session talk bit (+0x286 bit 2)
+  while a job is open (edit state 1 or 2, set before the stage change on both copies) in a session; every network path
+  returns when +0x690 is 0 (tested with build acnh-coop47: she stays after talks; both copies' Leilani had slot 26).
+  "NpcNetTurn" / "NpcNetMove" turned out to be animation names (an NPC turn / move enum), and
+  the talk-request queue `*(main+0x4ca3ab8)` (main+0x977550) behaves the same with or without company.
+- **Leilani's lines with company: the arrival speech, and the camera after the stairs.** NPC AI flowcharts start
+  through main+0x1da5660 -> main+0x1e8f2b0 with the player byte at main+0x538d120 (0xff, "no player"). Only outside
+  a session is that replaced by the local player: main+0x1e8f578 `b.hi` skips the swap when session object +0x476
+  is 2 or more. So with company every player flag such a flowchart reads answered "not set" (the cPlayerTemp get
+  main+0x2651a90 returns 0 for a player above 7). Two hotel symptoms:
+  - The room AI (AI_NPC_Kpm_Edit Event15, cPlayerTemp:HotelReserveKpmSpeak) gave no arrival speech, so the job stayed
+    at state 1. A runtime workaround used to start it.
+  - Leaving a room visited from the stairs (SNPC_kpm_HotelEdit StopReturnEntrance: cCancelOrder, the flag
+    cPlayerTemp:HotelReserveKpmStopSpeak, CameraReserveFirstStateCommand Talk:kpm) or ending a job (EndEdit,
+    ...DoneSpeak) reserves the lobby camera for Leilani's line there (AI_NPC_Kpm Event4 / Event1). She never said it,
+    and the camera stayed half in that talk.
+  The hotel's NPCs are each copy's own (above), so in the hotel's stages they may see the local player as alone. The
+  branch at main+0x1e8f578 now goes to a 44-byte stub: in a session, while coop_hotel_alone is set (coop_hotel_stage,
+  on the last stage request starting with IdrHotel) and the caller gave no real player (byte at x29-0xc >= 8), it takes
+  the solo path (main+0x1e8f57c); otherwise it skips the swap as before (main+0x1e8f65c). Tested with build
+  acnh-coop52: with a visitor, the host gets her arrival speech and the job starts from it, and after a job's end her
+  lobby line comes. The host's start workaround is gone; the visitor's copy, which never had the lobby talk, still
+  runs Coop_HotelStart when the host's job starts. Outside the hotel, AI flows in a session are unchanged. The
+  speak-function poll main+0x1da4aec still skips functions installed with IsPlayingWithOther False when 2 or more play,
+  so her "Leave" prompt at the room's door (cLeaveHotelRoom, main+0x20689e8) is still missing.
+- **The decorating music** (wrong track with company, open): HotelEditBGMStart (main+0xd5fdbc) only raises a request
+  while the edit state is non-zero; the BGM update main+0x28a4190 picks the track in main+0x28a9320 from the item id at
+  hotel manager +0x4c (+0x4f variant bits) in the table at `*(main+0x54f5840)+0x19f800`; no entry (or 0xfffe) means the
+  default track. coop_edit.c logs +0x4c with each edit state change (the co-op job: 0x9a2) to compare with single player.
+- **Leaving during a job.** Either way out sends the host's copy through a save, which hung on save slot 1, the HHP
+  save coop_edit.c creates for the job in memory of its own: the host stayed on the island's loading screen.
+  - A visitor's departure (`coop leave`, the airport): stage IdrAirPortDemoRetire, then the save screen NetDemo
+    (System_Network MultiplaySave, NetDemoType 2), then back to the stage before.
+  - A dropped visitor (window closed): NetDemo (NetDemoType 0, no save step), then the island (MainField, from
+    main+0x2818740 via the network step main+0x1c55a58).
+  That slot is a fresh set-up, not the player's HHP file, so it must never be saved. A stub on the stage request
+  main+0x282f420(scene manager, &name) (coop_hotel_stage) takes it out (status bits 2|4) at the first request for a stage
+  outside the hotel (not IdrHotel...), on both copies, and makes it again on a request back into the hotel with the job
+  still open. Once the session is over the game mounts the real one itself ("slot 1 is already loaded").
+  The session's end and every scene's start (main+0x2812e90) also reset the hotel manager (main+0x281394c
+  `bl main+0x15bd660`: edit state 0, room -1, the job's data cleared). After a departure the host went back into a room
+  without its job. That call now goes through coop_hotel_reset (a 12-byte stub), which skips it on the host from a
+  departure's IdrAirPortDemoRetire request until the next hotel stage while a job is open. A dropped visitor sends the
+  host to the island, and the reset runs. Tested with build acnh-coop51: after a departure the host is back in the
+  room with the job and Leilani, and the visitor is home; after a drop the host is on the island. Neither save
+  wrote an HHP file into the test profile.
+- **Rooms visited from the stairs** (after a job is closed: a plain visit, System_HotelRoomVisit). Alone, the room's
+  guest is there and the d-pad (action 0x3d) opens the player's own storage ("Everything"). With a job open the
+  dispatcher main+0x2df6328 turns 0x3d into 0xdc, the hotel's catalog. Tested with build acnh-coop53 (ACNH_FLOW_LOG
+  logs `[dpad] action` and `[dpad] where`, the location record main+0x32f83b0 reads; scripted visit:
+  `coop flow System_HotelRoomVisit:Root`, A, A).
+  - The host's storage opens in a session too. The visitor's 0x3d passes the dispatcher's checks (main+0x32f83b0
+    answers yes: map 159, state 1) and is still refused later. Her home storage is not on the host's island, the
+    game's rule for visitors. Open.
+  - **The room's guest** (fixed, tested with build acnh-coop55: the guest stands in the room on both copies). The
+    stage's NPC setup main+0x1f1ad40 hands a room without a job to main+0x1f34d60. That function creates the guest
+    named at hotel manager +0x58/+0x60 (a special NPC: id from main+0x20d6e70, data main+0x20c8790), placed through
+    main+0x1f3be00 (its only user) and created with main+0x1f300e0 ("Hotel.Npc.Create.Nml"). With company that
+    placement took the guest's spot from the session's shared NPC table (slot id + 0x51) and placed him only on the
+    stage the table names. A room guest has no entry there, so there was no guest. Three branches now take the
+    single-player path: main+0x1f3be50 (`b.ls` -> `b 0x1f3be70`: his own position), main+0x1f3bf0c (`b.ls` ->
+    `b 0x1f3c014`: no table lookup) and main+0x1f3c16c (`b.lo` -> `b`: a guest without a saved position is placed too).
+    The jumps skip past the second test on each single-player path, which in a session (session object +0x10, a flag
+    bit at *(main+0x4ac01d0)+8) went back to the table. main+0x1f8f4b8 (`b.hi` -> nop) drops the same company check
+    in main+0x1f8f490, another guest path. The guest is each copy's own (coop_hotel_npc now also clears NPCs
+    registered in the hotel's stages without a job), so his spot can differ between the two screens.
+- **Test entry:** `coop flow Coop_LocalHotel:Coop_HotelTake` on the host takes up the save's suspended job as Leilani's
+  lobby talk does (SetEditHotelRoomNo, RecoverOrderDataFromSuspendData, SetHotelRoomNumberTag, the flag,
+  HotelOrderCallback cJustBeforeGoToRoom, MiniGameSilentCancel, the stage change), so a room test needs no walking.
+  ACNH_FLOW_LOG also logs NetDemoType's answer ([net]), slot releases in the shared NPC table and stage requests
+  ([stage] <name> from <caller>).

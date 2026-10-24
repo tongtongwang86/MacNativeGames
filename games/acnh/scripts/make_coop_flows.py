@@ -175,6 +175,20 @@ def add_hotel(fc):
     fade = {'FadeColorString': 'cBlack', 'FadeInSpeed': 1.0, 'FadeOutSpeed': 1.0, 'FadeOutKindString': 'cHotel', 'FadeInKindString': 'cHotel'}
     b.entry('Coop_HotelRoom', b.action('SystemRequestChangeStage', None, TargetStage='cHotelSelectRoom', **fade))
     b.entry('Coop_HotelBack', b.action('SystemRequestChangeStage', None, TargetStage='cHotelEntrance', **fade))
+    # The job's start on a visitor's copy. Leilani's room AI (AI_NPC_Kpm_Edit Root) gives her arrival speech when it
+    # sees the flag her lobby talk set (cPlayerTemp:HotelReserveKpmSpeak; SNPC_kpm_HotelEdit StartEdit: clears the
+    # flag, HotelOrderCallback cEditStart, the decorating music). The visitor never had that talk; these are StartEdit's
+    # own steps without her lines, which runtime/coop_edit.c runs when the host's job starts.
+    b.entry('Coop_HotelStart', b.chain([('EventFlagSystemOff', {'AccessKey': 'cPlayerTemp:HotelReserveKpmSpeak'}),
+                                        ('HotelOrderCallback', {'CallbackTiming': 'cEditStart'}),
+                                        ('HotelEditBGMStart', {})]))
+    # Diagnostics ("coop flow Coop_LocalHotel:Coop_HotelTake" on the host): Leilani's lobby talk taking up the suspended
+    # job (SNPC_kpm Event484, 235, 233, 24, 23, 531, 432) without her lines, for tests of the room without walking there
+    b.entry('Coop_HotelTake', b.chain([('SetEditHotelRoomNo', {'RoomNo': 2}), ('RecoverOrderDataFromSuspendData', {}),
+                                       ('SetHotelRoomNumberTag', {'Source': 'cSuspend', 'TagID': 0}),
+                                       ('EventFlagSystemOn', {'AccessKey': 'cPlayerTemp:HotelReserveKpmSpeak'}),
+                                       ('HotelOrderCallback', {'CallbackTiming': 'cJustBeforeGoToRoom'}), ('MiniGameSilentCancel', {})],
+                                      b.action('SystemRequestChangeStage', None, TargetStage='cHotelSelectRoom', **fade)))
 
 
 def read_flow(data):

@@ -30,6 +30,56 @@ static _Atomic int pending;   /* 0 none, 1 visit, 2 host, 3 test, 4 leave (visit
 static char test_override[128];
 static uint32_t actor_override; static int player_override = -1;   /* "coop actor <hex> <player>" (diagnostics) */
 void coop_flow_actor(uint32_t actor, int player) { actor_override = actor; player_override = player; fprintf(stderr, "[coop] request actor %#x player %d\n", actor, player); }
+static const char *flow_event_name(void *context, int at) {   /* **(context + at) + 2, or "?" */
+    uint64_t *p = context ? *(uint64_t **)((uint8_t *)context + at) : NULL;
+    return p && *p ? (const char *)(uintptr_t)(*p + 2) : "?";
+}
+void coop_flow_log(void *binding, const uint64_t *name, void *context, void *event, uint64_t lr) {
+    (void)binding; (void)event; (void)lr;
+    const char *s = name ? (const char *)(uintptr_t)name[1] : NULL;
+    if (s) fprintf(stderr, "[flow] %s %s\n", flow_event_name(context, 0x38), s + (strncmp(s, "EventFlowAction", 15) ? 0 : 15));
+}
+void coop_npc_state_log(void *ai, uint64_t state, void *args, uint64_t x3, uint64_t lr) {
+    (void)args; (void)x3;
+    uint8_t *main = runtime_module_base("main");
+    fprintf(stderr, "[npc] ai %p state %#x from main+%#llx\n", ai, (unsigned)state, (unsigned long long)(lr - 4 - (uint64_t)(uintptr_t)main));
+}
+void coop_npc_release_log(void *mgr, uint8_t *entry, uint64_t slot, uint64_t x3, uint64_t lr) {
+    (void)mgr; (void)x3;
+    uint8_t *main = runtime_module_base("main");
+    fprintf(stderr, "[npc] release slot %u entry %p state %#x from main+%#llx\n", (unsigned)slot, (void *)entry, entry ? entry[7] & 0x30 : 0,
+            (unsigned long long)(lr - 4 - (uint64_t)(uintptr_t)main));
+}
+void coop_net_demo_log(uint64_t type, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t lr) {
+    (void)x1; (void)x2; (void)x3; (void)lr;
+    uint8_t *main = runtime_module_base("main");
+    uint8_t *mp = *(uint8_t **)(void *)(main + 0x527c538);
+    uint8_t *st = mp ? *(uint8_t **)(void *)(mp + 0x10) : NULL, *sp = mp ? *(uint8_t **)(void *)(mp + 0x28) : NULL;
+    fprintf(stderr, "[net] demo type %u (state %#x / %#x, special %p %d)\n", (unsigned)type, st ? *(uint32_t *)(st + 0x380) : 0,
+            st ? *(uint32_t *)(st + 0x388) : 0, (void *)sp, sp ? *(int32_t *)(sp + 0x60) : 0);
+}
+void coop_stage_request_log(void *mgr, uint8_t *name, void *x2, void *x3, uint64_t lr) {
+    (void)mgr; (void)x2; (void)x3;
+    uint8_t *main = runtime_module_base("main");
+    const char *s = name ? *(const char **)(void *)(name + 8) : NULL;
+    fprintf(stderr, "[stage] %s from main+%#llx\n", s ? s : "?", (unsigned long long)(lr - 4 - (uint64_t)(uintptr_t)main));
+}
+void coop_dpad_log(void *x0, uint64_t action, void *x2, void *x3, uint64_t lr) {   /* main+0x2df6328 */
+    (void)x0; (void)x2; (void)x3;
+    uint8_t *main = runtime_module_base("main");
+    fprintf(stderr, "[dpad] action %#x from main+%#llx\n", (unsigned)action, (unsigned long long)(lr - 4 - (uint64_t)(uintptr_t)main));
+}
+void coop_vis_log(uint8_t *model, uint64_t hidden, void *x2, void *x3, uint64_t lr) {
+    (void)x2; (void)x3;
+    if (!model || ((*(uint32_t *)(model + 0x11a0) ^ (uint32_t)hidden) & 1) == 0) return;
+    uint8_t *main = runtime_module_base("main");
+    fprintf(stderr, "[vis] model %p bit0 -> %u from main+%#llx\n", (void *)model, (unsigned)(hidden & 1), (unsigned long long)(lr - 4 - (uint64_t)(uintptr_t)main));
+}
+void coop_flow_log_query(void *binding, const uint64_t *name, void *context, void *event, uint64_t lr) {
+    (void)binding; (void)event; (void)lr;
+    const char *s = name ? (const char *)(uintptr_t)name[1] : NULL;
+    if (s) fprintf(stderr, "[flow] %s ?%s\n", flow_event_name(context, 0x10), s + (strncmp(s, "EventFlowQuery", 14) ? 0 : 14));
+}
 void coop_flow_test(const char *flow_entry) { snprintf(test_override, sizeof test_override, "%s", flow_entry); atomic_store(&pending, 3); }
 
 static const char *const what_name[] = {"", "visit", "host", "test", "leave", "stop hosting"};
