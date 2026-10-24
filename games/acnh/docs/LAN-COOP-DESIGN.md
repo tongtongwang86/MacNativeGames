@@ -928,12 +928,14 @@ presents; the host's copy keeps the change.
   present). main+0x25f2a00(save) picks the postbox every mail user reads: the local player's.
   - The host's copy sends its postbox to the visitors every second it has changed (EDIT kind 5).
   - On the visitor's copy, a stub on main+0x25f2a00 (coop_postbox, with a trampoline to the original) returns a handle
-    on that copy while it has one, so the mailbox screen and the letter actions (main+0x3098f84 read, main+0x3099304
+    on that copy while the mailbox is open: from the mailbox screen's start (EventFlowActionUIPostCreate, exec
+    main+0xd28250) to the end of the mailbox action (enter of cFtrMailboxEnd, main+0x22a60d0), both hooked. So the
+    mailbox screen and the letter actions (main+0x3098f84 read, main+0x3099304
     take the present into her own pockets, main+0x30995e4 delete) work on the host's letters.
   - Every half second the visitor sends the letters that differ from the host's last copy (EDIT kind 6); the host writes
     them into its postbox, with the save's change notice (`*(*(h+0x28)+0x20)`, vtable +0x20) and the recount
     main+0x2726200(data, &host).
   - LAN messages may now be 0x50000 bytes (COOP_EDIT_MAX).
-- **Known limits.** The redirect holds for the whole visit, not only while the mailbox screen is open: the visitor's
-  own postbox (it is loaded on her copy) is not used meanwhile, so mail the game gives her during a visit lands in the
-  host's mailbox. With both players in the mailbox at once the last change wins.
+- **Only while open.** Her own postbox is loaded on her copy too; outside the mailbox the game uses it as before (mail
+  it gives her during a visit stays hers). Her changes are also sent when the mailbox closes.
+- **Known limit.** With both players in the mailbox at once the last change wins.

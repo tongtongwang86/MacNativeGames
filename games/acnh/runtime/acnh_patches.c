@@ -531,17 +531,15 @@ static const struct { uint64_t site; uint32_t word; void *hook; } decor_sites[] 
 };
 #define DECOR_STUB (PUSH_STUB + 128)   /* 80 bytes per site */
 #define DECOR_HOOK 0x308
-static void decor_install(Module *m, uint64_t s, uint64_t data_off) {
-    const char *e = getenv("ACNH_MP_EDIT");
-    if (!e || (strcmp(e, "full") && !strstr(e, "decor-sync"))) return;
-    for (size_t k = 0; k < sizeof decor_sites / sizeof *decor_sites; k++, s += 80) {
-    uint64_t site = decor_sites[k].site, slot = DECOR_HOOK + 8 * k;
-    if (data_off + slot + 8 > m->size) runtime_fail("ACNH_MP_EDIT decor-sync: no data page after main");
-    *(uint64_t *)(void *)(m->base + data_off + slot) = (uint64_t)(uintptr_t)decor_sites[k].hook;
+static void precall_stub(Module *m, uint64_t s, uint64_t data_off, uint64_t site, uint32_t word, uint64_t slot, void *hook, const char *group) {
+    char why[160]; const char *bad = NULL;
     uint32_t w; memcpy(&w, m->base + site, 4);
-    if (w != decor_sites[k].word) runtime_fail("ACNH_MP_EDIT decor-sync: a room layer function differs (another game version?)");
-    if (s + 80 > m->ro_off) runtime_fail("ACNH_MP_EDIT decor-sync: no room in main's text padding");
-    for (unsigned b = 0; b < 80; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT decor-sync: text padding in use");
+    if (data_off + slot + 8 > m->size) bad = "no data page after main";
+    else if (w != word) bad = "a hooked function differs (another game version?)";
+    else if (s + 80 > m->ro_off) bad = "no room in main's text padding";
+    else for (unsigned b = 0; b < 80; b++) if (m->base[s + b]) { bad = "text padding in use"; break; }
+    if (bad) { snprintf(why, sizeof why, "ACNH_MP_EDIT %s: %s (main+%#llx)", group, bad, (unsigned long long)site); runtime_fail(why); }
+    *(uint64_t *)(void *)(m->base + data_off + slot) = (uint64_t)(uintptr_t)hook;
     uint32_t stub[20] = {
         0xa9ba7bfdu,                                                   /* stp x29, x30, [sp, #-0x60]! */
         0xa90107e0u,                                                   /* stp x0, x1, [sp, #0x10] */
@@ -564,7 +562,12 @@ static void decor_install(Module *m, uint64_t s, uint64_t data_off) {
         0, 0};
     memcpy(m->base + s, stub, sizeof stub);
     uint32_t b = aspect_branch(site, s); memcpy(m->base + site, &b, 4);
-    }
+}
+static void decor_install(Module *m, uint64_t s, uint64_t data_off) {
+    const char *e = getenv("ACNH_MP_EDIT");
+    if (!e || (strcmp(e, "full") && !strstr(e, "decor-sync"))) return;
+    for (size_t k = 0; k < sizeof decor_sites / sizeof *decor_sites; k++, s += 80)
+        precall_stub(m, s, data_off, decor_sites[k].site, decor_sites[k].word, DECOR_HOOK + 8 * k, decor_sites[k].hook, "decor-sync");
     fprintf(stderr, "[acnh] local play editing: decorating-mode changes go to the other copies\n");
 }
 
@@ -616,6 +619,10 @@ static void postbox_install(Module *m, uint64_t s, uint64_t data_off) {
     coop_postbox_original = (uint64_t)(uintptr_t)(m->base + s + 12);
     uint32_t b = aspect_branch(POSTBOX_SITE, s); memcpy(m->base + POSTBOX_SITE, &b, 4);
     fprintf(stderr, "[acnh] local play editing: a visitor opens the host's mailbox\n");
+    /* Only while that mailbox is open: the mailbox screen's start (EventFlowActionUIPostCreate, exec main+0xd28250) and
+       the end of the mailbox action (enter of the player state cFtrMailboxEnd, main+0x22a60d0) tell coop_edit.c. */
+    precall_stub(m, s + 32, data_off, 0xd28250u, 0xf9400408u, 0x338, (void *)coop_post_open, "mail");    /* ldr x8, [x0, #8] */
+    precall_stub(m, s + 112, data_off, 0x22a60d0u, 0xa9be7bfdu, 0x340, (void *)coop_post_close, "mail");   /* stp x29, x30, [sp, #-0x20]! */
 }
 #endif
 

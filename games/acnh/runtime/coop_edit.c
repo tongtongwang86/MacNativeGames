@@ -144,10 +144,22 @@ static uint8_t *save_root(uint8_t *main) {
     return slot ? *(uint8_t **)(uintptr_t)slot : NULL;
 }
 static uint8_t *postbox_data(uint64_t h) { return h ? *(uint8_t **)(uintptr_t)(h + 0x10) + *(uint64_t *)(uintptr_t)(h + 8) : NULL; }
+static void post_visitor_send(void);
+static int post_open;   /* visitor: from the mailbox screen's start to the end of the mailbox action */
+void coop_post_open(void) {
+    if (coop_lan_self_node() <= 0 || !post_valid) return;
+    post_open = 1;
+    fprintf(stderr, "[coop] mail: the mailbox screen shows the host's letters\n");
+}
+void coop_post_close(void) {
+    if (!post_open) return;
+    post_open = 0;
+    if (post_valid) post_visitor_send();
+    fprintf(stderr, "[coop] mail: mailbox closed, her own mail again\n");
+}
 uint64_t coop_postbox(void *save) {
     uint64_t r = coop_postbox_original ? ((postbox_fn)(uintptr_t)coop_postbox_original)(save) : 0;
-    if (!post_valid) return r;
-    static int said; if (!said++) fprintf(stderr, "[coop] mail: the mailbox shows the host's letters (own postbox here: %s)\n", r ? "yes" : "none");
+    if (!post_valid || !post_open) return r;
     post_handle[1] = 0; post_handle[2] = (uint64_t)(uintptr_t)post_shadow; post_handle[5] = 0;
     return (uint64_t)(uintptr_t)post_handle;
 }
@@ -216,7 +228,7 @@ static void post_visitor_send(void) {   /* the letters this copy changed since t
     fprintf(stderr, "[coop] mail: sent %u changed letter(s) to the host\n", count);
 }
 static void post_visitor_tick(int self) {
-    if (self <= 0) { post_valid = 0; return; }
+    if (self <= 0) { post_valid = 0; post_open = 0; return; }
     static unsigned frames;
     if (post_valid && frames++ % 15 == 0) post_visitor_send();
     uint8_t *in = NULL;
