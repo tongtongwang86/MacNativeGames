@@ -103,6 +103,17 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 @end
 @implementation TOTKInputView
 -(BOOL)acceptsFirstResponder{return YES;}
+/* The mouse is the touch screen: a left click is a finger on the game's 1280x720 screen, which is the window's middle
+   16:9 (the layout the UI is fitted to, and the picture's letterbox when the shape is 16:9), as on iPhone / iPad
+   (touch_pad.m sendScreenTouch). Phases: 0 down, 1 moved, 2 up. */
+-(void)sendTouch:(NSEvent *)e phase:(int)phase{
+ NSPoint p=[self convertPoint:e.locationInWindow fromView:nil];NSSize s=self.bounds.size;
+ CGFloat w=MIN(s.width,s.height*16/9),h=w*9/16,y=s.height-p.y;   /* the view's origin is its bottom-left corner */
+ runtime_touch_screen(1,phase,(int)lround((p.x-(s.width-w)/2)/w*1280),(int)lround((y-(s.height-h)/2)/h*720));
+}
+-(void)mouseDown:(NSEvent *)e{[self sendTouch:e phase:0];}
+-(void)mouseDragged:(NSEvent *)e{[self sendTouch:e phase:1];}
+-(void)mouseUp:(NSEvent *)e{[self sendTouch:e phase:2];}
 -(void)keyDown:(NSEvent *)e{runtime_input_key(e.keyCode,1);}
 -(void)keyUp:(NSEvent *)e{runtime_input_key(e.keyCode,0);}
 /* Modifier keys arrive as flag changes; any of them can be bound (Settings window) except Command, which stays the app's. */
@@ -199,6 +210,9 @@ static void note_occlusion(const char *when){int v=(window.occlusionState&NSWind
 @end
 static TOTKWindowDelegate *windowDelegate;
 int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
+/* "wsize <w>x<h>" (runtime/input.c, test scripts): the window's content size, as a user resize would set it; the window
+   comes to the front (without taking the keyboard) so that it presents and "wshot" can capture it. */
+void runtime_front_set_size(int w,int h){dispatch_async(dispatch_get_main_queue(), ^{[window setContentSize:NSMakeSize(w,h)];[window orderFrontRegardless];front_sync_drawable();});}
 void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(), ^{[window performClose:nil];});}
 /* Use the window-close path, not terminate:, so Command-Q also waits for active saves. */
 /* The Settings window's graphics (vendor/gamesettings): what keys 1, 2 and 4 change, read from and applied to the

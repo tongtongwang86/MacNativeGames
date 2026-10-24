@@ -65,7 +65,9 @@ one of those too. Wider than 16:9 the view widens and the UI stays in the middle
 keeps its width and grows taller, so nothing is cut off. A UI layout keeps the projection it was built with, so after the
 window's shape changes mid-game (full screen, a resize, key 4) the host fits it to the new shape at draw time, and UI
 panels that reach the layout's edge (backdrops, the black around the screen wipe's circle) are extended to the window's
-edge (`uw_acnh_refit` in `nvn_mtl.m`; `ACNH_UI_FIT=0` turns both off).
+edge (`uw_acnh_refit` in `nvn_mtl.m`; `ACNH_UI_FIT=0` turns both off). The fit goes into the draw's projection, so
+panels placed beyond the 16:9 layout (the screen wipe's bands above and below a large circle) come into view instead of
+being clipped; text (also tilted, like the pocket's money) is fitted with the panes.
 
 ## Resolution
 
@@ -128,9 +130,13 @@ python3 scripts/install_mac_app.py --icloud-container iCloud.<your container> \
     --profile tooling/mac.provisionprofile   # ~/Applications/Animal Crossing.app
 ```
 
-The app holds a launcher and your icon (`make icon` first); the game stays in this folder. The launcher sets what
-`make boot` sets, names the iCloud container SaveSync uses (the one the iPhone / iPad app is signed with), logs to
-`~/Library/Logs/MacNativeGames/acnh.log` and runs `build/acnh-native` in place of itself. Start the Mac app before the
+The installer builds the game first (`make build/acnh-native romfs-coop shader-tools icon`; `--no-build` skips it).
+The app holds a launcher, your icon and its own copy of the game binary, so later builds in this folder change the app
+only when it is installed again; the game's data, shader caches and saves stay in this folder. The launcher sets what
+`make boot` sets, turns on local play's shared editing (`ACNH_MP_EDIT`, every group, unless set), names the iCloud
+container SaveSync uses (the one the iPhone / iPad app is signed with), logs to `~/Library/Logs/MacNativeGames/acnh.log`
+and runs its copy of the game in place of itself. In the window, a left click is a finger on the game's touch screen
+(its middle 16:9). Start the Mac app before the
 iPad's first start, so the island goes to iCloud first and the iPad takes it.
 
 macOS syncs the container only while an installed app is signed with it; without one, `brctl status iCloud.<id>`

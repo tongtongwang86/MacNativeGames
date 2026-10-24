@@ -6762,6 +6762,11 @@ static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_
 // Moving the viewport is not used: the viewport's top edge is the edge of the clip volume, so top-anchored widgets that the host lifts back to the real top of the picture (UI coordinate y negative) would be clipped away entirely.
 // g_ui_moff is set per draw by draw() (0 = no change); the copies live in a ring buffer, and the same address in the same pass is copied only once.
 static double g_ui_moff;
+/* ACNH (uw_acnh_refit): the UI fit as clip-space rows (row0' = sx*row0 + ox*row3, row1' = sy*row1 + oy*row3) of the
+   vertex stage's binding 0, so that a pane placed outside the 16:9 layout (the screen wipe's bands above and below a
+   large circle lie beyond clip y -1 .. 1) is moved into the clip volume before clipping; scaling the viewport instead
+   only moved what survived the clipping. g_acnh_fit_on: this draw's fit is in the matrix. */
+static int g_acnh_fit_on; static float g_acnh_fit[4];
 static __strong id<MTLTexture> g_flash_hdr_source;   // diagnostic: tone-map input (may be reused later in the frame)
 static __strong id<MTLTexture> g_flash_tonemap_target; // diagnostic: tone-map output, before FXAA
 /* ACNH (games/acnh): its UI (ui2d layouts: panes, text, the HUD) goes through a sead perspective projection that the game's
@@ -6779,8 +6784,16 @@ static __strong id<MTLTexture> g_flash_tonemap_target; // diagnostic: tone-map o
      window's edge (E = 1 / f(r) in layout units), the pane's other edge stays: the pane stretches, its content (black,
      a backdrop) does not need its shape. Only the ui2d pane shaders below place their quad from this buffer (entry 33:
      size and offset of the unit quad, 4..6: model-view rows); text and other shaders (the wipe's circle) are only fitted.
-   The result is a scale S and offset O of the draw's normalized device coordinates per axis, applied to its viewport and
-   scissor (uw_acnh_refit). ACNH_UI_FIT=0: off. */
+   The result is a scale S and offset O of the draw's normalized device coordinates per axis. It goes into the vertex
+   stage's projection rows (g_acnh_fit, ui_mat_patch: clip-space, so panes beyond the 16:9 layout, which the GPU would
+   clip before any viewport scaling, are moved in first), or into the viewport when that binding cannot be read; the
+   scissor follows, except one that covers the whole target. The UI is drawn into ACNH's canvas (1600x900 .. 2560x1440,
+   a later pass scales it to the presented picture), so draws into any full-size 16:9 target count. Text is fitted
+   too: many glyph quads per draw (a multiple of 6 indices) or instanced 4-vertex strips, its view folded into the
+   projection (tilted text, such as the pocket's money, has a rotation: the scales are the lengths of rows 0 and 1).
+   The UI's projection is made once, for the shape at the start, so a resize leaves it at that shape (q stays 16:9)
+   and only this fit keeps the UI right. ACNH_UI_FIT=0: off. ACNH_UI_PROBE=<vertex shader prefix | all> with the
+   draw_log flag: the binding's first 16 floats (diagnostics). */
 static double acnh_fx(double t) { return t <= 16.0 / 9 ? 1 : (16.0 / 9) / t; }
 static double acnh_fy(double t) { return (t <= 16.0 / 9 ? t : 16.0 / 9) / (16.0 / 9); }
 static int acnh_pane_shader(const char *vs) {
@@ -6803,45 +6816,69 @@ static int acnh_pane_rect(const float (*c)[4], double q, double *rc) {
     }
     return rc[1] > rc[0] && rc[3] > rc[2];
 }
-/* One axis: built with fb (NDC per layout unit), now f; a pane from lo to hi (or none). NDC_out = S * NDC_in + O. */
-static void acnh_axis(double fb, double f, int pane, double lo, double hi, double *S, double *O) {
+/* One axis: built with fb (NDC per layout unit), now f; a pane from lo to hi (or none), olo..ohi its extent on the
+   other axis. NDC_out = S * NDC_in + O. An edge goes to the window's edge only when the pane is a backdrop there: it
+   spans the whole layout on this axis (a fade), or on the other axis and touches this edge (the screen wipe's bands
+   above and below the circle), or the edge lies at or past the layout's edge (the clock's shading). HUD pieces that
+   merely end near an edge (the pocket's bubble at 0.998, the minimap's frame at 0.995) keep their shape. */
+static void acnh_axis(double fb, double f, int pane, double lo, double hi, double olo, double ohi, double *S, double *O) {
     double a = 1, b = 0, E = 1 / f;
     if (pane) {
-        double lo2 = lo <= -0.99 && lo > -E ? -E : lo, hi2 = hi >= 0.99 && hi < E ? E : hi;
+        int full = lo <= -0.99 && hi >= 0.99, band = olo <= -0.99 && ohi >= 0.99;
+        int lo_edge = lo <= -0.99 && (full || band || lo <= -0.9999), hi_edge = hi >= 0.99 && (full || band || hi >= 0.9999);
+        double lo2 = lo_edge && lo > -E ? -E : lo, hi2 = hi_edge && hi < E ? E : hi;
         if (lo2 != lo || hi2 != hi) { a = (hi2 - lo2) / (hi - lo); b = lo2 - a * lo; }
     }
     *S = f * a / fb; *O = f * b;
 }
 static int uw_acnh_refit(const char *vs, const p_draw *dw, const p_draw_idx *di, NSUInteger tw, NSUInteger th, double *sx, double *ox, double *sy, double *oy) {
     static int on = -1; if (on < 0) { const char *e = getenv("ACNH_UI_FIT"); on = !(e && !strcmp(e, "0")); }
-    if (!on || !runtime_aspect_now || !g_mfx.swap_w || tw != g_mfx.swap_w || th != g_mfx.swap_h || (dw ? dw->count : di ? di->count : 0) != 6) return 0;
+    /* The presented picture, or a full-size 16:9 target: ACNH draws its UI into its 1600x900 canvas, which a later pass
+       scales into the presented 2560x1440 (output_install's picture sizes); only matching the presented size left the
+       UI unfitted after a shape change (stretched; the screen wipe's black panes apart). */
+    int target = (g_mfx.swap_w && tw == g_mfx.swap_w && th == g_mfx.swap_h) || (tw >= 1280 && tw * 9 == th * 16);
+    /* Text draws its glyphs as instanced 4-vertex strips or many quads at once (a multiple of 6 indices); only single
+       quads can be panes. */
+    unsigned count = dw ? dw->count : di ? di->count : 0;
+    if (!on || !runtime_aspect_now || !target || !count || (count % 6 && count != 4)) return 0;
     const p_bind_buf *u = &S.ubo[0][0]; void *mb; uint64_t mo;
     if (!u->addr || u->size < 64 || pend_hits(u->addr, 64) || !mtl_addr(u->addr, 64, &mb, &mo)) return 0;
     const float *m = (const float *)(uintptr_t)u->addr;   /* rows: m[0..3] row 0, m[4..7] row 1, m[12..15] row 3 */
-    double p00 = m[0], p11 = fabs(m[5]);
-    if (!(p00 > 1e-3) || !(p11 > 1e-3) || fabs(m[1]) > 1e-4 || fabs(m[4]) > 1e-4 ||
+    { static const char *probe; static int ps; if (!ps) { probe = getenv("ACNH_UI_PROBE"); ps = 1; }   /* diagnostics: a shader's binding 0 */
+      static int pn; if (probe && vs && (!strcmp(probe, "all") || !strncmp(vs, probe, 8)) && pn < 4000 && atomic_load(&g_draw_log) > 0) { pn++;
+        MLOG("[uw] probe %.8s size %llu: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", vs, (unsigned long long)u->size,
+             m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]); } }
+    /* The x and y scales are the lengths of rows 0 and 1 (tilted text, like the pocket's money, has a rotation folded in). */
+    double p00 = hypot(m[0], m[1]), p11 = hypot(m[4], m[5]);
+    if (!(p00 > 1e-3) || !(p11 > 1e-3) || fabs(m[2]) > 1e-4 || fabs(m[6]) > 1e-4 ||
         fabs(m[12]) > 1e-4 || fabs(m[13]) > 1e-4 || fabs(m[14] + 1) > 1e-3) return 0;   /* m[15]: text has the view folded in */
     double q = p11 / p00; if (q < 0.4 || q > 5) return 0;
     double r = runtime_aspect_now(); if (!(r > 0)) r = 16.0 / 9;
     double rc[4] = {0, 0, 0, 0};
-    int pane = acnh_pane_shader(vs) && u->size >= 34 * 16 && !pend_hits(u->addr, 34 * 16) && acnh_pane_rect((const float (*)[4])(uintptr_t)u->addr, q, rc);
-    acnh_axis(acnh_fx(q), acnh_fx(r), pane, rc[0], rc[1], sx, ox);
-    acnh_axis(acnh_fy(q), acnh_fy(r), pane, rc[2], rc[3], sy, oy);
+    int pane = count == 6 && acnh_pane_shader(vs) && u->size >= 34 * 16 && !pend_hits(u->addr, 34 * 16) && acnh_pane_rect((const float (*)[4])(uintptr_t)u->addr, q, rc);
+    acnh_axis(acnh_fx(q), acnh_fx(r), pane, rc[0], rc[1], rc[2], rc[3], sx, ox);
+    acnh_axis(acnh_fy(q), acnh_fy(r), pane, rc[2], rc[3], rc[0], rc[1], sy, oy);
     if (atomic_load(&g_draw_log) > 0)
-        MLOG("[uw] F%llu acnh ui %.8s q %.4f r %.4f pane %d rect x %.3f..%.3f y %.3f..%.3f -> x %.4f%+.4f y %.4f%+.4f", (unsigned long long)atomic_load(&g_cur_frame),
-             vs ? vs : "-", q, r, pane, rc[0], rc[1], rc[2], rc[3], *sx, *ox, *sy, *oy);
+        MLOG("[uw] F%llu acnh ui %.8s n %u q %.4f r %.4f pane %d rect x %.3f..%.3f y %.3f..%.3f -> x %.4f%+.4f y %.4f%+.4f", (unsigned long long)atomic_load(&g_cur_frame),
+             vs ? vs : "-", count, q, r, pane, rc[0], rc[1], rc[2], rc[3], *sx, *ox, *sy, *oy);
     return !(fabs(*sx - 1) < 1e-4 && fabs(*ox) < 1e-4 && fabs(*sy - 1) < 1e-4 && fabs(*oy) < 1e-4);
 }
 static int ui_mat_ok(void) { const p_bind_buf *u = &S.ubo[0][0]; void *mb; uint64_t mo; return u->addr && u->size >= 64 && u->size <= 4096 && !pend_hits(u->addr, u->size) && mtl_addr(u->addr, u->size, &mb, &mo); }
 static uint64_t ui_mat_patch(const p_bind_buf *u, void *mb, uint64_t mo) {
     enum { RING = 4 << 20 }; static __strong id<MTLBuffer> ring; static uint64_t ring_gpu, la, ls, lp, lg; static size_t at; static double lo;
     if (!ring) { ring = [g_dev newBufferWithLength:RING options:MTLResourceStorageModeShared]; res_add(ring); ring_gpu = ring.gpuAddress; }
-    if (la == u->addr && ls == u->size && lp == g_pass.serial && lo == g_ui_moff) return lg;
+    static int lf; static float lfit[4];
+    if (la == u->addr && ls == u->size && lp == g_pass.serial && lo == g_ui_moff && lf == g_acnh_fit_on && !memcmp(lfit, g_acnh_fit, sizeof lfit)) return lg;
     const uint8_t *src = [(__bridge id<MTLBuffer>)mb contents]; if (!src || u->size < 64 || u->size > 4096) return 0;
     size_t n = (u->size + 255) & ~(size_t)255; if (at + n > RING) at = 0;
     uint8_t *dst = (uint8_t *)ring.contents + at; memcpy(dst, src + mo, u->size);
-    float m[16], o = (float)g_ui_moff; memcpy(m, dst, 64); m[1] += o * m[3]; m[5] += o * m[7]; m[9] += o * m[11]; m[13] += o * m[15]; memcpy(dst, m, 64);
-    la = u->addr; ls = u->size; lp = g_pass.serial; lo = g_ui_moff; lg = ring_gpu + at; at += n;
+    float m[16], o = (float)g_ui_moff; memcpy(m, dst, 64);
+    if (o != 0) { m[1] += o * m[3]; m[5] += o * m[7]; m[9] += o * m[11]; m[13] += o * m[15]; }
+    if (g_acnh_fit_on) for (int c = 0; c < 4; c++) {   /* rows: m[0..3] x, m[4..7] y, m[12..15] w */
+        m[c] = g_acnh_fit[0] * m[c] + g_acnh_fit[1] * m[12 + c]; m[4 + c] = g_acnh_fit[2] * m[4 + c] + g_acnh_fit[3] * m[12 + c];
+    }
+    memcpy(dst, m, 64);
+    la = u->addr; ls = u->size; lp = g_pass.serial; lo = g_ui_moff; lf = g_acnh_fit_on; memcpy(lfit, g_acnh_fit, sizeof lfit); lg = ring_gpu + at; at += n;
     return lg;
 }
 /* TOTK_NAN_TRACE: g_nt_watch is the texture the traced shader read in its watched slot (see nt_watch_after_pass). */
@@ -7021,8 +7058,8 @@ static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, in
             if (!u || !u->addr || !mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) { RED_ONCE(16, "阶段 %d cb%d 没有绑定 uniform 缓冲", nvn_stage, reg); continue; }
             use_rec("buf", u->addr, u->size, 0, NULL);
             uint64_t ren = g_nupd ? upd_shadow(u->addr, u->size) : 0;   // TOTK: renamed inline updates (see upd_shadow)
-            if (ren) { gpu = ren; if (nvn_stage == 0 && reg == 0 && g_ui_moff != 0) RED_ONCE(58, "UI 矩阵修补读的是内存，跳过了含内联更新的 uniform 副本"); }
-            else if (nvn_stage == 0 && reg == 0 && g_ui_moff != 0) { uint64_t pg = ui_mat_patch(u, mb, mo); if (pg) gpu = pg; }
+            if (ren) { gpu = ren; if (nvn_stage == 0 && reg == 0 && (g_ui_moff != 0 || g_acnh_fit_on)) RED_ONCE(58, "UI 矩阵修补读的是内存，跳过了含内联更新的 uniform 副本"); }
+            else if (nvn_stage == 0 && reg == 0 && (g_ui_moff != 0 || g_acnh_fit_on)) { uint64_t pg = ui_mat_patch(u, mb, mo); if (pg) gpu = pg; }
             else { const usnap_t *sc = usnap_find(u->addr, u->size ? u->size : 1); if (sc) gpu = sc->gpu + (u->addr - sc->lo); }   // TOTK: contents as of the submit call
             if (bl) {
                 PD("B %llu st%d cb reg%d addr=%#llx size=%llu pool=%#llx+%#llx f=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr, (unsigned long long)u->size,
@@ -9819,10 +9856,15 @@ frz_plain:;
     double vy = (S.has_vp ? S.vp[0][1] : 0) + vo, vh = (S.has_vp ? S.vp[0][3] : th) * vs;
     if (uy != 1) { vy = cy + (vy - cy) / uy; vh /= uy; }
     double avx = vx, avw = vw, avy = vy, avh = vh;   // ACNH: NDC' = S * NDC + O per axis (Metal: x right, y up; viewport y down)
+    double fvx = vx, fvw = vw, fvy = vy, fvh = vh;   // the fitted viewport the scissor follows
     if (acnh) {
-        vx = avx + (acnh_ox + 1 - acnh_sx) / 2 * avw; vw = acnh_sx * avw;
-        vy = avy + (1 - acnh_oy - acnh_sy) / 2 * avh; vh = acnh_sy * avh;
+        fvx = avx + (acnh_ox + 1 - acnh_sx) / 2 * avw; fvw = acnh_sx * avw;
+        fvy = avy + (1 - acnh_oy - acnh_sy) / 2 * avh; fvh = acnh_sy * avh;
     }
+    int fit_mat = acnh && ui_mat_ok();   /* in the matrix (g_acnh_fit); else the viewport carries it (clipped as drawn) */
+    float fit[4] = {(float)acnh_sx, (float)acnh_ox, (float)acnh_sy, (float)acnh_oy};
+    if (fit_mat != g_acnh_fit_on || (fit_mat && memcmp(fit, g_acnh_fit, sizeof fit))) { g_acnh_fit_on = fit_mat; memcpy(g_acnh_fit, fit, sizeof fit); args_dirty_stage(0); }
+    if (acnh && !fit_mat) { vx = fvx; vw = fvw; vy = fvy; vh = fvh; }
     if ((atomic_load(&g_uw_log) > 0 && uw_on_canvas()) || atomic_load(&g_draw_log) > 0)
         MLOG("[uw] F%llu pass %llu ui %d squeeze %.3f vs %.8s fs %.8s count %u inst %d vp %s%g,%g,%g,%g sc %s%d,%d,%d,%d blend %#x tex %ux%u fmt %#x ser %llu bl %u,%u,%u/%u,%u,%u cm %#x prim %d",
              (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, g_uw_ui, ux, pr && pr->sh[0] ? pr->sh[0]->key : "-", pr && pr->sh[1] ? pr->sh[1]->key : "-",
@@ -9859,9 +9901,12 @@ frz_plain:;
         if (ux != 1) { sx0 = lround(cx + (sx0 - cx) / ux); sx1 = lround(cx + (sx1 - cx) / ux); }
         long x0 = sx0 < 0 ? 0 : sx0, y0 = R.sc.y <= 0 ? 0 : R.sc.y + so, x1 = sx1, y1 = vs != 1 ? (long)th : (long)R.sc.y + R.sc.h + so;
         if (uy != 1) { y0 = lround(cy + (y0 - cy) / uy); y1 = lround(cy + (y1 - cy) / uy); }
-        if (acnh) {   // the scissor moves with the viewport: pixel' = v' + (pixel - v) * (size' / size)
-            x0 = lround(vx + (x0 - avx) * vw / avw); x1 = lround(vx + (x1 - avx) * vw / avw);
-            y0 = lround(vy + (y0 - avy) * vh / avh); y1 = lround(vy + (y1 - avy) * vh / avh);
+        /* the scissor moves with the viewport: pixel' = v' + (pixel - v) * (size' / size); one that covers the whole
+           target stays whole, or the wipe's bands moved beyond the layout would be cut off at its edge */
+        int sc_whole = R.sc.x <= 0 && R.sc.y <= 0 && (long)R.sc.x + R.sc.w >= (long)tw && (long)R.sc.y + R.sc.h >= (long)th;
+        if (acnh && !sc_whole) {
+            x0 = lround(fvx + (x0 - avx) * fvw / avw); x1 = lround(fvx + (x1 - avx) * fvw / avw);
+            y0 = lround(fvy + (y0 - avy) * fvh / avh); y1 = lround(fvy + (y1 - avy) * fvh / avh);
             if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0;
         }
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;

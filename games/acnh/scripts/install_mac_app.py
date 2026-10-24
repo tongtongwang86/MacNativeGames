@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Install a Mac app that runs this checkout's ACNH: ~/Applications/Animal Crossing.app by default.
 
-    python3 scripts/install_mac_app.py [--dest DIR] [--name NAME] [--icloud-container iCloud.<id>] [--profile FILE]
+    python3 scripts/install_mac_app.py [--dest DIR] [--name NAME] [--no-build] [--icloud-container iCloud.<id>] [--profile FILE]
 
-The app holds only a launcher and the icon; the game stays in this folder (games/acnh: build/acnh-native, rewritten/,
-extracted/, tooling/, user-data/), so build it first (make build/acnh-native, make icon, scripts/speedfix.py for 60 FPS).
-The launcher changes to this folder, sets what make boot sets (GPU submission flags), names the iCloud container
+It first builds what the game needs (make build/acnh-native romfs-coop shader-tools, and icon when tooling/AppIcon.icon
+is there; --no-build skips that; scripts/speedfix.py for 60 FPS stays a separate step). The app holds the launcher, the
+icon and its own copy of the game (Contents/MacOS/acnh-native), so rebuilding in this folder does not change the
+installed app until it is installed again; the game's data stays in this folder (games/acnh: rewritten/, extracted/,
+tooling/, the shader tools and caches and the local play overlay in build/, and the saves in user-data/).
+The launcher changes to this folder, sets what make boot sets (GPU submission flags), turns on local play's shared
+editing (ACNH_MP_EDIT: every group, with build/romfs-coop's scripts) unless the environment sets it, names the iCloud container
 SaveSync should use when given (SAVESYNC_CONTAINER: on a Mac that has not seen the container yet this creates it, so
 the Mac's saves go up first), logs to ~/Library/Logs/MacNativeGames/acnh.log (acnh.previous.log: the run before), and
 replaces itself with the game (exec: the same process, so the Dock keeps the app's name and icon).
@@ -45,12 +49,16 @@ int main(void) {
         int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
     }
+    setenv("ACNH_MP_EDIT", MP_EDIT, 0);   /* local play: the visitor may do what the host does (docs/LAN-COOP-DESIGN.md) */
     char *argv[] = {"acnh-native", "rewritten", "boot", NULL};
-    execv("build/acnh-native", argv);
-    fprintf(stderr, "ACNH: cannot start build/acnh-native: %s\n", strerror(errno));
+    execv(GAME_BIN, argv);
+    fprintf(stderr, "ACNH: cannot start %s: %s\n", GAME_BIN, strerror(errno));
     return 1;
 }
 '''
+
+
+MP_EDIT = 'furniture,visitor-grab,museum,visitor-turn,push-anim,house,decor-sync,nook,mail,hotel'
 
 
 def c_string(s): return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
@@ -81,9 +89,13 @@ def main():
     p.add_argument('--icloud-container', default='', help='e.g. iCloud.com.example.save (the one the iPhone / iPad app is signed with)')
     p.add_argument('--profile', type=Path, help='Mac provisioning profile with the container: the app is signed with it')
     p.add_argument('--sign', default='Apple Development', help='signing identity used with --profile')
+    p.add_argument('--no-build', action='store_true', help='install what build/ already has')
     a = p.parse_args()
+    if not a.no_build:
+        targets = ['build/acnh-native', 'romfs-coop', 'shader-tools'] + (['icon'] if (GAME / 'tooling/AppIcon.icon').exists() else [])
+        subprocess.run(['make', '-C', str(GAME)] + targets, check=True)
     bundle_id, entitlements = signing(a.profile, a.icloud_container) if a.profile else ('org.macnativegames.acnh', None)
-    for need in ('build/acnh-native', 'rewritten', 'extracted/romfs'):
+    for need in ('build/acnh-native', 'rewritten', 'extracted/romfs', 'build/romfs-coop'):
         if not (GAME / need).exists(): raise SystemExit(f'missing {GAME / need}: build the game first (README "Use")')
     icns = GAME / 'build/AppIcon.icns'
     app = a.dest / f'{a.name}.app'
@@ -102,7 +114,11 @@ def main():
         subprocess.run(['xcrun', 'clang', '-O2', '-Wall', '-Werror', f'-DGAME_DIR={c_string(str(GAME))}',
                         f'-DICLOUD_CONTAINER={c_string(a.icloud_container)}',
                         f'-DICON_PATH={c_string(str(app / "Contents/Resources/AppIcon.icns"))}',
+                        f'-DGAME_BIN={c_string(str(app / "Contents/MacOS/acnh-native"))}', f'-DMP_EDIT={c_string(MP_EDIT)}',
                         str(src), '-o', str(tmp / 'Contents/MacOS/ACNH')], check=True)
+    shutil.copy2(GAME / 'build/acnh-native', tmp / 'Contents/MacOS/acnh-native')   # the game itself, signed with the app below
+    subprocess.run(['codesign', '--force', '--sign', a.sign if entitlements else '-', str(tmp / 'Contents/MacOS/acnh-native')],
+                   check=True, capture_output=True)
     if entitlements:
         shutil.copy2(a.profile, tmp / 'Contents/embedded.provisionprofile')
         with tempfile.NamedTemporaryFile(suffix='.entitlements') as f:

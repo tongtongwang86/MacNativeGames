@@ -255,6 +255,8 @@ static void *input_file(void *arg) {
             extern void coop_flow_test(const char *flow_entry); line[strcspn(line, "\r\n")] = 0; coop_flow_test(line + 10);
         } else if (!strcmp(line, "coop visit\n") || !strcmp(line, "coop host\n") || !strcmp(line, "coop test\n") || !strcmp(line, "coop leave\n") || !strcmp(line, "coop stop\n")) {   /* Local play without the airport (coop_flow.c) */
             extern void coop_flow_request(int what); coop_flow_request(line[5] == 'v' ? 1 : line[5] == 'h' ? 2 : line[5] == 'l' ? 4 : line[5] == 's' ? 5 : 3);
+        } else if (sscanf(line, "wsize %ux%u", &code, &ms) == 2 && code >= 320 && ms >= 180) {   /* "wsize <w>x<h>": resize the window */
+            extern void runtime_front_set_size(int w, int h); runtime_front_set_size((int)code, (int)ms);
         } else if (!strcmp(line, "close\n")) { runtime_front_request_close(); break; }
         else runtime_fail("invalid diagnostic input command");
     }
