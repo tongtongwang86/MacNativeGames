@@ -238,7 +238,7 @@ static void *host_main(void *arg) {
         }
         if (p[2].revents & POLLIN) accept_station(tcp);
         for (int i = 3; i < np; i++) if (p[i].revents) {
-            int k = k2fd[i - 3]; uint8_t type; uint32_t n; uint8_t body[32];
+            int k = k2fd[i - 3]; uint8_t type; uint32_t n; static uint8_t body[COOP_EDIT_MAX];   /* the network thread's only */
             pthread_mutex_lock(&lock);
             if (members[k].fd == p[i].fd) {
                 int node = members[k].node;
@@ -404,7 +404,7 @@ void coop_browser_refresh(void) { pthread_t t; if (!pthread_create(&t, NULL, ref
 /* ---------- station ---------- */
 static void *station_main(void *arg) {
     int fd = (int)(intptr_t)arg;
-    static uint8_t body[sizeof(LdnNetworkInfo) + 64];
+    static uint8_t body[sizeof(LdnNetworkInfo) + 64 > COOP_EDIT_MAX ? sizeof(LdnNetworkInfo) + 64 : COOP_EDIT_MAX];
     for (;;) {
         uint8_t type; uint32_t n;
         if (recv_msg(fd, &type, body, sizeof body, &n)) break;

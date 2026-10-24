@@ -399,6 +399,10 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
        (company) on the host with 2 or more players, else 1123 ("the airport gate is open"). The offline checks now run
        in a session too, and the visitor's order goes to the host's copy (order_install, coop_edit.c). */
     {0x2b757b4, 0x54000aa3, 0x14000055, "mail"},   /* b.lo 0x2b75908 (no session: offline checks) -> b */
+    /* The mailbox's A press: its action component asks vtable +0x328 = main+0x1352130 "is this player the post's
+       owner" (resident slot main+0x24819f0, then its id == component+0x588) before any state or script runs; a player
+       with no resident slot (a visitor) gets 0 at main+0x135219c. Residents still go through the owner compare. */
+    {0x135219c, 0x2a1f03e0, 0x52800020, "mail"},   /* mov w0, wzr (no resident slot: not the owner) -> mov w0, #1 */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
@@ -586,6 +590,33 @@ static void order_install(Module *m, uint64_t s, uint64_t data_off) {
     uint32_t bl = aspect_branch(ORDER_SITE, s) + 0x80000000u; memcpy(m->base + ORDER_SITE, &bl, 4);
     fprintf(stderr, "[acnh] local play editing: a visitor's Nook Shopping orders go to the host's mailbox\n");
 }
+
+/* The host's mailbox for a visitor (group "mail"): main+0x25f2a00(save) picks the postbox every mail user reads (the
+   local player's). Its first instruction branches to coop_postbox (coop_edit.c), which calls the original through
+   the trampoline after the stub (the displaced instruction, then b main+0x25f2a04) and may return the host's postbox
+   instead. Stub: adrp x16, <data>; ldr x16, [x16, #POSTBOX_HOOK]; br x16; trampoline: stp x29, x30, [sp, #-0x20]!;
+   b main+0x25f2a04. */
+#define POSTBOX_SITE 0x25f2a00u
+#define POSTBOX_WORD 0xa9be7bfdu   /* stp x29, x30, [sp, #-0x20]! */
+#define POSTBOX_STUB (ORDER_STUB + 16)
+#define POSTBOX_HOOK 0x330
+uint64_t coop_postbox_original;   /* coop_edit.c calls the original through this */
+static void postbox_install(Module *m, uint64_t s, uint64_t data_off) {
+    const char *e = getenv("ACNH_MP_EDIT");
+    if (!e || (strcmp(e, "full") && !strstr(e, "mail"))) return;
+    uint32_t w; memcpy(&w, m->base + POSTBOX_SITE, 4);
+    if (w != POSTBOX_WORD) runtime_fail("ACNH_MP_EDIT mail: the postbox accessor differs (another game version?)");
+    if (s + 32 > m->ro_off) runtime_fail("ACNH_MP_EDIT mail: no room in main's text padding");
+    for (unsigned b = 0; b < 32; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT mail: text padding in use");
+    if (data_off + POSTBOX_HOOK + 8 > m->size) runtime_fail("ACNH_MP_EDIT mail: no data page after main");
+    *(uint64_t *)(void *)(m->base + data_off + POSTBOX_HOOK) = (uint64_t)(uintptr_t)coop_postbox;
+    uint32_t stub[5] = {(adrp_x10(s, data_off) & ~31u) | 16, 0xf9400000u | (POSTBOX_HOOK / 8) << 10 | 16 << 5 | 16, 0xd61f0200u,
+                        POSTBOX_WORD, aspect_branch(s + 16, POSTBOX_SITE + 4)};
+    memcpy(m->base + s, stub, sizeof stub);
+    coop_postbox_original = (uint64_t)(uintptr_t)(m->base + s + 12);
+    uint32_t b = aspect_branch(POSTBOX_SITE, s); memcpy(m->base + POSTBOX_SITE, &b, 4);
+    fprintf(stderr, "[acnh] local play editing: a visitor opens the host's mailbox\n");
+}
 #endif
 
 void runtime_game_patches(Module *m) {
@@ -607,6 +638,7 @@ void runtime_game_patches(Module *m) {
     push_install(m, ASPECT_STUBS_END(m) + PUSH_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
     decor_install(m, ASPECT_STUBS_END(m) + DECOR_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
     order_install(m, ASPECT_STUBS_END(m) + ORDER_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
+    postbox_install(m, ASPECT_STUBS_END(m) + POSTBOX_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
 #endif
 }
 

@@ -25,7 +25,7 @@
 #define MUSEUM_RECORD 0x26bdd90
 #define DONOR_SLOT 0x24819f0
 #define MUSEUM_SIZE 0x3404
-enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2, EDIT_ORDER = 3 };
+enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2, EDIT_ORDER = 3, EDIT_POSTBOX = 5, EDIT_LETTERS = 6 };
 typedef struct __attribute__((packed)) { uint8_t kind, pad[7]; uint64_t item; } EditBody;
 _Static_assert(sizeof(EditBody) == 16, "edit body");
 /* One decorating-mode change of a room tile: op 1 clears the tile, 5 puts the record there (the furniture ops' codes) */
@@ -40,7 +40,9 @@ void coop_edit_set_queue(volatile uint32_t *s, volatile uint64_t *q) { slots = s
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static EditBody pending[32]; static int npending;
 static void room_received(int node, const RoomEdit *e);
+static void post_received(int node, const uint8_t *body, uint32_t n);
 void coop_edit_received(int node, const void *body, uint32_t n) {
+    if (n >= 8 && (*(const uint8_t *)body == EDIT_POSTBOX || *(const uint8_t *)body == EDIT_LETTERS)) { post_received(node, body, n); return; }
     if (n == sizeof(RoomEdit) && *(const uint8_t *)body == EDIT_ROOM) { room_received(node, body); return; }
     if (n != sizeof(EditBody)) { fprintf(stderr, "[coop] edit from node %d: %u bytes, ignored\n", node, n); return; }
     pthread_mutex_lock(&lock);
@@ -113,11 +115,129 @@ static void host_order(uint8_t *main, uint64_t item) {
                        : "[coop] order: the host's 5 order slots are full, a visitor's order %#llx is lost\n", (unsigned long long)item);
 }
 
+/* The host's mailbox for a visitor (group "mail"; LAN-COOP-DESIGN.md 8.21). Mail is a save file of its own per player
+   (postbox.dat, 0x47430 bytes: 300 letters of 0x3c8 bytes at +0x110, u32 display order[300] at +0x46f70, a free
+   index at +0x4741c), and the mailbox screen shows the postbox main+0x25f2a00(save) picks: the local player's. So:
+     host     sends its postbox to the visitors whenever it changes (EDIT kind 5), and writes the letters a visitor
+              changed (kind 6) into its own, with the save's change notice (*(*(h+0x28)+0x20), vtable +0x20) and the
+              game's recount main+0x2726200(data, &player)
+     visitor  keeps that copy; while it has one, main+0x25f2a00 returns a handle on it (coop_postbox), so the mailbox
+              screen and the letter actions (read, take the item into her own pockets, delete) work on the host's
+              letters; every half second the letters that differ from what the host sent go back to the host.
+   A handle h: data = *(h+0x10) + *(h+8); +0x28 the change notice (0: none). */
+#define POSTBOX_SIZE 0x47430
+#define POST_LETTERS 0x110
+#define POST_LETTER 0x3c8
+#define POST_ORDER 0x46f70
+#define POST_FREE 0x4741c
+#define POST_RECOUNT 0x2726200
+extern uint64_t coop_postbox_original;
+typedef uint64_t (*postbox_fn)(void *);
+static uint8_t *post_shadow, *post_base;   /* visitor: the host's postbox as edited here / as last sent by the host */
+static int post_valid;
+static uint64_t post_handle[8];
+static uint8_t *post_in; static uint32_t post_in_n;   /* visitor: the latest kind 5 from the network thread */
+static uint8_t *letters_in[16]; static uint32_t letters_in_n[16]; static int nletters_in;   /* host: kind 6 */
+
+static uint8_t *save_root(uint8_t *main) {
+    uint64_t slot; memcpy(&slot, main + SAVE_ROOT_SLOT, 8);
+    return slot ? *(uint8_t **)(uintptr_t)slot : NULL;
+}
+static uint8_t *postbox_data(uint64_t h) { return h ? *(uint8_t **)(uintptr_t)(h + 0x10) + *(uint64_t *)(uintptr_t)(h + 8) : NULL; }
+uint64_t coop_postbox(void *save) {
+    uint64_t r = coop_postbox_original ? ((postbox_fn)(uintptr_t)coop_postbox_original)(save) : 0;
+    if (!post_valid) return r;
+    static int said; if (!said++) fprintf(stderr, "[coop] mail: the mailbox shows the host's letters (own postbox here: %s)\n", r ? "yes" : "none");
+    post_handle[1] = 0; post_handle[2] = (uint64_t)(uintptr_t)post_shadow; post_handle[5] = 0;
+    return (uint64_t)(uintptr_t)post_handle;
+}
+static void post_received(int node, const uint8_t *body, uint32_t n) {   /* network thread */
+    uint8_t *copy = malloc(n); if (!copy) return;
+    memcpy(copy, body, n);
+    pthread_mutex_lock(&lock);
+    if (body[0] == EDIT_POSTBOX) { if (n == 8 + POSTBOX_SIZE) { free(post_in); post_in = copy; post_in_n = n; copy = NULL; } }
+    else if (nletters_in < 16) { letters_in[nletters_in] = copy; letters_in_n[nletters_in++] = n; copy = NULL; }
+    pthread_mutex_unlock(&lock);
+    if (copy) { fprintf(stderr, "[coop] mail: message kind %u from node %d (%u bytes) dropped\n", body[0], node, n); free(copy); }
+}
+static uint64_t fnv(const uint8_t *p, size_t n) { uint64_t h = 1469598103934665603ull; while (n--) h = (h ^ *p++) * 1099511628211ull; return h; }
+static void host_post_notify(uint64_t h) {
+    uint8_t *n = *(uint8_t **)(uintptr_t)(h + 0x28); void *obj = n ? *(void **)(n + 0x20) : NULL;
+    if (!obj) return;
+    struct { uint64_t off; void *base; uint64_t size; } change = {*(uint64_t *)(uintptr_t)(h + 8), *(void **)(uintptr_t)(h + 0x10), POSTBOX_SIZE};
+    ((void (*)(void *, void *))(*(void ***)obj)[0x20 / 8])(obj, &change);
+}
+static void post_host_tick(uint8_t *main) {
+    uint8_t *root = save_root(main);
+    uint64_t h = root && coop_postbox_original ? ((postbox_fn)(uintptr_t)coop_postbox_original)(root) : 0;
+    uint8_t *data = postbox_data(h);
+    uint8_t *in[16]; uint32_t inn[16]; int n;
+    pthread_mutex_lock(&lock); n = nletters_in; memcpy(in, letters_in, sizeof *in * (size_t)n); memcpy(inn, letters_in_n, sizeof *inn * (size_t)n); nletters_in = 0; pthread_mutex_unlock(&lock);
+    for (int i = 0; i < n; i++) {   /* {u8 6, u8 has order, u16 count, u32 free index} [order u32[300]] count x {u16 index, u16 0, letter} */
+        const uint8_t *b = in[i]; uint32_t len = inn[i], at = 8; uint16_t count; memcpy(&count, b + 2, 2);
+        if (data) {
+            host_post_notify(h);
+            if (b[1] && at + 300 * 4 <= len) { memcpy(data + POST_ORDER, b + at, 300 * 4); memcpy(data + POST_FREE, b + 4, 4); at += 300 * 4; }
+            for (unsigned k = 0; k < count && at + 4 + POST_LETTER <= len; k++, at += 4 + POST_LETTER) {
+                uint16_t idx; memcpy(&idx, b + at, 2);
+                if (idx < 300) memcpy(data + POST_LETTERS + (size_t)idx * POST_LETTER, b + at + 4, POST_LETTER);
+            }
+            uint8_t host = 0;
+            ((void (*)(void *, void *))(uintptr_t)(main + POST_RECOUNT))(data, &host);
+            fprintf(stderr, "[coop] mail: a visitor changed %u letter(s) in the host's mailbox%s\n", count, b[1] ? " (and their order)" : "");
+        }
+        free(in[i]);
+    }
+    static unsigned frames; static uint64_t last; static int last_visitors;
+    if (frames++ % 30 || !data) return;
+    int visitors = coop_lan_host_visitors(0);
+    if (!visitors) { last_visitors = 0; return; }
+    uint64_t sum = fnv(data, POSTBOX_SIZE);
+    if (sum == last && visitors == last_visitors) return;
+    static uint8_t msg[8 + POSTBOX_SIZE];
+    msg[0] = EDIT_POSTBOX; memcpy(msg + 8, data, POSTBOX_SIZE);
+    coop_lan_broadcast_edit(msg, sizeof msg, -1);
+    last = sum; last_visitors = visitors;
+}
+static void post_visitor_send(void) {   /* the letters this copy changed since the host's last copy */
+    static uint8_t msg[8 + 300 * 4 + 300 * (4 + POST_LETTER)];
+    uint32_t at = 8; uint16_t count = 0;
+    int order = memcmp(post_shadow + POST_ORDER, post_base + POST_ORDER, 300 * 4) || memcmp(post_shadow + POST_FREE, post_base + POST_FREE, 4);
+    if (order) { memcpy(msg + at, post_shadow + POST_ORDER, 300 * 4); at += 300 * 4; }
+    for (uint16_t i = 0; i < 300; i++) {
+        const uint8_t *a = post_shadow + POST_LETTERS + (size_t)i * POST_LETTER, *b = post_base + POST_LETTERS + (size_t)i * POST_LETTER;
+        if (!memcmp(a, b, POST_LETTER)) continue;
+        memcpy(msg + at, &i, 2); memset(msg + at + 2, 0, 2); memcpy(msg + at + 4, a, POST_LETTER); at += 4 + POST_LETTER; count++;
+    }
+    if (!count && !order) return;
+    msg[0] = EDIT_LETTERS; msg[1] = (uint8_t)order; memcpy(msg + 2, &count, 2); memcpy(msg + 4, post_shadow + POST_FREE, 4);
+    if (coop_lan_send_edit(msg, at)) { fprintf(stderr, "[coop] mail: could not send %u changed letter(s) to the host\n", count); return; }
+    memcpy(post_base, post_shadow, POSTBOX_SIZE);
+    fprintf(stderr, "[coop] mail: sent %u changed letter(s) to the host\n", count);
+}
+static void post_visitor_tick(int self) {
+    if (self <= 0) { post_valid = 0; return; }
+    static unsigned frames;
+    if (post_valid && frames++ % 15 == 0) post_visitor_send();
+    uint8_t *in = NULL;
+    pthread_mutex_lock(&lock); in = post_in; post_in = NULL; pthread_mutex_unlock(&lock);
+    if (!in) return;
+    if (!post_shadow) { post_shadow = malloc(POSTBOX_SIZE); post_base = malloc(POSTBOX_SIZE); }
+    if (post_shadow && post_base) {
+        if (post_valid) post_visitor_send();
+        memcpy(post_shadow, in + 8, POSTBOX_SIZE); memcpy(post_base, in + 8, POSTBOX_SIZE);
+        if (!post_valid) fprintf(stderr, "[coop] mail: have the host's mailbox\n");
+        post_valid = 1;
+    }
+    free(in);
+}
+
 static void room_tick(uint8_t *main, int self);
 void coop_edit_tick(void) {
     uint8_t *main = runtime_module_base("main");
     int self = coop_lan_self_node();
     room_tick(main, self);
+    if (self == 0) post_host_tick(main); else post_visitor_tick(self);
     if (self <= 0) {
         if (slots) { slots[0] = 0; ring_tail = slots[1]; }
         if (self == 0) {

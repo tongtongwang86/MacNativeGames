@@ -282,6 +282,23 @@ def main():
         patched_nook.add(flow)
         redirect_case(raw, flow, event, query, case, to)
         out.write_bytes(raw)
+    # The host's mailbox for a visitor (mail/, ACNH_MP_EDIT "mail"; LAN-COOP-DESIGN.md 8.21): Ftr_MailBox goes on only
+    # for the post's owner (IsMyPost 0) on her own island (IsMyVillage 0); other answers have no case and end the script
+    box = evfl.EventFlow()
+    box.read((a.romfs / 'EventFlow/Ftr_MailBox.bfevfl').read_bytes())
+    for event, query in (('Event6', 'EventFlowQueryIsMyPost'), ('Event5', 'EventFlowQueryIsMyVillage')):
+        sw = [e for e in box.flowchart.events if e.name == event]
+        assert len(sw) == 1 and sw[0].data.actor_query.v.v == query and set(sw[0].data.cases) == {0}, f'Ftr_MailBox: {event} changed'
+        sw[0].data.cases[1] = sw[0].data.cases[0]
+    (a.out / 'mail/EventFlow').mkdir(parents=True, exist_ok=True)
+    with open(a.out / 'mail/EventFlow/Ftr_MailBox.bfevfl', 'wb') as f:
+        box.write(f)
+    check = evfl.EventFlow()
+    check.read((a.out / 'mail/EventFlow/Ftr_MailBox.bfevfl').read_bytes())
+    for event in ('Event6', 'Event5'):
+        sw = [e for e in check.flowchart.events if e.name == event][0].data
+        assert sw.cases[1].v is sw.cases[0].v, event
+    print('Ftr_MailBox: a visitor at another player\'s post goes on to the mailbox screen')
     info_path = a.romfs / 'EventFlow/Info/EventFlowInfoProduct.byml'
     raw = info_path.read_bytes()
     info = byml.Byml(raw).parse()

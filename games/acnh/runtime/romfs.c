@@ -125,10 +125,11 @@ unsigned runtime_romfs_open(uint64_t *out, const char *path, int mode) {
          museum/   the visitor-donation scripts ("museum", coop_edit.c), only with the patch that sends the donation to
                    the host; without it a visitor's donation would record nothing
          nook/     Tom Nook and the Nook Stop terminal serve a visitor as a resident, and Tom Nook serves the host while
-                   someone visits ("nook") */
-    static const char *const groups[][2] = {{"museum", "museum/"}, {"nook", "nook/"}};
-    static int on[2] = {-1, -1};
-    for (unsigned g = 0; g < 2 && fd < 0; g++) {
+                   someone visits ("nook")
+         mail/     the host's mailbox opens for a visitor ("mail", coop_edit.c shows her the host's letters) */
+    static const char *const groups[][2] = {{"museum", "museum/"}, {"nook", "nook/"}, {"mail", "mail/"}};
+    static int on[3] = {-1, -1, -1};
+    for (unsigned g = 0; g < 3 && fd < 0; g++) {
         if (on[g] < 0) { const char *e = getenv("ACNH_MP_EDIT"); on[g] = e && (!strcmp(e, "full") || strstr(e, groups[g][0])); }
         if (!on[g] || m != &rmounts[0] || coop_fd < 0) continue;
         char mp[600]; snprintf(mp, sizeof mp, "%s%s", groups[g][1], p);

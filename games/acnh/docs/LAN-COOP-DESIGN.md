@@ -911,3 +911,29 @@ Group `mail`. Tested by the user: both players order; the visitor's order is rec
   the host (EDIT kind 3), whose copy records it for the host player with today's date (`**(main+0x4ab2278) + 0x4060`).
   It arrives in the host's mailbox the next day. The host's 5 slots count both players' orders; when they are full the
   order is lost (logged), her Bells still spent.
+
+### 8.21 The visitor opens the host's mailbox (2026-10-23): works
+
+Group `mail`. Tested by the user: the visitor opens the host's mailbox, reads the host's letters and takes their
+presents; the host's copy keeps the change.
+
+- **The A press.** The mailbox's action component asks its vtable +0x328 = main+0x1352130 "is this player the post's
+  owner" (resident slot main+0x24819f0, then the id against component+0x588) before any player state
+  (cFtrMailboxStart, 0-based 0xd5) or script runs. A player with no resident slot got 0 at main+0x135219c; patch
+  `mov w0, wzr` → `mov w0, #1`. Residents still go through the owner compare.
+- **The script.** Ftr_MailBox goes on only for the post's owner (IsMyPost 0) on her own island (IsMyVillage 0); the
+  overlay (build/romfs-coop/mail/, served with the group) adds case 1 to both, to the same events.
+- **Whose letters.** Mail is a save file per player (postbox.dat, ::Game::SavePostBox, 0x47430 bytes: 300 letters of
+  0x3c8 bytes at +0x110, u32 display order[300] at +0x46f70, free index at +0x4741c; a letter: +0 state, +0xc0 the
+  present). main+0x25f2a00(save) picks the postbox every mail user reads: the local player's.
+  - The host's copy sends its postbox to the visitors every second it has changed (EDIT kind 5).
+  - On the visitor's copy, a stub on main+0x25f2a00 (coop_postbox, with a trampoline to the original) returns a handle
+    on that copy while it has one, so the mailbox screen and the letter actions (main+0x3098f84 read, main+0x3099304
+    take the present into her own pockets, main+0x30995e4 delete) work on the host's letters.
+  - Every half second the visitor sends the letters that differ from the host's last copy (EDIT kind 6); the host writes
+    them into its postbox, with the save's change notice (`*(*(h+0x28)+0x20)`, vtable +0x20) and the recount
+    main+0x2726200(data, &host).
+  - LAN messages may now be 0x50000 bytes (COOP_EDIT_MAX).
+- **Known limits.** The redirect holds for the whole visit, not only while the mailbox screen is open: the visitor's
+  own postbox (it is loaded on her copy) is not used meanwhile, so mail the game gives her during a visit lands in the
+  host's mailbox. With both players in the mailbox at once the last change wins.
