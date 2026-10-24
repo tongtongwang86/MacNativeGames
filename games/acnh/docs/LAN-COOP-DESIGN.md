@@ -980,8 +980,12 @@ IsMyVillage 1 (a visitor) goes the resident's way.
   multiplayer manager (main+0x1c60ea8) when hosting starts. So in a session slot 1 is gone. The job's end now returns
   early from main+0x3675e00 when slot 1 is not ready (main+0x3675e54 `b.ne` to the epilogue), in place of skipping the
   whole step.
-- **Still missing: the hotel catalog in a session.** The decorating catalog comes from the Happy Home Paradise save
-  (slot 1); in a session both players see their own storage instead. Mounting slot 1 the game's way frees slot 0, the
-  visitors' data.
+- **The host's hotel catalog in a session** (tested). The decorating catalog comes from slot 1 (the HHP save); mounting
+  it the game's way frees slot 0, the visitors' data. When the host's job prepares the room (coop_hotel_go), coop_edit.c
+  creates slot 1 beside slot 0: main+0x25fcd40(root) with the allocator at root +8 swapped for one of ours during the
+  call (the object keeps it for its free), status bits 2|4, then main+0x25f10d0(root, resident slot, 1), the fresh set-up
+  the game gives a player with no HHP file (the test host has none). Queuing the file load (save request 7 through
+  main+0x273bd04) blocked the game thread in a session wherever it was called, so a save with HHP progress would show
+  an empty HHP part. The visitor still sees her own storage.
 - **Not done: the rooms.** Choosing a room in System_HotelRoomVisit ends the session (Event42
   NetEndSessionVillage) before the room scene loads; the corridor's ProhibitEnter messages are left as they are.

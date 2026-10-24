@@ -251,8 +251,12 @@ static void post_visitor_tick(int self) {
    the overlay's Coop_LocalHotel stage changes (into the room / back to the lobby). */
 #define HOTEL_MANAGER 0x5139df0
 #define HOTEL_PREPARE 0x15bf0b0
+static void hhp_mount(uint8_t *main);
 static int hotel_following;
 void coop_hotel_go(uint8_t *manager) {
+    /* the HHP save (the decorating catalog) for a session: requesting its load from the controller read blocked the
+       game thread; here, in the job's own update, the game requests saves the same way */
+    if (!hotel_following && coop_lan_self_node() >= 0) hhp_mount(runtime_module_base("main"));
     if (hotel_following || coop_lan_self_node() != 0 || !manager || !coop_lan_host_visitors(0)) return;
     EditBody e = {.kind = EDIT_HOTEL_GO, .item = (uint64_t)manager[8] | (uint64_t)*(uint32_t *)(manager + 0xc) << 32};
     coop_lan_broadcast_edit(&e, sizeof e, -1);
@@ -279,6 +283,47 @@ static void hotel_visitor(uint8_t *main, const EditBody *e) {
         coop_flow_test("Coop_LocalHotel:Coop_HotelBack");
         fprintf(stderr, "[coop] hotel: back to the lobby with the host\n");
     }
+}
+
+/* The Happy Home Paradise save in a session (group "hotel"; LAN-COOP-DESIGN.md 8.22). The hotel's decorating catalog
+   comes from save slot 1, the player's HHP save (status save root +0x50d, object *(root+0x10)+0x188). Slot 1 and slot 0
+   (the other players' data, which hosting needs) share one buffer, so a session runs without slot 1. Here slot 1 is
+   created beside slot 0 in memory of its own: the game's creation main+0x25fcd40(root) allocates through the allocator
+   at root +8 and keeps it in the object for the later free, so that allocator is swapped for ours during the call
+   (vtable +0x30 = alloc(self, size, align); every other slot a no-op). Then, as the game's remount main+0x7202xx does:
+   bind it to the player's resident slot (main+0x25f10d0(root, slot, 0)) and queue save request 7 for that slot on the
+   save processor *(main+0x54a0b58) (main+0x273bd04), which loads the file asynchronously. */
+static void *hhp_alloc(void *self, uint64_t size, uint64_t align) {
+    (void)self; void *p = NULL;
+    if (align < 16) align = 16;
+    if (posix_memalign(&p, (size_t)align, (size_t)size)) return NULL;
+    memset(p, 0, (size_t)size); return p;
+}
+static uint64_t hhp_nothing(void) { return 0; }
+static void *hhp_vtable[64];
+static struct { void **vtable; uint8_t rest[0x200]; } hhp_heap;
+static volatile int hhp_wanted;
+void coop_hhp_request(void) { hhp_wanted = 1; fprintf(stderr, "[coop] hhp: requested, done at the next decorating job\n"); }   /* input.c "coop hhp" (any thread) */
+static void hhp_mount(uint8_t *main) {
+    uint8_t *root = save_root(main);
+    if (!root) { fprintf(stderr, "[coop] hhp: no save root\n"); return; }
+    if ((root[0x50d] & 6) == 6) { fprintf(stderr, "[coop] hhp: slot 1 is already loaded\n"); return; }
+    for (int i = 0; i < 64; i++) hhp_vtable[i] = (void *)hhp_nothing;
+    hhp_vtable[0x30 / 8] = (void *)hhp_alloc; hhp_heap.vtable = hhp_vtable;
+    void *heap = *(void **)(root + 8);
+    *(void **)(root + 8) = &hhp_heap;
+    int ok = (int)(((uint64_t (*)(void *))(uintptr_t)(main + 0x25fcd40))(root) & 1);
+    *(void **)(root + 8) = heap;
+    if (!ok) { fprintf(stderr, "[coop] hhp: creating slot 1 failed\n"); return; }
+    root[0x50d] |= 2 | 4;
+    uint64_t player = (uint64_t)(coop_lan_self_node() > 0 ? coop_lan_self_node() : 0);
+    int slot = ((int (*)(void *))(uintptr_t)(main + DONOR_SLOT))(&player);
+    if (slot < 0) { fprintf(stderr, "[coop] hhp: slot 1 created, but player %llu is not a resident here: nothing to load\n", (unsigned long long)player); return; }
+    /* set up fresh, as the game does for a player whose HHP data was never started (the test host has no HHP file);
+       queuing the file load (save request 7, main+0x273bd04) blocked the game thread in a session from both the
+       controller read and the job's own update: the save processor holds requests while local play runs */
+    ((void (*)(void *, uint32_t, int))(uintptr_t)(main + 0x25f10d0))(root, (uint32_t)slot, 1);
+    fprintf(stderr, "[coop] hhp: slot 1 created in separate memory and set up for resident %d (status %#x)\n", slot, root[0x50d]);
 }
 
 static void room_tick(uint8_t *main, int self);
