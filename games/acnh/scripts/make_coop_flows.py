@@ -325,6 +325,20 @@ def main():
         patched_hotel.add(flow)
         redirect_case(raw, flow, event, query, case, to)
         out.write_bytes(raw)
+    # Room visits upstairs with company (hotel/): the room menu's "go" first ends the session (Event42
+    # NetEndSessionVillage), then changes scene; with company it goes straight to the scene change (Event16)
+    visit = evfl.EventFlow()
+    visit.read((a.romfs / 'EventFlow/System_HotelRoomVisit.bfevfl').read_bytes())
+    ev = {e.name: e for e in visit.flowchart.events}
+    assert ev['Event3'].data.cases[0].v is ev['Event42'] and ev['Event42'].data.nxt.v is ev['Event16'], 'System_HotelRoomVisit changed'
+    ev['Event3'].data.cases[0] = make_rindex(ev['Event16'])
+    (a.out / 'hotel/EventFlow').mkdir(parents=True, exist_ok=True)
+    with open(a.out / 'hotel/EventFlow/System_HotelRoomVisit.bfevfl', 'wb') as f:
+        visit.write(f)
+    check = evfl.EventFlow()
+    check.read((a.out / 'hotel/EventFlow/System_HotelRoomVisit.bfevfl').read_bytes())
+    assert [e for e in check.flowchart.events if e.name == 'Event3'][0].data.cases[0].v.name == 'Event16'
+    print('System_HotelRoomVisit: a room visit keeps the session (no NetEndSessionVillage)')
     # The host's mailbox for a visitor (mail/, ACNH_MP_EDIT "mail"; LAN-COOP-DESIGN.md 8.21): Ftr_MailBox goes on only
     # for the post's owner (IsMyPost 0) on her own island (IsMyVillage 0); other answers have no case and end the script
     box = evfl.EventFlow()

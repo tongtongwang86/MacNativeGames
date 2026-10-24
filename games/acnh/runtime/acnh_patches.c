@@ -403,6 +403,16 @@ static const struct { uint64_t off; uint32_t original, patched; const char *grou
        owner" (resident slot main+0x24819f0, then its id == component+0x588) before any state or script runs; a player
        with no resident slot (a visitor) gets 0 at main+0x135219c. Residents still go through the owner compare. */
     {0x135219c, 0x2a1f03e0, 0x52800020, "mail"},   /* mov w0, wzr (no resident slot: not the owner) -> mov w0, #1 */
+    /* The hotel (group "hotel"; LAN-COOP-DESIGN.md 8.22). The lobby stairs (main+0x221a7f0, map 0x3ee08254) let a player
+       up only when main+0x1cbec9c(session) is false and the session has fewer than 2 players, then if the island flag
+       HotelIsCompletedEditTutorialAnyone is set; otherwise System_HotelRoomVisit ProhibitEnter ("I shouldn't enter
+       without permission" / "I should be socializing"). Both company checks are dropped. */
+    {0x221b028, 0x370001a0, 0xd503201f, "hotel"},  /* tbnz (session check: no) -> nop */
+    {0x221b03c, 0x54000108, 0xd503201f, "hotel"},  /* b.hi (2 or more players: no) -> nop */
+    /* The job's end reads save file 1, the per-player Happy Home Paradise save, through main+0x3675e00; in a session the
+       slot holds the other players' buffer (slot 0) instead and file 1 is not loaded. The read now returns (to the
+       function's epilogue) when file 1 is not ready, instead of reading through a null. */
+    {0x3675e54, 0x54000121, 0x54000881, "hotel"},  /* b.ne 0x3675e78 (null) -> b.ne 0x3675f64 (return) */
     /* The same two in the pull's item state 6 (enter main+0x13abd30, run main+0x13ac0d0). */
     {0x13ac014, 0x54000500, 0x14000026, "push-anim"},   /* b.eq 0x13ac0b4 -> b 0x13ac0ac (set the flag) */
     {0x13ac394, 0x7100211f, 0x7100f11f, "push-anim"},   /* cmp w8, #8 -> cmp w8, #60 */
@@ -604,27 +614,12 @@ static void order_install(Module *m, uint64_t s, uint64_t data_off) {
 #define POSTBOX_STUB (ORDER_STUB + 16)
 #define POSTBOX_HOOK 0x330
 uint64_t coop_postbox_original;   /* coop_edit.c calls the original through this */
-/* The hotel decorating job's end (group "hotel"; LAN-COOP-DESIGN.md 8.22): the action saving the finished room
-   (main+0xc2c164) calls main+0x15b0344 at main+0xc2c7b0, which reads save file 1 through main+0x3675e00 and crashes
-   on a null when that file is not loaded, as with a visitor on the island. The call goes to coop_hotel_room_record
-   (coop_edit.c), which skips it then. Stub: adrp x16, <data>; ldr x16, [x16, #HOTEL_HOOK]; br x16. */
-#define HOTEL_SITE 0xc2c7b0u
-#define HOTEL_RECORD 0x15b0344u
-#define HOTEL_HOOK 0x348
+/* A visitor follows the host's decorating job (group "hotel"; LAN-COOP-DESIGN.md 8.22): main+0x15bf0b0(hotel manager)
+   prepares the room just before going to it, main+0x15c7d94(manager) ends the job ("cEditEnd"); coop_edit.c tells the
+   visitors. */
 static void hotel_install(Module *m, uint64_t s, uint64_t data_off) {
     const char *e = getenv("ACNH_MP_EDIT");
     if (!e || (strcmp(e, "full") && !strstr(e, "hotel"))) return;
-    uint32_t w; memcpy(&w, m->base + HOTEL_SITE, 4);
-    if (w != aspect_branch(HOTEL_SITE, HOTEL_RECORD) + 0x80000000u) runtime_fail("ACNH_MP_EDIT hotel: the room record call differs (another game version?)");
-    if (s + 16 > m->ro_off) runtime_fail("ACNH_MP_EDIT hotel: no room in main's text padding");
-    for (unsigned b = 0; b < 16; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT hotel: text padding in use");
-    if (data_off + HOTEL_HOOK + 8 > m->size) runtime_fail("ACNH_MP_EDIT hotel: no data page after main");
-    *(uint64_t *)(void *)(m->base + data_off + HOTEL_HOOK) = (uint64_t)(uintptr_t)coop_hotel_room_record;
-    uint32_t stub[3] = {(adrp_x10(s, data_off) & ~31u) | 16, 0xf9400000u | (HOTEL_HOOK / 8) << 10 | 16 << 5 | 16, 0xd61f0200u};
-    memcpy(m->base + s, stub, sizeof stub);
-    uint32_t bl = aspect_branch(HOTEL_SITE, s) + 0x80000000u; memcpy(m->base + HOTEL_SITE, &bl, 4);
-    /* A visitor follows the host's decorating job: main+0x15bf0b0(hotel manager) prepares the room just before going
-       to it, main+0x15c7d94(manager) ends the job ("cEditEnd"); coop_edit.c tells the visitors. */
     precall_stub(m, s + 16, data_off, 0x15bf0b0u, 0xd10283ffu, 0x350, (void *)coop_hotel_go, "hotel");    /* sub sp, sp, #0xa0 */
     precall_stub(m, s + 96, data_off, 0x15c7d94u, 0xd10183ffu, 0x358, (void *)coop_hotel_end, "hotel");   /* sub sp, sp, #0x60 */
 }

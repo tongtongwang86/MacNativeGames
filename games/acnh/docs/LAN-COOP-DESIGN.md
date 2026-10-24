@@ -968,12 +968,20 @@ IsMyVillage 1 (a visitor) goes the resident's way.
   end main+0x15c7d94 make the host's copy send the room (EDIT kind 7) and the end (kind 8); the visitor's copy sets the
   room, prepares it and runs the overlay flowchart Coop_LocalHotel (Coop_HotelRoom / Coop_HotelBack: the same stage
   changes with the hotel fades).
-- **Broken: the hotel's own save data during a session.** The job's end reads save file 1 (save root +0x10 → +0x188,
-  status byte root +0x50d) through main+0x3675e00; in a session that slot is empty (all of +0x180..+0x1a0 are null,
-  status 0), so the host crashed there (null +0x60). A stub on the call main+0xc2c7b0 → main+0x15b0344 now skips that
-  step when the file is missing: no crash, but the job then cannot end (Leilani disappears, both players stay in the
-  room; restarting gets them out). The same missing data is likely why the visitor's decorating catalog shows her own
-  storage, not the hotel's furniture. Next: find how and when the game loads that save file for the hotel offline,
-  and do the same in a session.
+- **Stairs and room visits** (tested: the visitor goes up and visits a room with the host). The lobby stairs
+  (main+0x221a7f0, map 0x3ee08254) let a player up only when main+0x1cbec9c(session) is false and fewer than 2 play;
+  both checks are nops now (main+0x221b028, main+0x221b03c); the island flag HotelIsCompletedEditTutorialAnyone still
+  has to be set. System_HotelRoomVisit's room menu ended the session (Event42 NetEndSessionVillage) before the room
+  scene; the overlay goes straight to the scene change (Event16).
+- **The extra save slots** (saveslot agent): five slots share one buffer, status bytes save root +0x50c+i (bits 2|4 =
+  ready), objects *(root+0x10)+0x180+8*i, request mask root +0x508, mount main+0x2601ba0 (frees all, then allocates the
+  mask). Slot 1 is the player's Happy Home Paradise save (::Game::SaveWherearenIslands, 500 x 0x5a80 records), mounted
+  at boot; slot 0 holds 8 per-player buffers of 0x37ad0 bytes (other players' personal data), mounted by the
+  multiplayer manager (main+0x1c60ea8) when hosting starts. So in a session slot 1 is gone. The job's end now returns
+  early from main+0x3675e00 when slot 1 is not ready (main+0x3675e54 `b.ne` to the epilogue), in place of skipping the
+  whole step.
+- **Still missing: the hotel catalog in a session.** The decorating catalog comes from the Happy Home Paradise save
+  (slot 1); in a session both players see their own storage instead. Mounting slot 1 the game's way frees slot 0, the
+  visitors' data.
 - **Not done: the rooms.** Choosing a room in System_HotelRoomVisit ends the session (Event42
   NetEndSessionVillage) before the room scene loads; the corridor's ProhibitEnter messages are left as they are.

@@ -86,7 +86,6 @@ void coop_post_close(void);   /* mail stub on main+0x25f2a00: the postbox handle
 void coop_hotel_go(uint8_t *manager);    /* hotel stubs: the host's job opens a room / ends (game thread) */
 void coop_hotel_end(uint8_t *manager);
 void coop_flow_test(const char *flow_entry);   /* coop_flow.c: start <flowchart>:<entry> on the game thread */
-void coop_hotel_room_record(void *record, uint64_t arg);   /* hotel stub: the finished room's save step (game thread) */
 int coop_order_record(const uint64_t *item, const uint32_t *date, const uint8_t *player);   /* mail stub: a Nook Shopping order (game thread) */
 void coop_room_op_seen(void *handler, uint8_t *job, uint64_t a2, uint64_t a3, uint64_t lr);   /* diagnostics: place ops' packets */
 /* coop_flow.c: Local play from anywhere (1 visit, 2 host, 4 leave, 5 stop hosting); started at the next controller read on the game's thread */

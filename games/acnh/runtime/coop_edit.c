@@ -244,17 +244,6 @@ static void post_visitor_tick(int self) {
     free(in);
 }
 
-/* The hotel decorating job's end (acnh_patches.c group "hotel"): main+0x15b0344 reads save file 1 (save root
-   +0x10 -> +0x188, status byte root +0x50d bits 1 and 2) and crashes when it is not loaded, as with a visitor on the
-   island; that step is skipped then. */
-void coop_hotel_room_record(void *record, uint64_t arg) {
-    uint8_t *main = runtime_module_base("main"), *root = save_root(main);
-    uint8_t *mgr = root ? *(uint8_t **)(root + 0x10) : NULL;
-    void *file = mgr ? *(void **)(mgr + 0x188) : NULL;
-    if (file && (root[0x50d] & 6) == 6) { ((void (*)(void *, uint64_t))(uintptr_t)(main + 0x15b0344))(record, arg); return; }
-    fprintf(stderr, "[coop] hotel: save file 1 is not loaded (status %#x), the finished room's save step is skipped\n", root ? root[0x50d] : 0);
-}
-
 /* A visitor follows the host's decorating job (group "hotel"; LAN-COOP-DESIGN.md 8.22). Each copy has one hotel
    manager, *(main+0x5139df0): +8 VIP flag, +0xc room index; main+0x15bf0b0(manager) copies that room of the island into
    the player's own working area before the stage change "cHotelSelectRoom" opens IdrHotel / Room<n>. The host's copy
