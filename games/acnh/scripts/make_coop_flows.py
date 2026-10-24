@@ -38,7 +38,8 @@ from evfl.util import IdGenerator, make_index, make_rindex
 
 VISITOR, HOST = 'SNPC_dod_11_Airport_LocalVisitor', 'SNPC_dod_10_Airport_LocalHost'
 VISIT_FLOW, HOST_FLOW = 'Coop_LocalVisitor', 'Coop_LocalHost'
-LEAVE_FLOW, CLOSE_FLOW = 'Coop_LocalLeave', 'Coop_LocalClose'   # own flowcharts: the visit's is still in use on arrival
+LEAVE_FLOW, CLOSE_FLOW = 'Coop_LocalLeave', 'Coop_LocalClose'
+HOTEL_FLOW = 'Coop_LocalHotel'   # a visitor follows the host's decorating job (runtime/coop_edit.c)   # own flowcharts: the visit's is still in use on arrival
 
 
 class Builder:
@@ -166,6 +167,16 @@ def add_host(fc):
     b.entry('Coop_Test', b.action('OpenMessageWindow', None, MessageID='TalkSys/SYS_Save:001', IsCloseMessageWindow=True))   # diagnostics
 
 
+def add_hotel(fc):
+    """A visitor follows the host into the hotel room Leilani's decorating job opens, and back to the lobby
+    (runtime/coop_edit.c sets the room first): the stage changes SNPC_kpm GoToHotelRoom and SNPC_kpm_HotelEdit
+    ReturnEntrance make, with the same fades."""
+    b = Builder(fc, 'Coop_Hotel_')
+    fade = {'FadeColorString': 'cBlack', 'FadeInSpeed': 1.0, 'FadeOutSpeed': 1.0, 'FadeOutKindString': 'cHotel', 'FadeInKindString': 'cHotel'}
+    b.entry('Coop_HotelRoom', b.action('SystemRequestChangeStage', None, TargetStage='cHotelSelectRoom', **fade))
+    b.entry('Coop_HotelBack', b.action('SystemRequestChangeStage', None, TargetStage='cHotelEntrance', **fade))
+
+
 def read_flow(data):
     """An EventFlow read only, with entry-point variables skipped (the evfl package asserts there are none)."""
     import evfl.entry_point as ep
@@ -230,7 +241,8 @@ def main():
     a = ap.parse_args()
     (a.out / 'EventFlow/Info').mkdir(parents=True, exist_ok=True)
     for name, source, add, entries in ((VISIT_FLOW, VISITOR, add_visit, ('Coop_Visit',)), (HOST_FLOW, HOST, add_host, ('Coop_Host',)),
-                                       (LEAVE_FLOW, VISITOR, add_leave, ('Coop_Leave',)), (CLOSE_FLOW, HOST, add_close, ('Coop_Close',))):
+                                       (LEAVE_FLOW, VISITOR, add_leave, ('Coop_Leave',)), (CLOSE_FLOW, HOST, add_close, ('Coop_Close',)),
+                                       (HOTEL_FLOW, HOST, add_hotel, ('Coop_HotelRoom', 'Coop_HotelBack'))):
         ef = evfl.EventFlow()
         ef.read((a.romfs / f'EventFlow/{source}.bfevfl').read_bytes())
         fc = ef.flowchart   # a flowchart of its own: only the system actor (Orville, MainNpc, would not bind outside the airport)
@@ -338,6 +350,7 @@ def main():
     info[HOST_FLOW] = {'Coop_Host': [], 'Coop_Test': []}
     info[LEAVE_FLOW] = {'Coop_Leave': []}
     info[CLOSE_FLOW] = {'Coop_Close': []}
+    info[HOTEL_FLOW] = {'Coop_HotelRoom': [], 'Coop_HotelBack': []}
     version = raw[2] | raw[3] << 8
     with open(a.out / 'EventFlow/Info/EventFlowInfoProduct.byml', 'wb') as f:
         byml.Writer(info, be=False, version=version).write(f)

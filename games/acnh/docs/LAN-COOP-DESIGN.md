@@ -961,5 +961,19 @@ IsMyVillage 1 (a visitor) goes the resident's way.
   NetIsConnected) skipped her reserved scenes while connected, so she never walked into the room and the job could
   not end ("Leilani disappeared and I can't leave"); its case 0 now goes the offline way. The hotel story is per
   player: a visitor without its introduction gets Leilani's idle line, so she cannot start or join a job yet.
+- **The visitor follows the host's job** (tested: she is taken into the same room). Each copy has one hotel manager,
+  `*(main+0x5139df0)` (+8 VIP flag, +0xc room index); main+0x15bf0b0(manager) copies that island room into the
+  player's working area (save + player*0xcb0 + 0x211c90) before the stage change "cHotelSelectRoom" (IdrHotel /
+  Room<n>; EventFlowActionSystemRequestChangeStage execute main+0xbf3ad0). Stubs on main+0x15bf0b0 and on the job's
+  end main+0x15c7d94 make the host's copy send the room (EDIT kind 7) and the end (kind 8); the visitor's copy sets the
+  room, prepares it and runs the overlay flowchart Coop_LocalHotel (Coop_HotelRoom / Coop_HotelBack: the same stage
+  changes with the hotel fades).
+- **Broken: the hotel's own save data during a session.** The job's end reads save file 1 (save root +0x10 → +0x188,
+  status byte root +0x50d) through main+0x3675e00; in a session that slot is empty (all of +0x180..+0x1a0 are null,
+  status 0), so the host crashed there (null +0x60). A stub on the call main+0xc2c7b0 → main+0x15b0344 now skips that
+  step when the file is missing: no crash, but the job then cannot end (Leilani disappears, both players stay in the
+  room; restarting gets them out). The same missing data is likely why the visitor's decorating catalog shows her own
+  storage, not the hotel's furniture. Next: find how and when the game loads that save file for the hotel offline,
+  and do the same in a session.
 - **Not done: the rooms.** Choosing a room in System_HotelRoomVisit ends the session (Event42
   NetEndSessionVillage) before the room scene loads; the corridor's ProhibitEnter messages are left as they are.

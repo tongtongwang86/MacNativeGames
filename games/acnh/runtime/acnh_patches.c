@@ -604,6 +604,30 @@ static void order_install(Module *m, uint64_t s, uint64_t data_off) {
 #define POSTBOX_STUB (ORDER_STUB + 16)
 #define POSTBOX_HOOK 0x330
 uint64_t coop_postbox_original;   /* coop_edit.c calls the original through this */
+/* The hotel decorating job's end (group "hotel"; LAN-COOP-DESIGN.md 8.22): the action saving the finished room
+   (main+0xc2c164) calls main+0x15b0344 at main+0xc2c7b0, which reads save file 1 through main+0x3675e00 and crashes
+   on a null when that file is not loaded, as with a visitor on the island. The call goes to coop_hotel_room_record
+   (coop_edit.c), which skips it then. Stub: adrp x16, <data>; ldr x16, [x16, #HOTEL_HOOK]; br x16. */
+#define HOTEL_SITE 0xc2c7b0u
+#define HOTEL_RECORD 0x15b0344u
+#define HOTEL_HOOK 0x348
+static void hotel_install(Module *m, uint64_t s, uint64_t data_off) {
+    const char *e = getenv("ACNH_MP_EDIT");
+    if (!e || (strcmp(e, "full") && !strstr(e, "hotel"))) return;
+    uint32_t w; memcpy(&w, m->base + HOTEL_SITE, 4);
+    if (w != aspect_branch(HOTEL_SITE, HOTEL_RECORD) + 0x80000000u) runtime_fail("ACNH_MP_EDIT hotel: the room record call differs (another game version?)");
+    if (s + 16 > m->ro_off) runtime_fail("ACNH_MP_EDIT hotel: no room in main's text padding");
+    for (unsigned b = 0; b < 16; b++) if (m->base[s + b]) runtime_fail("ACNH_MP_EDIT hotel: text padding in use");
+    if (data_off + HOTEL_HOOK + 8 > m->size) runtime_fail("ACNH_MP_EDIT hotel: no data page after main");
+    *(uint64_t *)(void *)(m->base + data_off + HOTEL_HOOK) = (uint64_t)(uintptr_t)coop_hotel_room_record;
+    uint32_t stub[3] = {(adrp_x10(s, data_off) & ~31u) | 16, 0xf9400000u | (HOTEL_HOOK / 8) << 10 | 16 << 5 | 16, 0xd61f0200u};
+    memcpy(m->base + s, stub, sizeof stub);
+    uint32_t bl = aspect_branch(HOTEL_SITE, s) + 0x80000000u; memcpy(m->base + HOTEL_SITE, &bl, 4);
+    /* A visitor follows the host's decorating job: main+0x15bf0b0(hotel manager) prepares the room just before going
+       to it, main+0x15c7d94(manager) ends the job ("cEditEnd"); coop_edit.c tells the visitors. */
+    precall_stub(m, s + 16, data_off, 0x15bf0b0u, 0xd10283ffu, 0x350, (void *)coop_hotel_go, "hotel");    /* sub sp, sp, #0xa0 */
+    precall_stub(m, s + 96, data_off, 0x15c7d94u, 0xd10183ffu, 0x358, (void *)coop_hotel_end, "hotel");   /* sub sp, sp, #0x60 */
+}
 static void postbox_install(Module *m, uint64_t s, uint64_t data_off) {
     const char *e = getenv("ACNH_MP_EDIT");
     if (!e || (strcmp(e, "full") && !strstr(e, "mail"))) return;
@@ -646,6 +670,7 @@ void runtime_game_patches(Module *m) {
     decor_install(m, ASPECT_STUBS_END(m) + DECOR_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
     order_install(m, ASPECT_STUBS_END(m) + ORDER_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
     postbox_install(m, ASPECT_STUBS_END(m) + POSTBOX_STUB, (m->file_size + 0x3fff) & ~0x3fffULL);
+    hotel_install(m, ASPECT_STUBS_END(m) + POSTBOX_STUB + 32 + 160, (m->file_size + 0x3fff) & ~0x3fffULL);
 #endif
 }
 

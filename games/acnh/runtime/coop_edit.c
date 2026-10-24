@@ -25,7 +25,7 @@
 #define MUSEUM_RECORD 0x26bdd90
 #define DONOR_SLOT 0x24819f0
 #define MUSEUM_SIZE 0x3404
-enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2, EDIT_ORDER = 3, EDIT_POSTBOX = 5, EDIT_LETTERS = 6 };
+enum { EDIT_MUSEUM = 1, EDIT_ROOM = 2, EDIT_ORDER = 3, EDIT_POSTBOX = 5, EDIT_LETTERS = 6, EDIT_HOTEL_GO = 7, EDIT_HOTEL_END = 8 };
 typedef struct __attribute__((packed)) { uint8_t kind, pad[7]; uint64_t item; } EditBody;
 _Static_assert(sizeof(EditBody) == 16, "edit body");
 /* One decorating-mode change of a room tile: op 1 clears the tile, 5 puts the record there (the furniture ops' codes) */
@@ -244,6 +244,54 @@ static void post_visitor_tick(int self) {
     free(in);
 }
 
+/* The hotel decorating job's end (acnh_patches.c group "hotel"): main+0x15b0344 reads save file 1 (save root
+   +0x10 -> +0x188, status byte root +0x50d bits 1 and 2) and crashes when it is not loaded, as with a visitor on the
+   island; that step is skipped then. */
+void coop_hotel_room_record(void *record, uint64_t arg) {
+    uint8_t *main = runtime_module_base("main"), *root = save_root(main);
+    uint8_t *mgr = root ? *(uint8_t **)(root + 0x10) : NULL;
+    void *file = mgr ? *(void **)(mgr + 0x188) : NULL;
+    if (file && (root[0x50d] & 6) == 6) { ((void (*)(void *, uint64_t))(uintptr_t)(main + 0x15b0344))(record, arg); return; }
+    fprintf(stderr, "[coop] hotel: save file 1 is not loaded (status %#x), the finished room's save step is skipped\n", root ? root[0x50d] : 0);
+}
+
+/* A visitor follows the host's decorating job (group "hotel"; LAN-COOP-DESIGN.md 8.22). Each copy has one hotel
+   manager, *(main+0x5139df0): +8 VIP flag, +0xc room index; main+0x15bf0b0(manager) copies that room of the island into
+   the player's own working area before the stage change "cHotelSelectRoom" opens IdrHotel / Room<n>. The host's copy
+   sends the room (EDIT kind 7) and the job's end (kind 8); the visitor's copy sets the same room, prepares it and runs
+   the overlay's Coop_LocalHotel stage changes (into the room / back to the lobby). */
+#define HOTEL_MANAGER 0x5139df0
+#define HOTEL_PREPARE 0x15bf0b0
+static int hotel_following;
+void coop_hotel_go(uint8_t *manager) {
+    if (hotel_following || coop_lan_self_node() != 0 || !manager || !coop_lan_host_visitors(0)) return;
+    EditBody e = {.kind = EDIT_HOTEL_GO, .item = (uint64_t)manager[8] | (uint64_t)*(uint32_t *)(manager + 0xc) << 32};
+    coop_lan_broadcast_edit(&e, sizeof e, -1);
+    fprintf(stderr, "[coop] hotel: the host goes to %s %d, visitors follow\n", manager[8] ? "VIP room" : "room", *(int32_t *)(manager + 0xc));
+}
+void coop_hotel_end(uint8_t *manager) {
+    (void)manager;
+    if (coop_lan_self_node() != 0 || !coop_lan_host_visitors(0)) return;
+    EditBody e = {.kind = EDIT_HOTEL_END};
+    coop_lan_broadcast_edit(&e, sizeof e, -1);
+    fprintf(stderr, "[coop] hotel: the host's job ends, visitors go back to the lobby\n");
+}
+static void hotel_visitor(uint8_t *main, const EditBody *e) {
+    uint8_t *manager = *(uint8_t **)(void *)(main + HOTEL_MANAGER);
+    if (e->kind == EDIT_HOTEL_GO) {
+        if (!manager) { fprintf(stderr, "[coop] hotel: no hotel manager on this copy, cannot follow\n"); return; }
+        manager[8] = (uint8_t)e->item; *(int32_t *)(manager + 0xc) = (int32_t)(e->item >> 32);
+        hotel_following = 1;
+        ((void (*)(void *))(uintptr_t)(main + HOTEL_PREPARE))(manager);
+        hotel_following = 0;
+        coop_flow_test("Coop_LocalHotel:Coop_HotelRoom");
+        fprintf(stderr, "[coop] hotel: following the host to %s %d\n", manager[8] ? "VIP room" : "room", *(int32_t *)(manager + 0xc));
+    } else {
+        coop_flow_test("Coop_LocalHotel:Coop_HotelBack");
+        fprintf(stderr, "[coop] hotel: back to the lobby with the host\n");
+    }
+}
+
 static void room_tick(uint8_t *main, int self);
 void coop_edit_tick(void) {
     uint8_t *main = runtime_module_base("main");
@@ -261,6 +309,11 @@ void coop_edit_tick(void) {
             }
         }
         return;
+    }
+    {   /* visitor: what the host sends (the hotel job) */
+        EditBody e[32]; int n;
+        pthread_mutex_lock(&lock); n = npending; memcpy(e, pending, sizeof(EditBody) * (size_t)n); npending = 0; pthread_mutex_unlock(&lock);
+        for (int i = 0; i < n; i++) if (e[i].kind == EDIT_HOTEL_GO || e[i].kind == EDIT_HOTEL_END) hotel_visitor(main, &e[i]);
     }
     if (!slots) return;   /* museum: the visitor's side below */
     static unsigned frames; static int last_credit = -2;
