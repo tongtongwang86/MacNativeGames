@@ -43,8 +43,10 @@ static uint64_t g_translated;
 static _Atomic uint64_t g_new_variants, g_new_variant_ns, g_new_at_count;
 static _Atomic int64_t g_cached_variants = -1;
 
-static NSString *root_dir(void) {   // native-port/ (the executable lives in native-port/build/)
+static NSString *root_dir(void) {   // native-port/ (the executable lives in native-port/build/); TOTK_ROOT_DIR: another (a packaged app's data)
     if (g_root) return g_root;
+    const char *root = getenv("TOTK_ROOT_DIR");
+    if (root && *root) return g_root = @(root);
     char path[4096]; uint32_t n = sizeof path;
     if (_NSGetExecutablePath(path, &n)) die("executable path too long");
     g_root = [[[@(path) stringByResolvingSymlinksInPath] stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];

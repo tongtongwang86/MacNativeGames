@@ -136,7 +136,9 @@ only when it is installed again; the game's data, shader caches and saves stay i
 `make boot` sets, turns on local play's shared editing (`ACNH_MP_EDIT`, every group, unless set), names the iCloud
 container SaveSync uses (the one the iPhone / iPad app is signed with), logs to `~/Library/Logs/MacNativeGames/acnh.log`
 and runs its copy of the game in place of itself. In the window, a left click is a finger on the game's touch screen
-(its middle 16:9). Start the Mac app before the
+(its middle 16:9). `--self-contained` (with `--name "Animal Crossing Co-op"` for a second app) puts the game's data in
+the app too (about 11 GB), so it runs without this folder; its saves and shader cache live in
+`~/Library/Application Support/<name>/`, copied from this folder at the first install. Start the Mac app before the
 iPad's first start, so the island goes to iCloud first and the iPad takes it.
 
 macOS syncs the container only while an installed app is signed with it; without one, `brctl status iCloud.<id>`
