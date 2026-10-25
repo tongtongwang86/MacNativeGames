@@ -9,6 +9,9 @@ GFX_OBJECTS := $(patsubst $(TP)/%,build/gfx/%.o,$(GFX_SRC))
 # mode (near = -w, GL clip z) without calling nvnDeviceSetDepthMode.
 GFX_FLAGS := -DNVN_DEFAULT_DEPTH_NEAR_MINUS_W=1 -std=gnu11 -Wno-error -Wno-unused-function -Wno-unused-parameter -fobjc-arc -I$(TP)/d2r_gfx/gfx/nvn/include
 NATIVE_OPT ?= -O2
+# The oldest macOS the builds run on (clang reads it for every compile and link here, spirv-cross too): macOS 26 has
+# Metal 4, which the renderer needs. Without it the SDK's own version is the minimum (macOS 27 with Xcode 27).
+export MACOSX_DEPLOYMENT_TARGET ?= 26.0
 PY := .venv/bin/python
 
 RUNTIME_SRC := $(filter-out runtime/frontend_ios.m,$(wildcard runtime/*.c runtime/*.m runtime/*.S)) vendor/savesync/savesync.m vendor/gamesettings/gamesettings.m

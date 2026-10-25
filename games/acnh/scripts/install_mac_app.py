@@ -148,7 +148,7 @@ def main():
     log_name = 'acnh' if a.name == 'Animal Crossing' else ''.join(c if c.isalnum() else '-' for c in a.name.lower())
     with tempfile.TemporaryDirectory() as d:
         src = Path(d) / 'launcher.c'; src.write_text(LAUNCHER)
-        subprocess.run(['xcrun', 'clang', '-O2', '-Wall', '-Werror', f'-DGAME_DIR={c_string(str(GAME))}',
+        subprocess.run(['xcrun', 'clang', '-O2', '-Wall', '-Werror', '-mmacosx-version-min=26.0', f'-DGAME_DIR={c_string(str(GAME))}',
                         f'-DICLOUD_CONTAINER={c_string(a.icloud_container)}', f'-DMP_EDIT={c_string(MP_EDIT)}',
                         f'-DSELF_CONTAINED={int(a.self_contained)}', f'-DAPP_NAME={c_string(a.name)}', f'-DLOG_NAME={c_string(log_name)}',
                         f'-DCHECKOUT_SLOT={c_string(str(GAME / "analysis/game-slot"))}',
