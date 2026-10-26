@@ -51,18 +51,29 @@ static int overlay_get(void) { return fps_overlay_hints_enabled(); }
 static void overlay_set(int v) { if (overlay_get() != v) fps_overlay_toggle_hints(); }
 static const char *const shape_choices[] = {"The screen's shape", "16:9 (the game's own)"};
 static const char *const overlay_choices[] = {"Hidden", "Shown"};
-static const char *const upscale_choices[] = {"Off (720p, the iPad scales it)", "MetalFX at full resolution"};
+static const char *const upscale_choices[] = {"Off (720p, or 1080p docked; the system scales it)", "MetalFX at full resolution"};
 static const char *const interp_choices[] = {"Off", "30 + 30", "Half the refresh rate", "Unlimited"};
 static const char *const motion_choices[] = {"Off", "On"};
-static const gamesettings_choice graphics_settings[] = {
+/* Not const: the console mode's and render resolution's ids are this device type's own (per_device_ids). */
+static gamesettings_choice graphics_settings[] = {
     {"shape", "Picture shape", shape_choices, 2, shape_get, shape_set, "The camera fills the screen without black bars; the HUD keeps its shape in the middle."},
-    {"console_ios", "Console mode", console_choices, 3, console_get, console_set, "Docked is the game's TV mode: more detail, more GPU and battery. Handheld keeps the render resolution at 720p or lower. Automatic: handheld up to 720p, docked above. Takes effect the next time the game starts."},
-    {"render", "Render resolution", render_choices, 5, render_get, render_set, "The 3D scene's size; the HUD stays sharp. Lower runs faster; MetalFX upscaling sharpens it. 900p and 1080p run the game in its docked mode (more detail, more GPU and battery). Takes effect the next time the game starts."},
+    {"console_ios", "Console mode", console_choices, 3, console_get, console_set, "Docked is the game's TV mode: more detail, more GPU and battery. Handheld keeps the render resolution at 720p or lower. Automatic: handheld up to 720p, docked above. This device's own setting. Takes effect the next time the game starts."},
+    {"render", "Render resolution", render_choices, 5, render_get, render_set, "The 3D scene's size; the HUD stays sharp. Lower runs faster; MetalFX upscaling sharpens it. 900p and 1080p run the game in its docked mode (more detail, more GPU and battery). This device's own setting. Takes effect the next time the game starts."},
     {"upscale", "Upscaling", upscale_choices, 2, upscale_get, upscale_set, "MetalFX scales the 720p picture to the screen's own pixels. New on iPad: uses more GPU time and battery."},
     {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60). New on iPad."},
     {"motion", "Motion controls", motion_choices, 2, motion_get, motion_set, "Tilt and turn the device (or a controller with a gyro, such as a DualSense) to aim, like the Switch's motion controls. Which actions use motion is set in the game's own Options."},
     {"overlay", "FPS overlay", overlay_choices, 2, overlay_get, overlay_set, NULL},
 };
+/* Console mode and render resolution are read at start from NSUserDefaults, before the settings are loaded (they are applied
+   after 60 frames). Shared through iCloud they came a start late, and an iPhone and an iPad overwrote each other's size;
+   with an id per device type each keeps its own, and NSUserDefaults already holds it at start. */
+static void per_device_ids(void) {
+    int pad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    for (unsigned i = 0; i < sizeof graphics_settings / sizeof *graphics_settings; i++) {
+        if (!strcmp(graphics_settings[i].id, "render")) graphics_settings[i].id = pad ? "render_ipad" : "render_iphone";
+        else if (!strcmp(graphics_settings[i].id, "console_ios")) graphics_settings[i].id = pad ? "console_ipad" : "console_iphone";
+    }
+}
 static const gamesettings_config settings_config = {"0100F2C0115B6000", "Tears of the Kingdom", "[totk]", graphics_settings, sizeof graphics_settings / sizeof *graphics_settings};
 
 int totk_host_main(int argc, char **argv);
@@ -138,10 +149,14 @@ static BOOL forward_presses(NSSet<UIPress *> *presses, int down) {
     /* The Settings sheet's Render resolution. The game sizes its handheld render buffers for 720p: a larger scene size in
        handheld mode crashed it the moment a save loaded (null read at main+0x1c2e40, 2026-10-21; 900p and 1080p crash,
        480p and 720p do not, reproduced on the Mac). Above 720p the game is told it is docked, whose buffers fit 1080p
-       (checked), as a docked Switch would; it then also uses its docked graphics settings. */
+       (checked), as a docked Switch would; it then also uses its docked graphics settings. Docked, the game composes a
+       1920x1080 canvas: the drawable is then 1080 rows instead of 720 (frontend_ios.m), or 900p / 1080p are squeezed back
+       into 720 rows and look no sharper than 720p. */
+    per_device_ids();
     { int r = render_get(), c = console_get(); if (c == 1 && r > 2) r = 2;
       int docked = c == 2 || (c == 0 && r > 2);
       setenv("TOTK_RENDER_RES", render_sizes[r], 1); setenv("TOTK_OPERATION_MODE", docked ? "docked" : "handheld", 1);
+      if (docked) setenv("TOTK_IOS_DRAWABLE_H", "1080", 0);
       fprintf(stderr, "[totk] console mode %s (%s), render %s\n", docked ? "docked" : "handheld", console_values[c], render_sizes[r]); }
     setenv("TOTK_ROMFS_PATCHES",[res stringByAppendingPathComponent:@"romfs-patches"].fileSystemRepresentation,1);
     setenv("TOTK_ROMFS_PATCHES_OUT",[res stringByAppendingPathComponent:@"romfs-patches-out"].fileSystemRepresentation,1);
