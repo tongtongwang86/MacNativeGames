@@ -27,11 +27,15 @@ def clone_folder(src,dst):
     dst.parent.mkdir(parents=True,exist_ok=True)
     return libc.clonefile(os.fsencode(src),os.fsencode(dst),0)==0
 
+TRASH=None   # <tree>/build/.trash once main knows the tree: discarded folders wait there, outside anything that is copied or zipped
 def discard(path):
     """Out of the way at once (a rename), deleted in the background: tens of thousands of files take minutes to delete on
-    an external disk, and the build does not need to wait for it."""
+    an external disk, and the build does not need to wait for it. The rename goes to TRASH, not next to the folder: the
+    folder's parent is copied or zipped right after (the app product into the payload, the payload into the IPA), and a
+    sibling still being deleted went along with it (2026-10-25: a second 17 GB RomFS in a 37 GB IPA)."""
     if not path.exists(): return
-    old=path.with_name(f'.{path.name}.old-{os.getpid()}-{time.time_ns()}')
+    if TRASH: TRASH.mkdir(parents=True,exist_ok=True)
+    old=(TRASH or path.parent)/f'.{path.name}.old-{os.getpid()}-{time.time_ns()}'
     os.rename(path,old); subprocess.Popen(['/bin/rm','-rf',str(old)],start_new_session=True)
 
 def copy_tree(src,dst):
@@ -149,6 +153,7 @@ def main():
     frameworks=' '.join('-framework '+x for x in ['UIKit','Metal','MetalFX','Foundation','QuartzCore','ImageIO','CoreGraphics','CoreText','UniformTypeIdentifiers','CoreFoundation','AudioToolbox','GameController','CoreHaptics','CoreMotion','AVFAudio','Security'])
     xcconfig.write_text(f'OTHER_LDFLAGS = $(inherited) {frameworks} Gen/deps/lib/libopus.a Gen/deps/lib/libvpx.a {flags}\n')
     run(['xcodegen','generate','--spec','project.generated.yml'],ios,logs/'xcodegen.log',env)
+    global TRASH; TRASH=tree/'build/.trash'
     derived=tree/('build/xros-derived' if vision else 'build/ios-derived');run(['xcodebuild','-project','TOTKIOS.xcodeproj','-scheme','TOTKIOS','-configuration','Release',
         '-destination','generic/platform='+('visionOS' if vision else 'iOS'),'-derivedDataPath',derived,'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY='],
         ios,logs/f'xcodebuild-{a.platform}.log',env)
