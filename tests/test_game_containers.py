@@ -106,6 +106,22 @@ def nca(managed=False, title=TITLE, content=0):
     return encrypted + body
 
 
+def bktr(data):
+    """An update Program NCA: the same synthetic NCA with its RomFS section marked BKTR (the update's patch section)."""
+    from extract_exefs import decrypt
+    header = bytearray(b''.join(decrypt(HEADER, modes.XTS(i.to_bytes(16, 'big')), data[i*512:(i+1)*512]) for i in range(6)))
+    header[0x604] = 4
+    header[0x2a0:0x2c0] = hashlib.sha256(header[0x600:0x800]).digest()
+    return b''.join(encrypt(HEADER, modes.XTS(i.to_bytes(16, 'big')), header[i*512:(i+1)*512]) for i in range(6)) + data[0xc00:]
+
+
+def card_with_update(files):
+    head = bytearray(0x200)
+    head[0x100:0x104] = b'HEAD'
+    struct.pack_into('<Q', head, 0x130, 0x200)
+    return head + partition([('secure', partition(files, hfs=True))], hfs=True)
+
+
 def ticket(personalized=False, bad_key=False):
     data = bytearray(0x2c0)
     struct.pack_into('<I', data, 0, 0x10004)
@@ -206,6 +222,45 @@ class Containers(unittest.TestCase):
             _, result = self.extract(game, success=False)
             self.assertIn('Expected base game metadata', result.stderr)
 
+    def test_card_image_with_its_update_uses_the_base_program(self):
+        # Order as on a real card: the base game's NCAs, then the update's (BKTR Program, Control, Meta ...6800).
+        base = [('base.nca', nca()), ('base-control.nca', nca(content=2)), ('base.cnmt.nca', nca(content=1))]
+        update = [('update.nca', bktr(nca())), ('update-control.nca', nca(content=2)),
+                  ('update.cnmt.nca', nca(title=TITLE + 0x800, content=1))]
+        for name, files in (('base-first', base + update), ('update-first', update + base)):
+            with self.subTest(order=name):
+                game = self.path / f'{name}.xci'
+                game.write_bytes(card_with_update(files))
+                out, _ = self.extract(game, name)
+                manifest = out.parent / 'extraction-manifest.json'
+                self.assertEqual(json.loads(manifest.read_text())['program']['name'], 'base.nca')
+                self.assertEqual((out / 'main').read_bytes(), b'synthetic main')
+                romout = out.parent / 'romfs'
+                p = subprocess.run([sys.executable, SCRIPTS / 'extract_romfs.py', '--keys', self.keys,
+                                    '--manifest', manifest, '--output', romout], capture_output=True, text=True)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertEqual((romout / 'romfs.bin').read_bytes(), romfs())
+
+    def test_card_image_with_its_update_rejects_other_mixes(self):
+        meta, update_meta = ('base.cnmt.nca', nca(content=1)), ('update.cnmt.nca', nca(title=TITLE + 0x800, content=1))
+        variants = [
+            ('update only', [('update.nca', bktr(nca())), update_meta], 'Expected base game metadata'),
+            ('no update program', [('base.nca', nca()), meta, update_meta], 'Expected one base and one update Program'),
+            ('two base programs', [('a.nca', nca()), ('b.nca', nca()), meta, update_meta], 'Expected one base and one update Program'),
+            ('two update programs', [('base.nca', nca()), ('u1.nca', bktr(nca())), ('u2.nca', bktr(nca())), meta, update_meta],
+             'Expected one base and one update Program'),
+            ('two update metas', [('base.nca', nca()), ('update.nca', bktr(nca())), meta, update_meta,
+                                  ('again.cnmt.nca', nca(title=TITLE + 0x800, content=1))], 'Expected base game metadata'),
+            ('with DLC', [('base.nca', nca()), ('update.nca', bktr(nca())), meta, update_meta,
+                          ('dlc.cnmt.nca', nca(title=TITLE + 0x1001, content=1))], 'Expected base game metadata'),
+        ]
+        for i, (name, files, message) in enumerate(variants):
+            with self.subTest(case=name):
+                game = self.path / f'mix{i}.xci'
+                game.write_bytes(card_with_update(files))
+                _, result = self.extract(game, f'mix{i}', False)
+                self.assertIn(message, result.stderr)
+
     def test_corruption_rejected_by_exefs_and_romfs_integrity(self):
         game = self.path / 'corrupt.nsp'
         image = bytearray(game_image('nsp'))
@@ -283,6 +338,33 @@ class Containers(unittest.TestCase):
             struct.pack_into('<I', npdm, 0x04, 1)
             path.write_bytes(npdm)
             self.assertFalse(build_app.npdm_signed(path))
+
+    def test_resigned_npdm_is_accepted_only_with_matching_code(self):
+        # Dump tools that change an NCA's key generation sign the npdm's ACID again (#65, #80): not Nintendo's signature,
+        # but the title's own npdm; the game never reads it, so it passes when every code module matches.
+        def npdm(program_id):
+            data = bytearray(0x200)
+            data[:4] = b'META'
+            struct.pack_into('<II', data, 0x70, 0x100, 0x40)   # ACI0 at 0x100
+            data[0x100:0x104] = b'ACI0'
+            struct.pack_into('<Q', data, 0x110, program_id)
+            return bytes(data)
+        exefs = self.path / 'exefs'
+        exefs.mkdir()
+        code = {name: f'{name} bytes'.encode() for name in ('main', 'rtld', 'sdk', 'subsdk0')}
+        for name, data in code.items():
+            (exefs / name).write_bytes(data)
+        (exefs / 'main.npdm').write_bytes(npdm(0x0100F2C0115B6000))
+        expected = {name: hashlib.sha256(data).hexdigest() for name, data in code.items()}
+        expected['main.npdm'] = '0' * 64   # the reference dump's file is another one
+        self.assertEqual(build_app.npdm_program_id(exefs / 'main.npdm'), '0100F2C0115B6000')
+        self.assertEqual(build_app.npdm_kind(exefs / 'main.npdm', '0100f2c0115b6000'), 'resigned')
+        self.assertTrue(build_app.exefs_matches(exefs, expected, '0100F2C0115B6000'))
+        self.assertFalse(build_app.exefs_matches(exefs, expected, '01007EF00011E000'))   # another title's npdm
+        (exefs / 'sdk').write_bytes(b'patched sdk')
+        self.assertFalse(build_app.exefs_matches(exefs, expected, '0100F2C0115B6000'))   # code that differs still stops it
+        (exefs / 'main.npdm').write_bytes(b'META' + bytes(0x7c))   # no ACI0
+        self.assertIsNone(build_app.npdm_kind(exefs / 'main.npdm', '0100F2C0115B6000'))
 
     def test_font_from_another_firmware_is_bound_by_its_bytes(self):
         folder = self.path / 'fonts'

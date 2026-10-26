@@ -13,6 +13,9 @@
 #include "audio_mixer.h"
 #include "audio_reverb.h"
 #include "audio_effects.h"
+#ifdef GAME_BOTW
+#include "audio_ramp.h"
+#endif
 #include <AudioToolbox/AudioToolbox.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -36,9 +39,9 @@ typedef struct Mixer {
     float *buf; int nbuf, frame;
     int *offset;                                   /* first mix buffer of each mix id */
     SplitInfo *split; int nsplit; SplitDest *dest; int ndest;
-    AudioComponentInstance unit; int unit_ok;
+    AudioComponentInstance unit; int unit_ok, rate;
     float ring[RING_FRAMES * 2]; _Atomic uint64_t wr, rd, underruns, overruns;
-    _Atomic int playing; int ready; _Atomic uint64_t missing_frames;
+    _Atomic int playing; int ready; _Atomic uint64_t missing_frames, trims, trimmed_frames;
     _Atomic uint64_t flush_until; _Atomic unsigned stop_epoch; unsigned callback_epoch;
     _Atomic uint64_t callback_frames,callback_nonzero;
     EffectState *effect; int *effect_order; unsigned effect_reported;
@@ -49,6 +52,9 @@ typedef struct Mixer {
     FILE *capture;float *capture_buf;uint64_t capture_frames,capture_limit,capture_skip;
     pthread_t capture_thread;pthread_mutex_t capture_lock;pthread_cond_t capture_cond;
     int capture_started,capture_done,capture_closing,capture_worker;
+#ifdef GAME_BOTW
+    int ramp; float (*prev_mix)[24], *depop;   /* volume ramps and depop (voice_ramp_mix); TOTK_AUDIO_RAMP=0 turns them off */
+#endif
 } Mixer;
 
 static _Atomic float device_volume = 1.0f;
@@ -116,12 +122,20 @@ static OSStatus pull(void *ctx, AudioUnitRenderActionFlags *flags, const AudioTi
     if(!atomic_load_explicit(&m->playing,memory_order_acquire)){
         memset(out,0,(size_t)frames*2*sizeof(float));m->ready=0;atomic_store_explicit(&m->rd,wr,memory_order_release);return noErr;
     }
+    uint64_t prefill=(uint64_t)m->frame*(uint64_t)prefill_blocks();if(prefill<frames)prefill=frames;if(prefill>RING_FRAMES)prefill=RING_FRAMES;
     if(!m->ready){
         /* prefill_blocks() 5-ms blocks (default four, 20 ms) of scheduling headroom for the producer.
            A real underrun still counts and requires a fresh prefill. */
-        uint64_t prefill=(uint64_t)m->frame*(uint64_t)prefill_blocks();if(prefill<frames)prefill=frames;if(prefill>RING_FRAMES)prefill=RING_FRAMES;
         if(have<prefill){memset(out,0,(size_t)frames*2*sizeof(float));return noErr;}
         m->ready=1;
+    }
+    /* After a device stall (Bluetooth, CoreAudio) the producer, paced by the wall clock, keeps the backlog it built up:
+       drop all but the prefill once it passes prefill + 30 ms, so the delay does not stay (counted in the output level line). */
+    uint64_t max_backlog = prefill + (uint64_t)m->frame * 6u;
+    if (m->unit_ok && have > max_backlog) {
+        atomic_fetch_add(&m->trims, 1); atomic_fetch_add(&m->trimmed_frames, have - prefill);
+        rd = wr - prefill;
+        have = prefill;
     }
     UInt32 n = frames < have ? frames : (UInt32)have;
     uint64_t nonzero=0;
@@ -148,6 +162,23 @@ static void output_open(Mixer *m, int rate) {
         fprintf(stderr, "[totk-audio] 【红】CoreAudio output setup failed: mixing without sound\n"); AudioComponentInstanceDispose(m->unit); return;
     }
     m->unit_ok = 1; fprintf(stderr, "[totk-audio] CoreAudio output %d Hz stereo\n", rate);
+}
+/* iOS (from nxnative b301431): the system stops the RemoteIO unit when another app takes the audio session (a call,
+   Siri, an alarm) and invalidates it when media services are reset. Nothing started it again, so the game stayed
+   silent for the rest of the session. The app's session observers (ios/Sources/main.m) call this: start the open
+   outputs again, or (recreate, and whenever a start fails) build them anew. */
+static pthread_mutex_t g_out_mu = PTHREAD_MUTEX_INITIALIZER;
+static Mixer *g_out[4];
+void runtime_audio_output_restart(int recreate) {
+    pthread_mutex_lock(&g_out_mu);
+    for (int i = 0; i < 4; i++) {
+        Mixer *m = g_out[i]; if (!m) continue;
+        if (m->unit_ok && !recreate && !AudioOutputUnitStart(m->unit)) { fprintf(stderr, "[totk-audio] output started again\n"); continue; }
+        if (m->unit_ok) { m->unit_ok = 0; AudioOutputUnitStop(m->unit); AudioUnitUninitialize(m->unit); AudioComponentInstanceDispose(m->unit); }
+        m->ready = 0; output_open(m, m->rate);
+        fprintf(stderr, "[totk-audio] output rebuilt (%s): %s\n", recreate ? "media services reset" : "start failed", m->unit_ok ? "playing" : "no sound");
+    }
+    pthread_mutex_unlock(&g_out_mu);
 }
 static void output_push(Mixer *m, const float *lr, int frames) {
     uint64_t wr = atomic_load(&m->wr), rd = atomic_load_explicit(&m->rd, memory_order_acquire);
@@ -188,8 +219,17 @@ void audio_mixer_open(AudioRenderer *r) {
         m->capture_worker=1;
         fprintf(stderr,"[totk-audio] diagnostic capture armed: %d Hz stereo float32, 30 seconds after %lu-second delay from first nonzero frame\n",r->param.sample_rate,seconds);
     }else fprintf(stderr,"[totk-audio] diagnostic capture unavailable (file exists or cannot be opened)\n");}
+#ifdef GAME_BOTW
+    { const char *e=getenv("TOTK_AUDIO_RAMP"); m->ramp=!(e && !strcmp(e,"0"));
+      m->prev_mix=calloc((size_t)r->param.voice_count*6,sizeof *m->prev_mix); m->depop=calloc((size_t)m->nbuf,sizeof(float));
+      if(!m->prev_mix || !m->depop)runtime_fail("audio ramp tables");
+      if(!m->ramp)fprintf(stderr,"[totk-audio] TOTK_AUDIO_RAMP=0: volume changes and voice stops are not smoothed (the old behaviour, for comparison)\n"); }
+#endif
     prefill_blocks();   // decided before the device's callback can run
-    output_open(m, r->param.sample_rate);
+    pthread_mutex_lock(&g_out_mu);
+    m->rate = r->param.sample_rate; output_open(m, m->rate);
+    for (int i = 0; i < 4; i++) if (!g_out[i]) { g_out[i] = m; break; }
+    pthread_mutex_unlock(&g_out_mu);
 }
 void audio_mixer_set_running(AudioRenderer *r,int running){
     Mixer *m=r->mixer;if(!m)return;
@@ -198,13 +238,19 @@ void audio_mixer_set_running(AudioRenderer *r,int running){
 }
 void audio_mixer_close(AudioRenderer *r) {
     Mixer *m = r->mixer; if (!m) return;
-    if (m->unit_ok) { AudioOutputUnitStop(m->unit); AudioUnitUninitialize(m->unit); AudioComponentInstanceDispose(m->unit); }
+    pthread_mutex_lock(&g_out_mu);
+    for (int i = 0; i < 4; i++) if (g_out[i] == m) g_out[i] = NULL;
+    if (m->unit_ok) { m->unit_ok = 0; AudioOutputUnitStop(m->unit); AudioUnitUninitialize(m->unit); AudioComponentInstanceDispose(m->unit); }
+    pthread_mutex_unlock(&g_out_mu);
     if(m->capture_worker){
         pthread_mutex_lock(&m->capture_lock);m->capture_closing=1;pthread_cond_signal(&m->capture_cond);pthread_mutex_unlock(&m->capture_lock);
         pthread_join(m->capture_thread,NULL);pthread_cond_destroy(&m->capture_cond);pthread_mutex_destroy(&m->capture_lock);free(m->capture_buf);
     }
     for (int i = 0; i < m->nsplit; i++) free(m->split[i].ids);
     for (int i = 0; i < r->param.effect_count; i++) { audio_reverb_free(m->effect[i].reverb); audio_effect_free(m->effect[i].dsp); free(m->effect[i].delay); }
+#ifdef GAME_BOTW
+    free(m->prev_mix);free(m->depop);
+#endif
     free(m->sink_address);free(m->sink_size);free(m->sink_offset);free(m->sink_old);free(m->sink_written);
     free(m->effect); free(m->effect_order);
     free(m->buf); free(m->offset); free(m->split); free(m->dest); free(m); r->mixer = NULL;
@@ -368,7 +414,7 @@ static void walk_skip_empty(Walk *w) {   /* the same as skip_empty in audio_rend
         const AudrenWaveBuffer *b = &w->v->buffers[w->index];
         if (b->loop && b->loop_count < 0) break;
         w->valid[w->index] = 0; w->offset = 0; w->loops = 0; w->index = (w->index + 1) & 3;
-        if (b->end_of_stream) w->ended = 1;
+        if (b->end_of_stream && !AUDIO_EOS_PLAYS_ON) w->ended = 1;
     }
 }
 static void walk_step(Walk *w) {   /* the same transitions as advance_voice in audio_renderer.c */
@@ -377,8 +423,8 @@ static void walk_step(Walk *w) {   /* the same transitions as advance_voice in a
     uint64_t length = (uint64_t)(b->end - b->start);
     if (++w->offset < length) return;
     if (b->loop && (b->loop_count < 0 || w->loops < b->loop_count)) { w->loops++; w->offset = b->loop_start > b->start && b->loop_start < b->end ? (uint64_t)(b->loop_start - b->start) : 0; return; }
-    w->valid[w->index] = 0; w->offset = 0; w->loops = 0; w->index = (w->index + 1) & 3;
-    if (b->end_of_stream) w->ended = 1;
+    w->valid[w->index] = 0; w->offset = 0; w->loops = 0; w->index = (w->index + 1) & 3;   /* Breath of the Wild: on into the next queued buffer */
+    if (b->end_of_stream && !AUDIO_EOS_PLAYS_ON) w->ended = 1;
     walk_skip_empty(w);
 }
 /* Decodes `frames` output samples per channel into out[c][k]; the renderer advances the voice afterwards by the same amount. */
@@ -403,14 +449,77 @@ static void accumulate(Mixer *m, int buffer, const float *src, float vol, int fr
     if (vol == 0 || buffer < 0 || buffer >= m->nbuf) return;
     float *d = mixbuf(m, buffer); for (int k = 0; k < frames; k++) d[k] += src[k] * vol;
 }
-static int mix_valid(AudioRenderer *r, int32_t id) { return id >= 0 && id <= r->param.submix_count && r->mixes[id].in_use; }
-static int mix_depth(AudioRenderer *r, int id) {
-    int d = 0;
-    for (int guard = 0; id > 0 && guard < 64; guard++, d++) {
-        if (!mix_valid(r, r->mixes[id].dest_mix_id)) return d + 1;
-        id = r->mixes[id].dest_mix_id;
+#ifdef GAME_BOTW
+/* The DSP never applies a new volume as a step: Breath of the Wild changes voice and channel volumes from one 5-ms
+   frame to the next (fades, ducking the music under a menu or a scene change) and stops voices in the middle of
+   their sound, and a step on a loud sample is a click. As Ryujinx.Audio does it (CommandGenerator.GenerateVoice):
+   the voice volume ramps from the last frame's value (VolumeRamp), each channel's mix volume ramps from the last
+   frame's value (MixRamp, which keeps the last sample it added to each buffer), and a voice that stopped or paused
+   adds those last samples to a depop value that decays by 0.962189 per sample (48 kHz) in its mix (DepopPrepare,
+   DepopForMixBuffers). A new voice starts at its volume; a voice that resumes ramps up from 0. */
+static int mix_valid(AudioRenderer *r, int32_t id);
+static void voice_ramp_mix(AudioRenderer *r, ServerVoice *v, float vs[6][MAX_FRAME], int cc, int frames) {
+    Mixer *m = r->mixer; const float v0 = v->prev_volume, v1 = v->in.volume;
+    for (int c = 0; c < cc; c++) ramp_gain(vs[c], v0, v1, frames);
+    v->prev_volume = v1;
+    const int mix = v->in.mix_id;
+    for (int c = 0; c < cc; c++) {
+        int32_t id = v->in.channel_ids[c]; if (id < 0 || id >= r->param.voice_count * 6) continue;
+        const AudrenChannelIn *ch = &r->channels[id]; float *prev = m->prev_mix[id];
+        for (int b = 0; b < r->mixes[mix].buffer_count && b < 24; b++) {
+            int buffer = m->offset[mix] + b;
+            if (buffer >= m->nbuf) continue;
+            if (ch->mix[b] != 0 || prev[b] != 0) v->last[c][b] = ramp_mix(mixbuf(m, buffer), vs[c], prev[b], ch->mix[b], frames);
+            else v->last[c][b] = 0;   /* a muted channel added nothing, so a later pause has no tail to fade */
+        }
+        memcpy(prev, ch->mix, sizeof ch->mix);
     }
-    return d;
+}
+static void voice_depop_prepare(AudioRenderer *r, ServerVoice *v) {
+    Mixer *m = r->mixer; const int mix = v->in.mix_id;
+    for (int c = 0; c < 6; c++) for (int b = 0; b < 24; b++) {
+        if (v->last[c][b] != 0 && mix_valid(r, mix) && b < r->mixes[mix].buffer_count && m->offset[mix] + b < m->nbuf) m->depop[m->offset[mix] + b] += v->last[c][b];
+        v->last[c][b] = 0;
+    }
+}
+/* A voice that was stopped or paused but is released or reused before the next render frame (audio_renderer.c update_voice) still
+   hands its tail to the depop, as the frame that sees the stop would. A voice freed while it is still started is cut. */
+int audio_mixer_voice_release(AudioRenderer *r, ServerVoice *v) {
+    Mixer *m = r->mixer; if (!m || !m->ramp || !v->was_started || v->state == SV_STARTED) return 0;
+    voice_depop_prepare(r, v); return 1;
+}
+static void mix_depop(AudioRenderer *r, int mix) {
+    Mixer *m = r->mixer; const float decay = r->param.sample_rate == 48000 ? 0.962189f : 0.943695f;
+    for (int b = 0; b < r->mixes[mix].buffer_count; b++) {
+        int i = m->offset[mix] + b; if (i >= m->nbuf || m->depop[i] == 0) continue;
+        float value = depop_decay(mixbuf(m, i), m->depop[i], decay, m->frame);
+        m->depop[i] = fabsf(value) < 1e-9f ? 0 : value;
+    }
+}
+#endif
+static int mix_valid(AudioRenderer *r, int32_t id) { return id >= 0 && id <= r->param.submix_count && r->mixes[id].in_use; }
+static int mix_depth(AudioRenderer *r, int id, int depth[256], uint8_t visiting[256]) {
+    if (!id) return 0;
+    if (depth[id] >= 0) return depth[id];
+    /* Valid routing graphs are acyclic; keep malformed cycles bounded too. */
+    if (visiting[id]) return 0;
+    visiting[id] = 1;
+    Mixer *m = r->mixer;
+    const AudrenMixIn *x = &r->mixes[id];
+    int d = 1;
+    if (x->dest_splitter_id != SPLITTER_UNUSED && x->dest_splitter_id < (uint32_t)m->nsplit) {
+        const SplitInfo *s = &m->split[x->dest_splitter_id];
+        for (int k = 0; k < s->ndest; k++) {
+            const SplitDest *dest = &m->dest[s->ids[k]];
+            if (!dest->used || !mix_valid(r, dest->dest)) continue;
+            int next = 1 + mix_depth(r, dest->dest, depth, visiting);
+            if (next > d) d = next;
+        }
+    } else if (mix_valid(r, x->dest_mix_id)) {
+        d = 1 + mix_depth(r, x->dest_mix_id, depth, visiting);
+    }
+    visiting[id] = 0;
+    return depth[id] = d;
 }
 
 /* Guest custom effects exchange int32 samples in two rings. Each ring has CPU and DSP
@@ -605,6 +714,17 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
     float (*vs)[MAX_FRAME]=m->voice_scratch,*filtered=m->filter_scratch;
     for (int i = 0; i < r->param.voice_count; i++) {
         ServerVoice *v = &r->voices[i];
+#ifdef GAME_BOTW
+        const int fade_in = v->fade_in; v->fade_in = 0;   /* a tail was queued in this slot since the last frame */
+        if (m->ramp && v->in.in_use) {
+            if (!v->ramp_ready) {   /* new voice: no ramp from an older volume, unless it starts over a kept tail */
+                v->prev_volume = fade_in && v->state == SV_STARTED ? 0 : v->in.volume; v->ramp_ready = 1;   /* over a kept tail it ramps up from 0 */
+                for (unsigned c = 0; c < v->in.channel_count && c < 6; c++) { int32_t id = v->in.channel_ids[c]; if (id >= 0 && id < r->param.voice_count * 6) memcpy(m->prev_mix[id], r->channels[id].mix, sizeof m->prev_mix[id]); }
+            }
+            if (v->state != SV_STARTED) { if (v->was_started) { voice_depop_prepare(r, v); v->prev_volume = 0; } v->was_started = 0; continue; }
+            v->was_started = 1;
+        }
+#endif
         if (!v->in.in_use || v->state != SV_STARTED || !v->in.sample_rate || !v->valid[v->index]) continue;
         int cc = (int)v->in.channel_count; if (cc < 1 || cc > 6) { report_once(m, 2, "voice channel count unsupported", cc); continue; }
         voice_render(r, v, vs, frames);
@@ -635,6 +755,9 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
                 for (int b = 0; b < r->mixes[d->dest].buffer_count && b < 24; b++) accumulate(m, m->offset[d->dest] + b, source, d->vol[b] * v->in.volume, frames);
             }
         } else if (mix_valid(r, v->in.mix_id)) {
+#ifdef GAME_BOTW
+            if (m->ramp) { voice_ramp_mix(r, v, vs, cc, frames); continue; }
+#endif
             for (int c = 0; c < cc; c++) {
                 int32_t id = v->in.channel_ids[c]; if (id < 0 || id >= r->param.voice_count * 6) continue;
                 const AudrenChannelIn *ch = &r->channels[id];
@@ -642,11 +765,15 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
             }
         }
     }
-    /* submixes: deepest first, so every mix is complete before it is folded into its destination */
-    int order[256], n = 0, depth[256];
-    for (int i = 1; i < mc && n < 256; i++) if (r->mixes[i].in_use) { depth[n] = mix_depth(r, i); order[n++] = i; }
-    for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++) if (depth[b] > depth[a]) { int t = order[a]; order[a] = order[b]; order[b] = t; t = depth[a]; depth[a] = depth[b]; depth[b] = t; }
+    /* Include every active splitter destination: processing a receiver before its source loses that audio. */
+    int order[256], n = 0, depth[256]; uint8_t visiting[256] = {0};
+    for (int i = 0; i < 256; i++) depth[i] = -1;
+    for (int i = 1; i < mc && n < 256; i++) if (r->mixes[i].in_use) { mix_depth(r, i, depth, visiting); order[n++] = i; }
+    for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++) if (depth[order[b]] > depth[order[a]]) { int t = order[a]; order[a] = order[b]; order[b] = t; }
     for (int a = 0; a < n; a++) {
+#ifdef GAME_BOTW
+        if (m->ramp) mix_depop(r, order[a]);
+#endif
         mix_effects(r, order[a]);
         const AudrenMixIn *x = &r->mixes[order[a]]; int src = m->offset[order[a]];
         if (x->dest_splitter_id != SPLITTER_UNUSED && x->dest_splitter_id < (uint32_t)m->nsplit) {
@@ -662,6 +789,9 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
                 for (int b = 0; b < r->mixes[x->dest_mix_id].buffer_count && b < 24; b++) accumulate(m, m->offset[x->dest_mix_id] + b, mixbuf(m, src + c), x->mix[c][b] * x->volume, frames);
         }
     }
+#ifdef GAME_BOTW
+    if (m->ramp && r->mixes[0].in_use) mix_depop(r, 0);
+#endif
     if (r->mixes[0].in_use) mix_effects(r, 0);
     /* device sink */
     const AudrenSinkIn *sink = NULL;int circular=0;
@@ -693,8 +823,8 @@ void audio_mixer_render(AudioRenderer *r, double seconds) {
       for (int k = 0; k < 2 * frames; k++) { double x = lr[k];m->level_sum+=x*x;if(fabs(x)>m->level_peak)m->level_peak=fabs(x); }
       m->level_count+=2*(uint64_t)frames;m->level_frames+=(uint64_t)frames;
       if (m->level_frames >= (uint64_t)r->param.sample_rate * 5) {
-          fprintf(stderr, "[totk-audio] output level: rms %.4f peak %.4f over %.1f s, underruns %llu, overruns %llu, missing frames %llu, callback frames %llu / nonzero %llu\n", sqrt(m->level_sum/(double)m->level_count),m->level_peak,
-                  m->level_frames/(double)r->param.sample_rate,(unsigned long long)atomic_load(&m->underruns),(unsigned long long)atomic_load(&m->overruns),(unsigned long long)atomic_load(&m->missing_frames),(unsigned long long)atomic_load(&m->callback_frames),(unsigned long long)atomic_load(&m->callback_nonzero));
+          fprintf(stderr, "[totk-audio] output level: rms %.4f peak %.4f over %.1f s, underruns %llu, overruns %llu, missing frames %llu, backlog trims %llu (%llu frames), callback frames %llu / nonzero %llu\n", sqrt(m->level_sum/(double)m->level_count),m->level_peak,
+                  m->level_frames/(double)r->param.sample_rate,(unsigned long long)atomic_load(&m->underruns),(unsigned long long)atomic_load(&m->overruns),(unsigned long long)atomic_load(&m->missing_frames),(unsigned long long)atomic_load(&m->trims),(unsigned long long)atomic_load(&m->trimmed_frames),(unsigned long long)atomic_load(&m->callback_frames),(unsigned long long)atomic_load(&m->callback_nonzero));
           m->level_sum=m->level_peak=0;m->level_count=m->level_frames=0;
       } }
     capture_copy(m,lr,frames);

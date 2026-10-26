@@ -12,10 +12,12 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - Settings.bundle   # the Settings app pane (game language picker); stored in NSUserDefaults, applied in main.m
       - path: ../runtime
         excludes:
           - frontend.m
           - loader.c
+          - game_patches_botw.c
       - path: ../third_party/d2r_gfx/gfx/nvn
       - path: ../third_party/d2r_gfx/gfx/tex
       - path: Gen/embed.S
@@ -40,12 +42,6 @@ targets:
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}
-        UIApplicationSceneManifest:
-          UIApplicationSupportsMultipleScenes: false
-          UISceneConfigurations:
-            UIWindowSceneSessionRoleApplication:
-              - UISceneConfigurationName: Default
-                UISceneDelegateClassName: TOTKScene
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIRequiresFullScreen: true
@@ -59,6 +55,12 @@ targets:
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
         CADisableMinimumFrameDurationOnPhone: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: TOTKSceneDelegate
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: ${TOTK_BUNDLE_ID}
       PRODUCT_NAME: TOTK

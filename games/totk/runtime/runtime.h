@@ -19,6 +19,7 @@ void *runtime_override(const char *name);
 void runtime_hle_stack_init(uint64_t tsd_offset);
 void runtime_gpu_path_probe(const char *which);
 void runtime_audio_probe(void);
+void runtime_audio_output_restart(int recreate);   /* audio_mixer.c: start the outputs again after an audio session interruption (iOS) */
 void *runtime_hle_wrap(void *fn);
 void runtime_hle_stack_set(uintptr_t top);
 void *runtime_font_override(const char *name);
@@ -44,6 +45,7 @@ int runtime_front_text_input(const RuntimeTextRequest *req, char *out, size_t ou
 void runtime_front_text_test(const char *op, const char *text);   /* diagnostics: "type" text, "enter", "esc" into the open bar */
 int runtime_core_away(void);          /* runtime/threads.c: a guest thread gives its virtual core up around a long host wait */
 void runtime_core_back(int *away);
+void runtime_spin_wait(unsigned module, uint64_t head);   // threads.c: a pass of a gated spin wait (loader.c runtime_dispatch)
 void runtime_save_probe(void);
 int runtime_fs_save_busy(void);   /* runtime/fs_host.c: the game is writing save data (window close waits) */
 uint8_t *runtime_module_base(const char *name);   /* runtime/loader.c: "main", "subsdk0", "sdk" (probes) */
@@ -90,31 +92,38 @@ void runtime_boot_count(const char *stage,uint64_t done,uint64_t total);   /* a 
    adds to the texture heap and to Graphics, and so to the application pool (runtime/services.c). */
 int runtime_output_res(unsigned *w,unsigned *h);
 uint64_t runtime_output_res_extra_bytes(void);
-int runtime_output_res_toggle(void);                    /* legacy two-state output size switch */
-/* Picture modes (runtime/output_modes.h): 1080p, MetalFX, 1440p ... up to the largest output; 0 modes where it cannot switch */
-int runtime_output_mode_count(void);
-const char *runtime_output_mode_name(int mode);
-int runtime_output_mode_get(void);                      /* the mode in force, -1 for none of them */
-int runtime_output_mode_set(int mode);
-int runtime_output_mode_cycle(void);                    /* key 3: the next mode */
-int runtime_mfx_upscale_get(void);                      /* MetalFX upscaling to the window, at any size */
-void runtime_mfx_upscale_set(int on);
+int runtime_render_res(unsigned *w, unsigned *h);   /* TOTK_RENDER_RES above 1600x900 that the heaps count (1.4.3 on the Mac; 0 elsewhere) */
+/* The settings panel's resolution (key 1, frontend.m): 1080p, MetalFX scaling 1080p up to the window, or the game's own
+   canvas at its native size (2K; runtime_output_native gives it), the same with MetalFX scaling it up to the window
+   (user 2026-10-25: "4K" as 2K + MetalFX, a 4K swapchain's heaps being too big for one GPU buffer); also 720p, a
+   1280x720 canvas whose scene follows it (user 2026-10-25, in place of the Switch's own handheld / docked sizes: the game
+   reads its docked scene size only at the start, so a switch to it never took effect).
+   runtime_output_modes: a bit (1 << mode) for each this game and start offer; 0 when the resolution cannot change. */
+enum { OUTPUT_MODE_OFF, OUTPUT_MODE_METALFX, OUTPUT_MODE_NATIVE, OUTPUT_MODE_NATIVE_METALFX, OUTPUT_MODE_720P };
+int runtime_output_modes(void);
+int runtime_output_mode(void);
+int runtime_output_mode_set(int mode);                  /* returns 0 where that mode is not offered */
+int runtime_output_native(int mode, unsigned *w, unsigned *h);   /* the canvas of OUTPUT_MODE_NATIVE / _NATIVE_METALFX; 0 when not offered */
 uint64_t runtime_output_size_current(void);              /* configured canvas: width in low 32 bits, height in high 32 bits */
 void runtime_warm_progress(uint64_t done,uint64_t total,uint64_t shaders,uint64_t shader_total,uint64_t pipelines,uint64_t pipeline_total);
 void runtime_warm_done(void);
 void runtime_game_slot_acquire(const char *mode);   /* runtime/game_slot.c: one game at a time */
 void *runtime_front_override(const char *name);
 int runtime_front_focus(void);
-void runtime_shortcut_help_toggle(void);
-int fps_overlay_toggle_hints(void);   /* shared key 1 toggle for FPS, shader and system-load overlays */
-int runtime_aspect_toggle(void);   /* runtime/aspect_patch.h: key 4, 16:9 <-> ultrawide (Mac, 1.2.1 / 1.4.3); 0 where unavailable */
+void runtime_settings_toggle(void);   /* key 1 (runtime/input.c): the settings panel opens or closes (frontend.m; nothing on the phone) */
+void fps_overlay_set_hud_mode(int mode);   /* gfx/nvn/fps_overlay.h HUD_MODE_*: the panel's overlay choice */
+int fps_overlay_hud_mode(void);
+int fps_overlay_full_hud(void);
+int runtime_aspect_set_ratio(float r);   /* the settings panel (aspect_patch.h; game_patches_botw.c): 16:9, 16:10, 21:9, 32:9 ...; 0 where unavailable */
+float runtime_aspect_ratio(void);        /* the ratio picked (16:9 = the game's own); 0 where the shape cannot be changed */
+float runtime_aspect_start(void);        /* TOTK_ASPECT's ratio, 0 without it (the panel offers it too) */
+void runtime_aspect_view(double w, double h);   /* frontend.m: the window's drawable size, which key 4 follows */
 float runtime_aspect_now(void);     /* the ratio in force, 0 = the game's own 16:9 */
-int runtime_aspect_on(void);        /* key 4's shape is on (Settings window) */
-void runtime_aspect_window(double w,double h);
+void runtime_front_resize_aspect(double ratio);   /* Mac: resize the window to a selected picture ratio */
 int runtime_ios_full_resolution(void);            /* iOS: the drawable at the screen's pixels, MetalFX scaling to it */
 void runtime_ios_set_full_resolution(int on);   /* the window's / screen's pixel size: the ratio the picture follows */
 int hud_compact(void);   /* gfx/nvn/fps_overlay.c: the overlay lines go to the window's corner panel (TOTK_HUD=corners: in the picture) */
-int hud_snapshot(int line, char *out, size_t n, int *highlight);   /* line 0..2: FPS, shaders, load; 0 = not published */
+int hud_snapshot(int line, char *out, size_t n, int *highlight);   /* line 0..3: FPS, shaders, render pipelines, load; 0 = not published */
 
 void *runtime_account_override(const char *name);
 
@@ -129,10 +138,19 @@ int runtime_handheld_mode(void);   /* TOTK_OPERATION_MODE=handheld (runtime/serv
 void *runtime_input_override(const char *name);
 typedef struct { uint64_t buttons; int32_t lx,ly,rx,ry; int connected; } RuntimeGamepadState;
 void runtime_gamepad_start(void);
+void runtime_gamepad_switch_left(void *controller, int x, int y);
 void runtime_gamepad_read(RuntimeGamepadState *out);
 /* Forget held buttons and sticks: macOS stops delivering controller events (including releases) while the app is in
    the background, so a button held at focus loss would otherwise stay pressed for the game. */
 void runtime_gamepad_clear(void);
+int runtime_gamepad_type_set(int type);     /* runtime/gamepad.m: the settings panel's controller type (gamepad_layout.h GAMEPAD_TYPE_*), saved; returns the type in force */
+int runtime_gamepad_type(int *detected);    /* runtime/gamepad.m, main thread: the picked type; *detected = auto's guess for the connected controller, -1 none */
+int runtime_mouse_set(int on);              /* runtime/gamepad.m: the settings panel's mouse mode, saved; returns it */
+int runtime_mouse_enabled(void);
+void runtime_mouse_set_hook(void (*hook)(void));   /* the window (frontend.m): mouse mode changed, on the main queue */
+void runtime_mouse_move(double dx, double dy);      /* points, AppKit's deltaX / deltaY (down positive) */
+void runtime_mouse_button(int button, int down);    /* main thread; 0 left, 1 right, 2 middle, 3 and 4 the side buttons */
+void runtime_mouse_release(void);                   /* main thread: buttons up, stick centred */
 void runtime_touch_pad_set(const RuntimeGamepadState *state);   /* on-screen touch controls (iOS) */
 /* Controller rumble and motion (opt-in TOTK_RUMBLE=1 / TOTK_GYRO=1): the game's hid side in runtime/hid_feedback.c, the
    Mac controller's haptics and motion sensors in runtime/gamepad_feedback.m. */
@@ -155,6 +173,8 @@ void runtime_motion_live(int on);   /* a controller with motion attached (1) / d
 void runtime_device_motion_controller(int attached);
 void runtime_device_motion_enable(int on);
 int runtime_device_motion_enabled(void);
+void runtime_motion_mouse(int on);  /* mouse mode (key 7) takes the sensor over (1) / gives it back to the controller (0) */
+void runtime_motion_feed_mouse(const double acc_g[3], const double gyro_rad_s[3], uint64_t now_ns);   /* already in the reference frame */
 void runtime_feedback_quiet(void);   /* focus lost: stop rumbling */
 #ifdef __OBJC__
 @class GCController;

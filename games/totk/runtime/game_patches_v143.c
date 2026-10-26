@@ -10,6 +10,12 @@
 #include <stdatomic.h>
 #include <math.h>
 #include <TargetConditionals.h>
+#if !TARGET_OS_IPHONE
+#include <mach/mach.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 typedef struct { uint64_t off; uint32_t original, replacement; } Patch;
 static const Patch fps60[] = {
@@ -62,6 +68,60 @@ static uint32_t branch(uint64_t pc,uint64_t target){
     if((delta&3)||delta<-(1<<27)||delta>=(1<<27))runtime_fail("1.4.3 patch branch outside range");
     return 0x14000000|(((uint32_t)(delta>>2))&0x3ffffff);
 }
+/* The actor animation update has a second, unscaled clock for cloth/hair
+ * (ordinary animation already receives FrameRateMgr's real-time step). Its
+ * explicit time-factor path still constructs {factor / 30, factor} every
+ * rendered frame. At 120 FPS that advances four seconds per real second.
+ * Correct only that clock, retaining pauses, slow motion and the fallback to
+ * the ordinary clock. 1.4.3 inlines the update in two actor paths; two other
+ * callers share the out-of-line update at +0x2a0e40. Its third caller already
+ * passes measured time and MUST NOT be scaled a second time.
+ *
+ * The inline veneers use only the original destination s register and x8,
+ * which the next original load overwrites. At the two call boundaries x8/s4
+ * are caller-saved scratch; the veneer tail-calls the original function with
+ * its original LR. No stack, flags, ordinary-clock arguments or callee-saved
+ * registers are changed. Stubs follow the four 32-byte aspect veneers. */
+static void patch_secondary_animation(Module *m,uint64_t data,uint64_t stub){
+    const char *enabled=getenv("TOTK_CLOTH_REALTIME");
+    if(enabled&&!strcmp(enabled,"0"))return;   /* diagnostic comparison */
+    const Patch sites[]={
+        {0x246eac,0x1e200940,0}, /* fmul s0,s10,s0: inline clock */
+        {0x345904,0x1e210801,0}, /* fmul s1,s0,s1: inline clock */
+        {0x24944c,0x94015e7d,0}, /* bl 0x2a0e40: actor with transform override */
+        {0x28bc98,0x9400546a,0}, /* bl 0x2a0e40: includes both transform branches */
+    };
+    enum { WORDS=19 };
+    if(stub+WORDS*4>((m->text_end+0x3fff)&~0x3fffULL)||data+8>m->size)
+        runtime_fail("1.4.3 secondary animation patch layout");
+    uint32_t code[WORDS]={
+        adrp(8,(uintptr_t)m->base+stub,(uintptr_t)m->base+data),
+        0xbd400100,0x1e200940,0xbd0367e0, /* ratio * factor -> sp+0x364 */
+        0xbd400500,0x1e200940,branch(stub+24,0x246eb0), /* seconds * factor */
+        adrp(8,(uintptr_t)m->base+stub+28,(uintptr_t)m->base+data),
+        0xbd400101,0x1e210801,0xbd0117e1, /* ratio * factor -> sp+0x114 */
+        0xbd400501,0x1e210801,branch(stub+52,0x345908),
+        adrp(8,(uintptr_t)m->base+stub+56,(uintptr_t)m->base+data),
+        0xbd400104,0x1e240842,0x1e240863, /* s2/s3 *= measured 30 Hz ratio */
+        branch(stub+72,0x2a0e40),
+    };
+    uint32_t jumps[]={branch(sites[0].off,stub),branch(sites[1].off,stub+28),
+        branch(sites[2].off,stub+56)|0x80000000u,branch(sites[3].off,stub+56)|0x80000000u};
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++){
+        if(sites[i].off+4>m->text_end)runtime_fail("1.4.3 secondary animation site outside text");
+        uint32_t word;memcpy(&word,m->base+sites[i].off,4);
+        if(word!=(TARGET_OS_IPHONE?jumps[i]:sites[i].original))
+            runtime_fail("1.4.3 secondary animation instruction mismatch");
+    }
+#if TARGET_OS_IPHONE
+    if(memcmp(m->base+stub,code,sizeof code))runtime_fail("1.4.3 embedded secondary animation veneer mismatch");
+#else
+    for(unsigned i=0;i<sizeof code;i++)if(m->base[stub+i])runtime_fail("1.4.3 secondary animation padding in use");
+    memcpy(m->base+stub,code,sizeof code);
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++)memcpy(m->base+sites[i].off,jumps+i,4);
+#endif
+    fprintf(stderr,"[totk] 1.4.3 cloth/hair clock: real-time seconds and ratio at 4 guarded actor sites; ordinary animation and time factors retained\n");
+}
 static void patch_realtime(Module *m){
     const char *enabled=getenv("TOTK_REALTIME");if(enabled&&!strcmp(enabled,"0"))return;
     uint64_t data=(m->file_size+0x3fff)&~0x3fffULL;
@@ -103,22 +163,116 @@ static void patch_realtime(Module *m){
  #endif
     frame_step_data=(_Atomic uint64_t *)(void *)(m->base+data);
     frame_interval_data=(_Atomic uint32_t *)(void *)(m->base+data+8);frame_step_store(1.0f/60.0f);
+    patch_secondary_animation(m,data,stub+176);
     fprintf(stderr,"[totk] 1.4.3 real-time frame step: 7 guarded sites, producer veneer +%#llx; original half-step selector and ratio/inverse/seconds/FPS calculations retained\n",(unsigned long long)stub);
 }
+/* High frame rates (#61, sky-island trampolines): the contact code at main+0x562a64 scales the bounce vector by 0.1
+   when X+0x28 > 100, X being the time object 0x3e58a4 feeds (X+0x28 = 30 / (30 Hz ratio * time scale), X+0x38 the
+   ratio). The shipping game steps at 30 Hz (ratio 1), so the check means "time slowed below 0.3"; above 100 FPS it also
+   fires with time running normally. The veneer compares X+0x28 * X+0x38 = 30 / time scale instead: the same value at
+   30 Hz, independent of the frame rate. TOTK_HIGHFPS_FIX=0 keeps the original check. */
+static void patch_slowmo_bounce(Module *m){
+    const char *e=getenv("TOTK_HIGHFPS_FIX");if(e&&!strcmp(e,"0"))return;
+    /* after the ultrawide veneers (+48, 4 x 32 bytes) and the cloth/hair clock (+176, 19 words); read-only data starts
+       at the next 4 KiB page */
+    uint64_t stub=((m->text_end+15)&~15ULL)+256;
+    if(stub+20>((m->text_end+0xfff)&~0xfffULL))runtime_fail("1.4.3 bounce veneer layout");
+    uint32_t veneer[]={0xbd402920,   /* ldr s0, [x9, #0x28]: X+0x28 */
+        0xbd403921,                  /* ldr s1, [x9, #0x38]: the 30 Hz ratio (s1 is set again by the next original instruction) */
+        0x1e210800,                  /* fmul s0, s0, s1 */
+        0x52a85909,                  /* mov w9, #0x42c80000: the original 100.0 */
+        branch(stub+16,0x562a6c)};
+    uint32_t word=branch(0x562a64,stub);
+#if TARGET_OS_IPHONE
+    uint32_t got;memcpy(&got,m->base+0x562a64,4);
+    if(got!=word||memcmp(m->base+stub,veneer,sizeof veneer))runtime_fail("1.4.3 embedded bounce patch mismatch");
+#else
+    const Patch guards[]={{0x562a64,0xbd402920,0},{0x562a68,0x52a85909,0},{0x562a6c,0x1e270121,0}};
+    for(unsigned i=0;i<sizeof guards/sizeof *guards;i++){uint32_t w;memcpy(&w,m->base+guards[i].off,4);if(w!=guards[i].original)runtime_fail("1.4.3 bounce check: original instruction mismatch");}
+    for(unsigned i=0;i<sizeof veneer;i++)if(m->base[stub+i])runtime_fail("1.4.3 bounce veneer padding not empty");
+    memcpy(m->base+stub,veneer,sizeof veneer);memcpy(m->base+0x562a64,&word,4);
+#endif
+    fprintf(stderr,"[totk] 1.4.3 high-FPS fix: trampoline slow-motion check uses the time scale, veneer +%#llx\n",(unsigned long long)stub);
+}
+#if !TARGET_OS_IPHONE
+/* High-frame-rate diagnostics (Mac, TOTK_INPUT_FILE commands). Such bugs sit in game code that compares the game's time
+   values with constants tuned for 30 Hz (#61: X+0x28 > 100 above). The time values: the FrameRateMgr singleton
+   (main+0x3ada848; +0x10 30 Hz ratio, +0x18 seconds, +0x1c integer FPS) and the time object X = [[main+0x3ad27c8]+0xc8]
+   (+0x24 seconds, +0x28 FPS, +0x38 ratio), which 0x3e58a4 updates only when the ratio changes.
+   - "frmwatch <seconds> [hex offset]" (FrameRateMgr, default +0x10) / "frmwatchx <seconds> <hex offset>" (X): a hardware
+     read watchpoint in every thread, re-armed every 10 ms. A hit (loader.c crash() hands SIGTRAP to
+     runtime_diag_watch_trap) records the reading instruction and its return address and disarms that thread, so the
+     load runs again; the readers are printed at the end. A frequent reader hides the later ones on its thread until the
+     next re-arm, and threshold code often runs only at the moment of contact: watch while the case happens.
+   - "xpoke <hex offset> <value>": writes a float into X. With the frame step pinned (framestep) the value stays until
+     the ratio changes, which tells which field a behaviour depends on. */
+static Module *diag_main;
+static uint64_t time_object(void){uint64_t x;memcpy(&x,diag_main->base+0x3ad27c8,8);memcpy(&x,(const void *)(uintptr_t)(x+0xc8),8);return x;}
+static uint64_t watch_addr;
+enum{WATCH_SLOTS=512};
+static struct{_Atomic uint64_t pc;_Atomic uint64_t lr;_Atomic uint32_t n;} watch_hits[WATCH_SLOTS];
+static void watch_set(thread_act_t t,int on){
+    arm_debug_state64_t d;mach_msg_type_number_t c=ARM_DEBUG_STATE64_COUNT;
+    if(thread_get_state(t,ARM_DEBUG_STATE64,(thread_state_t)&d,&c)!=KERN_SUCCESS)return;
+    /* WCR: enable, EL0, load, byte address select for the 4 bytes at watch_addr */
+    d.__wvr[0]=on?(watch_addr&~7ULL):0;d.__wcr[0]=on?((0xfULL<<((watch_addr&7)+5))|(1u<<3)|(2u<<1)|1u):0;
+    thread_set_state(t,ARM_DEBUG_STATE64,(thread_state_t)&d,ARM_DEBUG_STATE64_COUNT);
+}
+static void watch_all(int on){
+    thread_act_array_t list;mach_msg_type_number_t n;thread_act_t self=mach_thread_self();
+    if(task_threads(mach_task_self(),&list,&n)!=KERN_SUCCESS)return;
+    for(unsigned i=0;i<n;i++){if(list[i]!=self){thread_suspend(list[i]);watch_set(list[i],on);thread_resume(list[i]);}mach_port_deallocate(mach_task_self(),list[i]);}
+    vm_deallocate(mach_task_self(),(vm_address_t)list,n*sizeof *list);mach_port_deallocate(mach_task_self(),self);
+}
+int runtime_diag_watch_trap(void *context){
+    ucontext_t *u=context;uint64_t pc=u->uc_mcontext->__ss.__pc,lr=u->uc_mcontext->__ss.__lr;
+    unsigned ec=(unsigned)(u->uc_mcontext->__es.__esr>>26);if(!watch_addr||(ec!=0x34&&ec!=0x35))return 0;   /* watchpoint */
+    for(unsigned i=(unsigned)(pc>>2)%WATCH_SLOTS,k=0;k<WATCH_SLOTS;k++,i=(i+1)%WATCH_SLOTS){
+        uint64_t z=0;if(atomic_compare_exchange_strong(&watch_hits[i].pc,&z,pc)||z==pc){atomic_store(&watch_hits[i].lr,lr);atomic_fetch_add(&watch_hits[i].n,1);break;}
+    }
+    thread_act_t self=mach_thread_self();watch_set(self,0);mach_port_deallocate(mach_task_self(),self);
+    return 1;
+}
+static void *watch_run(void *arg){
+    double secs=((double *)arg)[0];unsigned off=(unsigned)((double *)arg)[1];int in_x=((double *)arg)[2]!=0;free(arg);
+    uint64_t obj;if(in_x)obj=time_object();else memcpy(&obj,diag_main->base+0x3ada848,8);
+    for(unsigned i=0;i<WATCH_SLOTS;i++){atomic_store(&watch_hits[i].pc,0);atomic_store(&watch_hits[i].n,0);}
+    watch_addr=obj+off;
+    fprintf(stderr,"[totk] frmwatch: %s %#llx, watching +%#x for %.0f s\n",in_x?"X":"FrameRateMgr",(unsigned long long)obj,off,secs);
+    for(double t=0;t<secs;t+=0.01){watch_all(1);usleep(10000);}
+    watch_all(0);uint64_t base=(uintptr_t)diag_main->base;unsigned total=0;
+    for(unsigned i=0;i<WATCH_SLOTS;i++){uint64_t pc=atomic_load(&watch_hits[i].pc);if(!pc)continue;uint32_t n=atomic_load(&watch_hits[i].n);total+=n;
+        fprintf(stderr,"[totk] frmwatch hit main%+lld x%u lr main%+lld\n",(long long)(pc-base),n,(long long)(atomic_load(&watch_hits[i].lr)-base));}
+    fprintf(stderr,"[totk] frmwatch done: %u hits\n",total);watch_addr=0;return NULL;
+}
+void runtime_diag_frm_watch(double secs,unsigned off,int in_x){
+    if(watch_addr)runtime_fail("frmwatch: a watch is already running");
+    double *a=malloc(3*sizeof *a);a[0]=secs;a[1]=off;a[2]=in_x;pthread_t t;pthread_create(&t,NULL,watch_run,a);pthread_detach(t);
+}
+void runtime_diag_xpoke(unsigned off,float value){
+    uint64_t x=time_object();float old;
+    memcpy(&old,(const void *)(uintptr_t)(x+off),4);memcpy((void *)(uintptr_t)(x+off),&value,4);
+    fprintf(stderr,"[totk] xpoke X+%#x: %g -> %g\n",off,old,value);
+}
+#endif
 static void patch_output_res(Module *m);
 static void patch_render_res(Module *m);
+static void patch_fixed_res(Module *m);
 void runtime_game_patches(Module *m) {
     runtime_survey_init(m);
     if (strcmp(m->name, "main")) runtime_fail("1.4.3 game patches expect main");
     patch_realtime(m);
     patch_output_res(m);
     patch_render_res(m);
+    patch_fixed_res(m);
+    patch_slowmo_bounce(m);
+#if !TARGET_OS_IPHONE
+    diag_main=m;   /* frmwatch / xpoke */
+#endif
     { static const uint64_t sites[] = {0x628c74, 0xb43460, 0x1ff04f4, 0x253fbb0};   /* camera update and setup, viewport x2 */
-      aspect_install(m, "1.4.3", sites, 4, ((m->text_end + 15) & ~15ULL) + 48,   /* after the two veneers above */
-                     (m->file_size + 0x3fff) & ~0x3fffULL);
-      static const uint64_t fov[] = {0x628c68, 0xb43458};   /* the camera update's and setup's tangent stores */
-      aspect_install_fov(m, "1.4.3", fov, 2, ((m->text_end + 15) & ~15ULL) + 48 + ASPECT_STUB * 4,
-                         (m->file_size + 0x3fff) & ~0x3fffULL); }
+      aspect_install(m, "1.4.3", sites, 4, 2, ((m->text_end + 15) & ~15ULL) + 48,   /* after the two veneers above */
+                     ((m->text_end + 15) & ~15ULL) + 320,   /* Vert+ stubs (2 x 304 bytes): after the bounce veneer at +256, before the rewriter's code at +1024 */
+                     (m->file_size + 0x3fff) & ~0x3fffULL); }
     const char *enabled = getenv("TOTK_FPS60");
     if (enabled && !strcmp(enabled, "0")) {
         fprintf(stderr, "[totk] 1.4.3 shipping frame controller (TOTK_FPS60=0)\n");
@@ -157,8 +311,6 @@ uint64_t runtime_output_size_current(void){
     uint8_t *page=atomic_load(&output_page);
     return page?atomic_load((_Atomic uint64_t *)(void *)(page+32)):pack_size(1920,1080);
 }
-static void output_request(unsigned w,unsigned h);
-#include "output_modes.h"   /* key 3's list of sizes, the Settings window's Picture */
 int runtime_output_res(unsigned *w,unsigned *h){
     static int decided,on;static unsigned cw,ch;
     if(!decided){
@@ -171,7 +323,20 @@ int runtime_output_res(unsigned *w,unsigned *h){
             on=0;
             if(e&&*e&&strcmp(e,"0")&&strcmp(e,"auto"))fprintf(stderr,"[totk] TOTK_OUTPUT_RES=%s ignored: iOS shows 720p only\n",e);
         }else if(e&&!strcmp(e,"0"))on=0;
-        else if(!e||!*e||!strcmp(e,"auto")){on=output_overlay_largest(&cw,&ch);output_full_at_start=0;}else{
+        else if(!e||!*e||!strcmp(e,"auto")){
+            /* The largest canvas whose heap overlay the app carries (romfs.c loads <canvas>-scene-<canvas>, the scene
+               following the canvas): 2K. The start stays 1080p; only the swapchain and the heaps are sized for 2K.
+               Not 4K (2026-10-25, user "添加 4k 支持"): its heaps make the game create one 1490 MiB memory pool at the
+               start, which the graphics layer's 1 GiB zero-copy limit refuses (nvn_mtl.m POOL_BUFFER_MAX, set after two
+               macOS kernel panics in IOGPUFamily); the game stopped at once. 4K needs that pool split first. */
+            const char *dir=getenv("TOTK_ROMFS_PATCHES_OUT");char path[4096];
+            static const unsigned sizes[][2]={{2560,1440}};
+            for(unsigned i=0;i<sizeof sizes/sizeof *sizes&&!on;i++){
+                snprintf(path,sizeof path,"%s/%ux%u-scene-%ux%u/manifest.tsv",dir?dir:"extracted/v143/romfs-patches-out",sizes[i][0],sizes[i][1],sizes[i][0],sizes[i][1]);
+                FILE *f=fopen(path,"r");if(f){fclose(f);on=1;cw=sizes[i][0];ch=sizes[i][1];}
+            }
+            output_full_at_start=0;
+        }else{
             char tail;
             if(sscanf(e,"%ux%u%c",&cw,&ch,&tail)!=2||cw<640||ch<360||cw>7680||ch>4320)runtime_fail("TOTK_OUTPUT_RES must be auto, 0 or widthxheight");
             on=1;output_full_at_start=1;
@@ -180,10 +345,58 @@ int runtime_output_res(unsigned *w,unsigned *h){
     }
     if(on){*w=cw;*h=ch;}return on;
 }
+/* The canvas-sized and the scene-sized render targets share DynamicTextureAllocatorMem (113664 KiB at a 1080p canvas
+ * and the 1600x900 scene). Each grows the heap by its own pixel ratio above the shipped size, a bigger scene with a 1.6
+ * margin: measured 2026-10-19, a 3440x1440 canvas with a 2580x1080 scene crashed in the allocator (main+0x1c2d20) at
+ * +258 MiB and loaded at +400 MiB. That was before render_res_publish divided out the game's own canvas scaling (the
+ * scene was then about 4620x1935), so for the scene asked for the heaps are now larger than needed: safe, not tight.
+ * The HeapDef overlay (scripts/make_output_res_overlay.py --scene) uses the same formula. Mac only: iOS keeps the
+ * game's own heaps. */
+static int render_res(unsigned *w,unsigned *h);
+int runtime_render_res(unsigned *w,unsigned *h){
+#if TARGET_OS_IPHONE
+    (void)w;(void)h;return 0;
+#else
+    return !getenv("TOTK_EXPORT_IOS")&&render_res(w,h);
+#endif
+}
 uint64_t runtime_output_res_extra_bytes(void){
-    unsigned w,h;if(!runtime_output_res(&w,&h))return 0;
-    double ratio=(double)w*h/(1920.0*1080.0);if(ratio<=1)return 0;
-    uint64_t kib=(uint64_t)ceil(113664.0*ratio/1024.0)*1024-113664;return kib<<10;
+    unsigned w,h,sw,sh;double grow=0;
+    if(runtime_output_res(&w,&h)&&(double)w*h>1920.0*1080.0)grow+=(double)w*h/(1920.0*1080.0)-1;
+    int scene=runtime_render_res(&sw,&sh)&&(double)sw*sh>1600.0*900.0;
+    if(scene)grow+=((double)sw*sh/(1600.0*900.0)-1);
+    if(grow<=0)return 0;
+    if(scene)grow*=1.6;
+    uint64_t kib=(uint64_t)ceil(113664.0*(1+grow)/1024.0)*1024-113664;return kib<<10;
+}
+/* The settings panel's picture mode is kept between runs in the file TOTK_PICTURE_MODE names (the launcher: <data>/picture-mode.txt;
+   unset: nothing is kept, as before). It holds one word: off, metalfx, native-2k, native-2k-metalfx, native-4k or 720p. The next start with
+   automatic output sizes begins in that mode; a size larger than this app's swapchain falls back to the largest one it
+   has (native-4k on a 2K app starts at native 2K). An explicit TOTK_OUTPUT_RES=<w>x<h> starts as it says. */
+static void picture_mode_save(uint64_t size){
+    const char *path=getenv("TOTK_PICTURE_MODE");if(!path||!*path)return;
+    extern int mfxup_output_enabled(void);
+    const char *mode=mfxup_output_enabled()?(size==pack_size(2560,1440)?"native-2k-metalfx":"metalfx"):size==pack_size(2560,1440)?"native-2k":
+                     size==pack_size(3840,2160)?"native-4k":size==pack_size(1280,720)?"720p":"off";
+    FILE *f=fopen(path,"w");
+    if(!f||fprintf(f,"%s\n",mode)<0||fclose(f)){fprintf(stderr,"[totk] picture mode: cannot write %s\n",path);return;}
+    fprintf(stderr,"[totk] picture mode %s kept for the next start\n",mode);
+}
+static void picture_mode_restore(uint8_t *page){
+    const char *path=getenv("TOTK_PICTURE_MODE");if(!path||!*path||output_full_at_start)return;
+    char mode[32]="";FILE *f=fopen(path,"r");if(!f)return;
+    if(!fgets(mode,sizeof mode,f))mode[0]=0;
+    fclose(f);mode[strcspn(mode,"\r\n")]=0;
+    unsigned w=1920,h=1080;
+    if(!strcmp(mode,"native-4k")&&output_w>=3840&&output_h>=2160){w=3840;h=2160;}
+    else if((!strcmp(mode,"native-4k")||!strcmp(mode,"native-2k"))&&output_w>=2560&&output_h>=1440){w=2560;h=1440;}
+    else if(!strcmp(mode,"native-2k-metalfx")&&output_w>=2560&&output_h>=1440){extern void dm_gfx_set_flag(const char *,int);
+        w=2560;h=1440;dm_gfx_set_flag("mfx_output",1);dm_gfx_set_flag("mfx_upscale",1);}
+    else if(!strcmp(mode,"metalfx")){extern void dm_gfx_set_flag(const char *,int);dm_gfx_set_flag("mfx_output",1);dm_gfx_set_flag("mfx_upscale",1);}
+    else if(!strcmp(mode,"720p")){w=1280;h=720;}
+    else if(strcmp(mode,"off")){fprintf(stderr,"[totk] picture mode: %s holds \"%s\", not off, metalfx, native-2k, native-2k-metalfx, native-4k or 720p; starting off\n",path,mode);return;}
+    atomic_store((_Atomic uint64_t *)(void *)(page+32),pack_size(w,h));
+    fprintf(stderr,"[totk] picture mode: starts in %s (kept from the last run, %s)\n",mode,path);
 }
 static void patch_output_res(Module *m){
     unsigned w,h;if(!runtime_output_res(&w,&h))return;
@@ -224,8 +437,10 @@ static void patch_output_res(Module *m){
     uint8_t *page=m->base+data;output_w=w;output_h=h;
     atomic_store((_Atomic uint64_t *)(void *)(page+32),output_full_at_start?pack_size(w,h):pack_size(1920,1080));
     atomic_store((_Atomic uint64_t *)(void *)(page+40),0);
+    picture_mode_restore(page);
     atomic_store(&output_page,page);   /* Publish initialized state to the HUD on the main thread. */
-    fprintf(stderr,"[totk] 1.4.3 output: %ux%u swapchain; starts %s, key 3 cycles %d picture modes up to that size; display-config veneer +%#llx\n",w,h,output_full_at_start?"at requested resolution":"at 1920x1080",runtime_output_mode_count(),(unsigned long long)stub);
+    uint64_t start=atomic_load((_Atomic uint64_t *)(void *)(page+32));
+    fprintf(stderr,"[totk] 1.4.3 output: %ux%u swapchain; starts at %ux%u, the settings panel picks the resolution up to the swapchain; display-config veneer +%#llx\n",w,h,(unsigned)start,(unsigned)(start>>32),(unsigned long long)stub);
 }
 /* Render resolution (TOTK_RENDER_RES=<w>x<h>, e.g. 960x540) - the 1.4.3 port of game_patches.c's patch.
    1.4.3 keeps the same graphics-parameter entry (+0x30 of the mode entry: handheld 1280x720, docked 1600x900) and the
@@ -242,9 +457,39 @@ static void patch_output_res(Module *m){
    the phone's embedded code carries it only when TOTK_RENDER_RES was set for the export. The phone checks the embedded
    words and writes the size on the data page itself: its own TOTK_RENDER_RES, or the game's handheld 1280x720 when unset
    (the phone always reports handheld mode). Embedded code without the patch keeps the game's own size. */
+/* The game scales its scene with the canvas: the size it renders is the mode entry's (or the patched) size times the
+   output width over 1920, on both axes (measured: 2560x1440 asked on a 2560x1440 canvas rendered 3408x1920, 3440x1440 on
+   the 3440x1440 canvas 6160x2576). The data page therefore holds the asked size divided by that factor, rewritten when
+   the settings panel changes the canvas, so the scene is the size asked for on every canvas. Below 1920 the same factor
+   holds (2026-10-25: 1920x1080 on the 720p canvas rendered 1280x720). The game reads this size only at the start: after
+   that it scales the size it read there with the canvas (a 1600x900 written on the 1080p canvas was never taken). */
+static uint8_t *render_page;static unsigned render_w,render_h;static int render_canvas;
+static void render_res_publish(unsigned canvas_w){
+    if(!render_page)return;
+    float k=canvas_w/1920.0f,v[2]={render_w/k,render_h/k};
+    if(render_canvas){v[0]=1920;v[1]=1080;render_w=(unsigned)(1920*k);render_h=(unsigned)(1080*k);}   /* the game's scaling makes it the canvas */
+    memcpy(render_page+16,v,sizeof v);
+    fprintf(stderr,"[totk] 1.4.3 render resolution: %ux%u on a %u-wide canvas (game size %.0fx%.0f, scaled by %.4f)\n",render_w,render_h,canvas_w,v[0],v[1],k);
+}
+/* On by default on both (user 2026-10-23: "两边默认都打开"; before, only with TOTK_RENDER_RES, as PR #19 brought it):
+   - Mac: the scene is the canvas's size, 1920x1080 on the 1080p canvas (the docked mode's own is 1600x900) and 2560x1440
+     on the 2K one (the settings panel), only ever up (the Mac never lowers resolution). The heaps grow with it (romfs.c picks the
+     <canvas>-scene-<size> HeapDef overlay build_app.py makes; the application pool follows).
+   - iPhone / iPad: 960x540 under the 1280x720 canvas, the game's own upscale (FSR 1 EASU, a3a570eb / ac58fc18) drawing it
+     there (user 2026-10-23: no MetalFX on the phone, as Breath of the Wild): the phone's GPU and memory are at their
+     limit; the same size as on the old port (2026-10-16, GPU 24.3 -> 17.3 ms, measured with MetalFX upscaling).
+   TOTK_RENDER_RES=<w>x<h> sets a size, =0 the game's own (no patch on the Mac; 1280x720 on the phone). */
 static int render_res(unsigned *w,unsigned *h){
     const char *e=getenv("TOTK_RENDER_RES");
-    if(!e||!*e||!strcmp(e,"0"))return 0;
+    if(e&&!strcmp(e,"0"))return 0;
+    if(!e||!*e){
+#if TARGET_OS_IPHONE
+        *w=960;*h=540;
+#else
+        render_canvas=1;unsigned ow,oh;if(runtime_output_res(&ow,&oh)){*w=ow;*h=oh;}else{*w=1920;*h=1080;}   /* the largest scene, for the heaps */
+#endif
+        return 1;
+    }
     char rest;
     if(sscanf(e,"%ux%u%c",w,h,&rest)!=2||*w<64||*h<64||*w>4096||*h>4096)runtime_fail("TOTK_RENDER_RES must be <width>x<height>");
     return 1;
@@ -282,21 +527,71 @@ static void patch_render_res(Module *m){
     }
     for(unsigned i=0;i<sizeof sites/sizeof *sites;i++)memcpy(m->base+sites[i].off,&want[i],4);
 #endif
-    float v[2]={(float)w,(float)h};
-    memcpy(m->base+data+16,v,sizeof v);
+    render_page=m->base+data;render_w=w;render_h=h;
+    render_res_publish(output_w?(unsigned)runtime_output_size_current():1920);
     fprintf(stderr,"[totk] 1.4.3 render resolution patch: scene render size %ux%u%s (4 instructions at main+0x585e48, value on the data page)\n",
             w,h,set?"":" (the game's handheld size; TOTK_RENDER_RES not set)");
 }
-/* The game's output at w x h from its next display layout (the "operation mode changed" path, see above). */
-static void output_request(unsigned w,unsigned h){
-    atomic_store((_Atomic uint64_t *)(void *)(output_page+32),pack_size(w,h));
+/* TOTK_FIXED_RES=1: no dynamic resolution. The game's controller (main+0x584300, called from the renderer's per-frame update at
+   main+0x58196c) keeps a window of 24 frame-time samples, predicts the next frame's cost and steps through resolution tiers
+   (the scene came out at 3024x1888, 2712x1696, 2416x1512 on a 3024x1890 canvas: 100 %, 90 %, 80 %). It returns the tier's scale
+   as a float in the low word of x0 (bit 33 set: the tier did not change); the caller stores cc4 * scale / cc0 as the renderer's
+   scale at +0xccc. Every path leaves through one epilogue, so the single instruction that moves the scale into the result
+   (main+0x5848a8, mov w9, w23) is replaced by a move of 1.0f: the controller still runs and picks tiers, but every tier is 100 %.
+   The size the render-resolution patch above chooses (TOTK_RENDER_RES) stays; this only stops the dynamic part. */
+static void patch_fixed_res(Module *m){
+    const char *e=getenv("TOTK_FIXED_RES");
+    if(!e||!*e||!strcmp(e,"0"))return;
+#if TARGET_OS_IPHONE
+    fprintf(stderr,"[totk] TOTK_FIXED_RES: not available in the embedded build\n");(void)m;
+#else
+    const uint64_t site=0x5848a8;const uint32_t original=0x2a1703e9,replacement=0x52a7f009;   /* mov w9, w23 -> mov w9, #0x3f800000 */
+    uint32_t word;memcpy(&word,m->base+site,4);
+    if(word!=original){
+        fprintf(stderr,"[totk] fixed resolution patch main+%#llx: found %08x, expected %08x\n",(unsigned long long)site,word,original);
+        runtime_fail("fixed resolution patch: main does not match 1.4.3");
+    }
+    memcpy(m->base+site,&replacement,4);
+    fprintf(stderr,"[totk] 1.4.3 fixed resolution (TOTK_FIXED_RES): the dynamic resolution controller's scale is held at 100 %% (1 instruction at main+%#llx)\n",(unsigned long long)site);
+#endif
+}
+/* The game's canvas: any size up to the swapchain's. The scene size goes first (the game rebuilds when told). */
+static void output_size_set(uint64_t want){
+    _Atomic uint64_t *size=(_Atomic uint64_t *)(void *)(output_page+32);
+    if(atomic_load(size)==want)return;
+    atomic_store(size,want);render_res_publish((unsigned)want);
     uint64_t config=atomic_load((_Atomic uint64_t *)(void *)(output_page+40));
     if(config){__atomic_fetch_or((uint32_t *)(uintptr_t)(config+8),1u<<21,__ATOMIC_SEQ_CST);runtime_oe_push_message(30);}
-    fprintf(stderr,"[totk] 1.4.3 output requested %ux%u (display config %s)\n",w,h,config?"ready":"not published yet");
+    fprintf(stderr,"[totk] 1.4.3 output requested %ux%u (display config %s)\n",(unsigned)want,(unsigned)(want>>32),config?"ready":"not published yet");
 }
-int runtime_output_res_toggle(void){
+/* The settings panel's resolution (runtime.h OUTPUT_MODE_*), kept for the next start (picture_mode_save). Native is
+   the swapchain's size (2K); with MetalFX the output stage then scales the 2K canvas up to the window (a 4K screen). */
+int runtime_output_native(int mode,unsigned *w,unsigned *h){
+    if(!output_page||(mode!=OUTPUT_MODE_NATIVE&&mode!=OUTPUT_MODE_NATIVE_METALFX))return 0;
+    *w=output_w;*h=output_h;return 1;
+}
+int runtime_output_modes(void){
     if(!output_page)return 0;
-    int full=runtime_output_size_current()!=pack_size(output_w,output_h);
-    output_request(full?output_w:1920,full?output_h:1080);
+    return 1<<OUTPUT_MODE_OFF|1<<OUTPUT_MODE_METALFX|1<<OUTPUT_MODE_720P|1<<OUTPUT_MODE_NATIVE|1<<OUTPUT_MODE_NATIVE_METALFX;
+}
+int runtime_output_mode(void){
+    extern int mfxup_output_enabled(void);
+    if(!output_page)return OUTPUT_MODE_OFF;
+    uint64_t now=atomic_load((_Atomic uint64_t *)(void *)(output_page+32));
+    if(now==pack_size(1280,720))return OUTPUT_MODE_720P;
+    if((unsigned)now>1920)return mfxup_output_enabled()?OUTPUT_MODE_NATIVE_METALFX:OUTPUT_MODE_NATIVE;
+    return mfxup_output_enabled()?OUTPUT_MODE_METALFX:OUTPUT_MODE_OFF;
+}
+int runtime_output_mode_set(int mode){
+    extern void dm_gfx_set_flag(const char *,int);
+    if(!output_page||mode<OUTPUT_MODE_OFF||mode>OUTPUT_MODE_720P||!(runtime_output_modes()&1<<mode))return 0;
+    unsigned w=1920,h=1080;
+    if(mode==OUTPUT_MODE_720P){w=1280;h=720;}else if(mode==OUTPUT_MODE_NATIVE||mode==OUTPUT_MODE_NATIVE_METALFX)runtime_output_native(mode,&w,&h);
+    output_size_set(pack_size(w,h));
+    int mfx=mode==OUTPUT_MODE_METALFX||mode==OUTPUT_MODE_NATIVE_METALFX;
+    dm_gfx_set_flag("mfx_output",mfx);dm_gfx_set_flag("mfx_upscale",mfx);
+    fprintf(stderr,"[totk] picture: %s\n",mode==OUTPUT_MODE_720P?"720p":mode==OUTPUT_MODE_NATIVE_METALFX?"native 2K, MetalFX to the window":
+            mode==OUTPUT_MODE_NATIVE?"native":mode==OUTPUT_MODE_METALFX?"MetalFX 2K":"off (1080p)");
+    picture_mode_save(atomic_load((_Atomic uint64_t *)(void *)(output_page+32)));
     return 1;
 }

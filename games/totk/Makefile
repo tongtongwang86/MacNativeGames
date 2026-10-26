@@ -68,14 +68,17 @@ verify:
 build/runtime_tables.h: scripts/prepare_runtime.py analysis/phase12-validation.json
 	"$(PY)" scripts/prepare_runtime.py
 
-build/totk-native: Makefile runtime/loader.c runtime/runtime.h runtime/game_patches.c runtime/game_patches.h runtime/game_version.h runtime/world_survey.c runtime/world_survey.h runtime/game_slot.c runtime/services.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/romfs.c runtime/romfs_path.h runtime/threads.c runtime/thread_compat.h runtime/thread_enter.S runtime/ipc.h runtime/audio_renderer.h runtime/audio_mixer.h runtime/audio_reverb.h runtime/audio_effects.h runtime/fs_host.h runtime/autoload.h runtime/autoload.c build/runtime_tables.h build/romfs_config.h build/shared_fonts_config.h runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/gamepad.m runtime/gamepad_layout.h runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/audio_effects.c runtime/fs_host.c vendor/savesync/savesync.m vendor/gamesettings/gamesettings.m runtime/opus_codec.c runtime/movie_host.c runtime/movie_host.h runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS)
+build/totk-native: Makefile runtime/loader.c runtime/runtime.h runtime/game_patches.c runtime/game_patches.h runtime/game_version.h runtime/world_survey.c runtime/world_survey.h runtime/game_slot.c runtime/services.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/romfs.c runtime/romfs_path.h runtime/threads.c runtime/thread_compat.h runtime/thread_enter.S runtime/ipc.h runtime/audio_renderer.h runtime/audio_mixer.h runtime/audio_reverb.h runtime/audio_effects.h runtime/fs_host.h runtime/autoload.h runtime/autoload.c build/runtime_tables.h build/romfs_config.h build/shared_fonts_config.h runtime/gfx_bridge.c runtime/frontend.m runtime/settings_panel.h runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/gamepad.m runtime/gamepad_layout.h runtime/switch_left_fallback.h runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/audio_effects.c runtime/fs_host.c vendor/savesync/savesync.m vendor/gamesettings/gamesettings.m runtime/opus_codec.c runtime/movie_host.c runtime/movie_host.h runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS)
 	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -Ithird_party/d2r_gfx/gfx/nvn/include -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include runtime/loader.c runtime/game_patches.c runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c runtime/threads.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/thread_enter.S runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/autoload.c runtime/gamepad.m runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/audio_effects.c runtime/fs_host.c vendor/savesync/savesync.m vendor/gamesettings/gamesettings.m runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
 
 # Both warm-up lists come from the one shared shader list (docs/shader-list.md): pso_title.tsv is what the title screen,
 # its menu and the save list use, the only list the first frame waits for (nvn_mtl.m warm_start); pso_manifest.tsv the rest.
-build/pso_manifest.tsv: assets/shader_list.tsv scripts/shader_list.py
+# Each game has its own list: SHADER_LIST names it (Breath of the Wild's is games/botw/assets/shader_list.tsv; the
+# botw160 targets default to it, build_app.py passes it).
+SHADER_LIST ?= assets/shader_list.tsv
+build/pso_manifest.tsv: $(SHADER_LIST) scripts/shader_list.py
 	@mkdir -p build
-	"$(PY)" scripts/shader_list.py export assets/shader_list.tsv build/pso_manifest.tsv build/pso_title.tsv
+	"$(PY)" scripts/shader_list.py export $(SHADER_LIST) build/pso_manifest.tsv build/pso_title.tsv
 build/pso_title.tsv: build/pso_manifest.tsv
 
 runtime: build/totk-native build/pso_manifest.tsv build/pso_title.tsv
@@ -128,7 +131,7 @@ build/gfx/%.o: % $(GFX_HEADERS) Makefile
 	@mkdir -p "$(dir $@)"
 	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -c "$<" -o "$@"
 
-.PHONY: graphics-assets shader-inventory verify-shaders probe-thread
+.PHONY: graphics-assets shader-inventory verify-shaders probe-thread probe-system-event
 graphics-assets:
 	"$(PY)" scripts/prepare_graphics_assets.py
 
@@ -146,6 +149,14 @@ probe-thread: build/thread-probe
 	build/thread-probe > analysis/thread-probe.json
 	@cat analysis/thread-probe.json
 
+# CPU only, against the real threads.c: SystemEvent bindings end with their write handle, a signal wakes only the waiters of
+# the signalled object, SignalToAddress writes mesosphère's value (tests/system_event_bind/probe.c; GAME_BOTW=1 for BotW's build)
+build/system-event-probe: tests/system_event_bind/probe.c runtime/threads.c runtime/thread_enter.S
+	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror $(if $(GAME_BOTW),-DGAME_BOTW=1) -Ithird_party/d2r_gfx/gfx/nvn/include tests/system_event_bind/probe.c runtime/threads.c runtime/thread_enter.S -o "$@"
+
+probe-system-event: build/system-event-probe
+	build/system-event-probe | tee analysis/system-event-probe.log
+
 .PHONY: probe-account probe-gfx
 probe-account:
 	"$(PY)" scripts/verify_account.py
@@ -153,9 +164,9 @@ probe-account:
 probe-gfx: runtime
 	"$(PY)" scripts/verify_gfx.py
 
-.PHONY: probe-gpu-pool-retire probe-gpu-tex-slots probe-gpu-arg-epoch probe-gpu-vertex-streams probe-gpu-widen probe-gpu-blockrt probe-gpu-midclear probe-gpu-winding probe-gpu-tile probe-gpu-depth-output probe-gpu-srgb-view probe-gpu-ds-clear probe-gpu-ub-rename probe-gpu-ubo-snapshot probe-gpu-upload-batch probe-gpu-storage-view probe-gpu-linear-rt probe-gpu-texture-retire probe-gpu-layer-merge probe-gpu-cube-merge probe-gpu-compressed-alias probe-gpu-drv-c0 probe-gpu-dispatch-chain probe-gpu-copy-alias
+.PHONY: probe-gpu-pool-retire probe-gpu-tex-slots probe-gpu-arg-epoch probe-gpu-vertex-streams probe-gpu-widen probe-gpu-blockrt probe-gpu-midclear probe-gpu-winding probe-gpu-tile probe-gpu-depth-output probe-gpu-srgb-view probe-gpu-ds-clear probe-gpu-ub-rename probe-gpu-ubo-snapshot probe-gpu-upload-batch probe-gpu-storage-view probe-gpu-linear-rt probe-gpu-texture-retire probe-gpu-texels-region probe-gpu-layer-merge probe-gpu-cube-merge probe-gpu-compressed-alias probe-gpu-drv-c0 probe-gpu-dispatch-chain probe-gpu-copy-alias
 # GPU paths isolated after a kernel panic: each probe runs alone, under the Metal API validation layer.
-probe-gpu-pool-retire probe-gpu-tex-slots probe-gpu-arg-epoch probe-gpu-vertex-streams probe-gpu-widen probe-gpu-blockrt probe-gpu-midclear probe-gpu-winding probe-gpu-tile probe-gpu-depth-output probe-gpu-srgb-view probe-gpu-ds-clear probe-gpu-ub-rename probe-gpu-ubo-snapshot probe-gpu-upload-batch probe-gpu-storage-view probe-gpu-linear-rt probe-gpu-texture-retire probe-gpu-layer-merge probe-gpu-cube-merge probe-gpu-compressed-alias probe-gpu-drv-c0 probe-gpu-dispatch-chain probe-gpu-copy-alias: runtime
+probe-gpu-pool-retire probe-gpu-tex-slots probe-gpu-arg-epoch probe-gpu-vertex-streams probe-gpu-widen probe-gpu-blockrt probe-gpu-midclear probe-gpu-winding probe-gpu-tile probe-gpu-depth-output probe-gpu-srgb-view probe-gpu-ds-clear probe-gpu-ub-rename probe-gpu-ubo-snapshot probe-gpu-upload-batch probe-gpu-storage-view probe-gpu-linear-rt probe-gpu-texture-retire probe-gpu-texels-region probe-gpu-layer-merge probe-gpu-cube-merge probe-gpu-compressed-alias probe-gpu-drv-c0 probe-gpu-dispatch-chain probe-gpu-copy-alias: runtime
 	MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=assert TOTK_HEADLESS=1 build/totk-native rewritten/v0 $@ > analysis/native-$@.json
 	cat analysis/native-$@.json
 .PHONY: probe-game-slot desktop-launcher
@@ -197,6 +208,13 @@ probe-audio: runtime
 	cat analysis/native-audio-probe.json
 	@if TOTK_AUDIO_STOP_RELEASE=0 build/totk-native rewritten/v0 probe-audio > /dev/null 2> analysis/native-audio-probe-stop-negative.log; then echo "audio stop negative control passed unexpectedly"; exit 1; \
 	else echo "audio negative control (a stopped voice keeps its queued buffers) failed as expected: $$(grep -o 'audio probe: [^"]*' analysis/native-audio-probe-stop-negative.log | head -1)"; fi
+# Breath of the Wild 1.9.0: the same probe in the BOTW binary, with the volume ramps and depop (audio_mixer.c voice_ramp_mix).
+.PHONY: probe-audio-botw190
+probe-audio-botw190: runtime-botw190
+	build/totk-native-botw190 rewritten/botw190 probe-audio > analysis/native-audio-probe-botw190.json
+	cat analysis/native-audio-probe-botw190.json
+	@if TOTK_AUDIO_RAMP=0 build/totk-native-botw190 rewritten/botw190 probe-audio > /dev/null 2> analysis/native-audio-probe-ramp-negative.log; then echo "audio ramp negative control passed unexpectedly"; exit 1; \
+	else echo "audio negative control (volume steps and stops not smoothed) failed as expected: $$(grep -o 'audio probe: [^"]*' analysis/native-audio-probe-ramp-negative.log | head -1)"; fi
 .PHONY: probe-vpool
 probe-vpool: runtime
 	build/totk-native rewritten/v0 probe-vpool > analysis/native-vpool-probe.json
@@ -377,6 +395,18 @@ $(RENDER_PROBE_DIR)/depth16-clear-probe: tests/depth16_clear/probe.m third_party
 probe-depth16-clear: $(RENDER_PROBE_DIR)/depth16-clear-probe
 	$(GAME_SLOT_RUN) "$(RENDER_PROBE_DIR)/depth16-clear-probe"
 
+.PHONY: probe-fbread
+.PHONY: probe-gpu-writeback
+probe-gpu-writeback: runtime-botw160
+	MTL_DEBUG_LAYER=1 build/totk-native-botw160 rewritten/botw160 probe-gpu-writeback
+
+# Decals reading the attachment they write (nvn_fbread.h): overlapping draws see each other only through the tile read.
+$(RENDER_PROBE_DIR)/fbread-probe: tests/fbread/probe.m third_party/d2r_gfx/gfx/nvn/nvn_fbread.h
+	@mkdir -p "$(RENDER_PROBE_DIR)"
+	xcrun clang -std=c11 -O2 -Wall -Wextra -Werror -fobjc-arc -Ithird_party/d2r_gfx/gfx/nvn tests/fbread/probe.m -framework Metal -framework Foundation -o "$@"
+probe-fbread: $(RENDER_PROBE_DIR)/fbread-probe
+	$(GAME_SLOT_RUN) "$(RENDER_PROBE_DIR)/fbread-probe"
+
 # Independent, game-data-free DSP and production-mixer comparisons (from the original port, 2026-10-18). Keep vectors,
 # .NET build output and executables outside the source checkout. Needs a .NET SDK and a Ryujinx.Audio build.
 AUDIO_TEST_WORK ?= /tmp/totk-native-audio-effects
@@ -391,6 +421,43 @@ test-audio-effects:
 	xcrun clang -std=c11 -O2 -g -Wall -Wextra -Werror -fsanitize=undefined -fno-sanitize-recover=all -Iruntime tests/audio_effects/mixer_probe.c runtime/audio_effects.c runtime/audio_reverb.c -framework AudioToolbox -o "$(AUDIO_TEST_WORK)/mixer-probe"
 	"$(AUDIO_TEST_WORK)/mixer-probe" "$(AUDIO_TEST_WORK)/reference.bin"
 
+# ---- The Legend of Zelda: Breath of the Wild 1.6.0 (botw.md) ----
+# The shared runtime and graphics layer compiled with GAME_BOTW: the graphics objects go to build/gfx-botw, so every TOTK
+# binary keeps exactly the code it had. game_patches_botw.c replaces game_patches.c.
+GFX_OBJECTS_BOTW := $(addprefix build/gfx-botw/,$(addsuffix .o,$(GFX_SRC)))
+build/gfx-botw/%.o: % $(GFX_HEADERS) Makefile
+	@mkdir -p "$(dir $@)"
+	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -DGAME_BOTW=1 -c "$<" -o "$@"
+.PHONY: runtime-botw160
+build/botw160/runtime_tables.h: scripts/prepare_runtime.py analysis/botw160-port/phase12-validation.json
+	"$(PY)" scripts/prepare_runtime.py --version botw160
+build/botw160/romfs_config.h: scripts/prepare_romfs_backend.py extracted/botw160/romfs/index.json
+	"$(PY)" scripts/prepare_romfs_backend.py --version botw160
+# The add-on content volumes (games/botw/scripts/extract_aoc_romfs.py -> extracted/botw160/aoc/<index>); a missing index is not listed.
+build/botw160/aoc_config.h: scripts/prepare_romfs_backend.py $(wildcard extracted/botw160/aoc/*/index.json)
+	"$(PY)" scripts/prepare_romfs_backend.py --version botw160 --aoc
+build/totk-native-botw160: $(wildcard runtime/*.[ch] runtime/*.m runtime/*.S) build/botw160/runtime_tables.h build/botw160/romfs_config.h build/botw160/aoc_config.h build/shared_fonts_config.h $(GFX_OBJECTS_BOTW) Makefile
+	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -Ithird_party/d2r_gfx/gfx/nvn/include -DGAME_BOTW=1 -DGAME_BOTW160=1 -Ibuild/botw160 -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include runtime/loader.c runtime/game_patches_botw.c runtime/aoc_romfs.c runtime/settings_service.c runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c runtime/threads.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/thread_enter.S runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/autoload.c runtime/gamepad.m runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/audio_effects.c runtime/fs_host.c runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS_BOTW) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
+runtime-botw160: SHADER_LIST ?= ../botw/assets/shader_list.tsv
+runtime-botw160: build/totk-native-botw160 build/pso_manifest.tsv build/pso_title.tsv
+# Breath of the Wild 1.9.0 (docs/botw-v1.9.0-port.md): the same runtime, and the graphics objects compiled with GAME_BOTW190
+# as well (build/gfx-botw190; the NVN version it reports differs from 1.6.0's).
+GFX_OBJECTS_BOTW190 := $(addprefix build/gfx-botw190/,$(addsuffix .o,$(GFX_SRC)))
+build/gfx-botw190/%.o: % $(GFX_HEADERS) Makefile
+	@mkdir -p "$(dir $@)"
+	xcrun clang $(NATIVE_OPT) -g -Wall -Wextra $(GFX_FLAGS) -DGAME_BOTW=1 -DGAME_BOTW190=1 -c "$<" -o "$@"
+.PHONY: runtime-botw190
+build/botw190/runtime_tables.h: scripts/prepare_runtime.py analysis/botw190-port/phase12-validation.json
+	"$(PY)" scripts/prepare_runtime.py --version botw190
+build/botw190/romfs_config.h: scripts/prepare_romfs_backend.py extracted/botw190/romfs/index.json
+	"$(PY)" scripts/prepare_romfs_backend.py --version botw190
+# 1.9.0: the add-on content volumes the build imported from the --dlc NSPs (extracted/botw190/aoc/<index>).
+build/botw190/aoc_config.h: scripts/prepare_romfs_backend.py $(wildcard extracted/botw190/aoc/*/index.json)
+	"$(PY)" scripts/prepare_romfs_backend.py --version botw190 --aoc
+build/totk-native-botw190: $(wildcard runtime/*.[ch] runtime/*.m runtime/*.S) build/botw190/runtime_tables.h build/botw190/romfs_config.h build/botw190/aoc_config.h build/shared_fonts_config.h $(GFX_OBJECTS_BOTW190) Makefile
+	xcrun clang -std=c11 $(NATIVE_OPT) -g -Wall -Wextra -Werror -Wno-deprecated-declarations -Ithird_party/d2r_gfx/gfx/nvn/include -DGAME_BOTW=1 -DGAME_BOTW190=1 -Ibuild/botw190 -Ibuild -I/opt/homebrew/opt/opus/include/opus -I/opt/homebrew/opt/libvpx/include runtime/loader.c runtime/game_patches_botw.c runtime/aoc_romfs.c runtime/settings_service.c runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c runtime/threads.c runtime/gate.S runtime/hle_stack.S runtime/hle_stack.c runtime/thread_enter.S runtime/gfx_bridge.c runtime/frontend.m runtime/account.c runtime/input.c runtime/hid_feedback.c runtime/motion_fusion.c runtime/autoload.c runtime/gamepad.m runtime/gamepad_feedback.m runtime/gfx_probe.c runtime/vpool_probe.m runtime/gpu_path_probe.m runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/audio_effects.c runtime/fs_host.c runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c $(GFX_OBJECTS_BOTW190) /opt/homebrew/opt/opus/lib/libopus.a /opt/homebrew/opt/libvpx/lib/libvpx.a -framework Metal -framework MetalFX -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics -framework CoreText -framework UniformTypeIdentifiers -fobjc-arc -framework Cocoa -framework CoreVideo -framework CoreFoundation -framework AudioToolbox -framework GameController -framework CoreHaptics -framework IOKit -o "$@"
+runtime-botw190: SHADER_LIST ?= ../botw/assets/shader_list.tsv
+runtime-botw190: build/totk-native-botw190 build/pso_manifest.tsv build/pso_title.tsv
 # Production Opus-wrapper regression checks; no game assets or audio device needed.
 OPUS_TEST_WORK ?= /tmp/totk-native-opus-codec
 OPUS_PREFIX ?= /opt/homebrew/opt/opus
@@ -402,3 +469,10 @@ test-opus-codec:
 	"$(OPUS_TEST_WORK)/probe"
 	@probe_status=0; "$(OPUS_TEST_WORK)/probe" --bad-range > "$(OPUS_TEST_WORK)/negative-range.log" 2>&1 || probe_status=$$?; test "$$probe_status" -eq 1
 	@grep -q 'Opus stream integrity' "$(OPUS_TEST_WORK)/negative-range.log"
+
+.PHONY: probe-gpu-sampler-border
+probe-gpu-sampler-border: runtime-v143
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; TOTK_BORDER_PLAIN=0 TOTK_PROFILE_DIR="$$tmp/profile" TOTK_SHADER_CACHE="$$tmp/cache" DM_PSO_RECORD="$$tmp/pso.tsv" $(GAME_SLOT_RUN) build/totk-native-v143 rewritten/v143 probe-gpu-sampler-border
+
+.PHONY: probe-gpu-sampler-border-edge
+probe-gpu-sampler-border-edge: probe-gpu-sampler-border

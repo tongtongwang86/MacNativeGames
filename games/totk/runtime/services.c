@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <ctype.h>
+#include "game_language.h"
 #include <string.h>
 #include <sys/mman.h>
 
@@ -56,10 +57,15 @@ static unsigned char alias_stale[ALIAS_SIZE_MAX/4096];
 static uint64_t alias_bytes;
 static uint8_t user_exception_context[0x1000] __attribute__((aligned(0x1000)));
 #define SYSTEM_RESOURCE_BUDGET (32ULL<<20)
+#ifdef GAME_BOTW
+#define GAME_PROGRAM_ID 0x01007ef00011e000ULL   /* GetInfo 18 (ProgramId): Breath of the Wild */
+#else
+#define GAME_PROGRAM_ID 0x0100f2c0115b6000ULL
+#endif
 #define HEAP_CAP (4ULL<<30)   /* 1.4.3 sets a 2.2 GiB heap during nninitStartup */
 #define APP_POOL app_pool()
 static uint64_t app_pool(void){static uint64_t v;if(!v){const char *e=getenv("TOTK_APP_POOL");uint64_t extra=(runtime_output_res_extra_bytes()+0x1fffff)&~0x1fffffULL;
- v=e?strtoull(e,NULL,0):0xcd500000ULL+extra;if(!e&&extra)fprintf(stderr,"[totk] application pool %#llx: +%llu MiB for the true-2K texture heaps (TOTK_OUTPUT_RES)\n",(unsigned long long)v,(unsigned long long)(extra>>20));}return v;}
+ v=e?strtoull(e,NULL,0):0xcd500000ULL+extra;if(!e&&extra)fprintf(stderr,"[totk] application pool %#llx: +%llu MiB for the bigger texture heaps (TOTK_OUTPUT_RES, TOTK_RENDER_RES)\n",(unsigned long long)v,(unsigned long long)(extra>>20));}return v;}
 /* TOTK: application memory pool reported to the game (default: retail 3.2 GiB; TOTK_OUTPUT_RES adds what its HeapDef overlay gives the texture heaps) */
 #define ALIAS_START ((uintptr_t)alias_space)
 #define STACK_START ((uintptr_t)low_space+STACK_OFF)
@@ -73,23 +79,28 @@ static uint8_t *reserve_fixed(uint64_t at,uint64_t size){
  mach_vm_address_t a=at;   /* FIXED without OVERWRITE: fails instead of replacing an existing mapping */
  return mach_vm_map(mach_task_self(),&a,size,0,VM_FLAGS_FIXED,MEMORY_OBJECT_NULL,0,FALSE,VM_PROT_NONE,VM_PROT_ALL,VM_INHERIT_DEFAULT)==KERN_SUCCESS?(uint8_t *)(uintptr_t)a:NULL;
 }
-#if TARGET_OS_IPHONE
 #define GUEST_ALIGN (2ULL<<20)
-/* Reserve size bytes in the lowest free gap of this process's map above 4 GiB (2 MiB aligned). The end of the map is
+/* Reserve size bytes in a free gap (2 MiB aligned). The end of the map is
    not reported, so the last gap is only tried; FIXED fails there with KERN_NO_SPACE when it reaches past the end. */
-static uint8_t *reserve_in_gap(uint64_t size,int log){
- uint64_t prev=1ULL<<32;
+static uint8_t *reserve_in_gap_from(uint64_t size,int log,uint64_t prev){
  for(;;){
   mach_vm_address_t r=prev;mach_vm_size_t rsize=0;vm_region_basic_info_data_64_t info;mach_msg_type_number_t n=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t obj=MACH_PORT_NULL;
   int more=mach_vm_region(mach_task_self(),&r,&rsize,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&n,&obj)==KERN_SUCCESS;
-  uint64_t start=(prev+GUEST_ALIGN-1)&~(GUEST_ALIGN-1),end=more?r:GUEST_ADDRESS_LIMIT;
+  if(obj!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),obj);
+  uint64_t start=(prev+GUEST_ALIGN-1)&~(GUEST_ALIGN-1),end=more&&r<GUEST_ADDRESS_LIMIT?r:GUEST_ADDRESS_LIMIT;
   if(end>start&&end-start>=(256ULL<<20)&&log)fprintf(stderr,"[totk-mem] free %#llx..%s%#llx\n",(unsigned long long)start,more?"":"(end of map, at most) ",(unsigned long long)end);
   if(end>start&&end-start>=size){uint8_t *p=reserve_fixed(start,size);if(p)return p;}
-  if(!more)return NULL;
+  if(!more||r>=GUEST_ADDRESS_LIMIT||!rsize||r+rsize<=prev)return NULL;
   prev=r+rsize;
  }
 }
+static uint8_t *reserve_in_gap(uint64_t size,int log){
+#if TARGET_OS_IPHONE
+ return reserve_in_gap_from(size,log,1ULL<<32);
+#else
+ return reserve_in_gap_from(size,log,LOW_SEARCH_FROM);
 #endif
+}
 static void memory_init(void) {
  if(alias_space)return;
 #if TARGET_OS_IPHONE
@@ -108,14 +119,32 @@ static void memory_init(void) {
      0x70_0000_0000..2^39, so neither fixed region fits. As on iOS, put stack+heap and the alias region side by side in one
      free hole, shrinking the alias region (the game uses < 3 GiB of it) until it fits. TOTK_ALIAS_GIB pins one size. */
   if(alias_space)mach_vm_deallocate(mach_task_self(),(mach_vm_address_t)(uintptr_t)alias_space,ALIAS_SIZE);
+  alias_space=NULL;
   uint64_t want=alias_requested(),least=getenv("TOTK_ALIAS_GIB")?want:(8ULL<<30);
   for(uint64_t g=want;!low_space;g-=4ULL<<30){
    for(uint64_t at=LOW_SEARCH_FROM;at+LOW_SIZE+g<=GUEST_ADDRESS_LIMIT&&!low_space;at+=1ULL<<30)
     if((low_space=reserve_fixed(at,LOW_SIZE+g)))alias_len=g;
    if(g<least+(4ULL<<30))break;
   }
+  if(!low_space){
+   /* ASLR can leave only ~13 GiB holes, or a 14 GiB hole missed by the old
+      1 GiB stride. Preserve successful layouts; only a previously failing
+      startup queries exact gaps, then tries separate stack/heap and alias
+      reservations (already supported by the original fixed layout). */
+   for(uint64_t g=want;!low_space;g-=4ULL<<30){
+    if((low_space=reserve_in_gap(LOW_SIZE+g,0))){alias_space=low_space+LOW_SIZE;alias_len=g;break;}
+    /* Keep low below alias: GetInfo's ASLR span and QueryMemory use that order,
+       including an explicit TOTK_ALIAS_GIB smaller than LOW_SIZE. */
+    uint8_t *separate_low=reserve_in_gap(LOW_SIZE,0);
+    if(separate_low){
+     if((alias_space=reserve_in_gap_from(g,0,(uintptr_t)separate_low+LOW_SIZE))){low_space=separate_low;alias_len=g;break;}
+     mach_vm_deallocate(mach_task_self(),(mach_vm_address_t)(uintptr_t)separate_low,LOW_SIZE);
+    }
+    if(g<least+(4ULL<<30))break;
+   }
+  }
   if(!low_space)runtime_fail(getenv("TOTK_ALIAS_GIB")?"reserve guest stack, heap and the TOTK_ALIAS_GIB alias region below 2^39":"reserve guest stack, heap and alias regions below 2^39");
-  alias_space=low_space+LOW_SIZE;
+  if(!alias_space)alias_space=low_space+LOW_SIZE;
  }
 #endif
  heap=low_space+HEAP_OFF;
@@ -207,11 +236,20 @@ void runtime_guest_resident(uint64_t *resident,uint64_t *dirty,uint64_t *compres
 }
 static void host_diag_init(void) { fprintf(stderr,"[totk] native diagnostics initialized\n"); }
 static void host_oe_init(void) { fprintf(stderr,"[totk] application environment: local macOS process\n"); }
+#ifdef GAME_BOTW
+void runtime_aoc_announce(void); int runtime_aoc_count(void); int runtime_aoc_list(int *out,int offset,int count);   /* aoc_romfs.c */
+static void host_aoc_init(void) { runtime_aoc_announce(); }   /* aoc_romfs.c: the DLC volumes (botw.md) */
+static int host_aoc_count(void) { return runtime_aoc_count(); }
+static int host_aoc_list(int *out,int offset,int count) {
+ if(offset<0||count<0)runtime_fail("invalid add-on content list range");return runtime_aoc_list(out,offset,count);
+}
+#else
 static void host_aoc_init(void) { fprintf(stderr,"[totk] add-on content: no DLC\n"); }
 static int host_aoc_count(void) { return 0; }
 static int host_aoc_list(int *out,int offset,int count) {
  (void)out;if(offset<0||count<0)runtime_fail("invalid add-on content list range");return 0;
 }
+#endif
 static void host_error_init(void) { fprintf(stderr,"[totk] error contexts: local diagnostics\n"); }
 static void host_fs_init(void) { runtime_fs_init(); }
 static void host_pctl_init(void) { fprintf(stderr,"[totk] local application parental controls initialized\n"); }
@@ -242,37 +280,47 @@ static uint32_t performance_configuration[2];
 static void performance_config(int mode,int cfg) {if(mode<0||mode>1)runtime_fail("invalid performance mode");performance_configuration[mode]=(uint32_t)cfg;fprintf(stderr,"[totk] performance request mode=%d cfg=%x: native macOS scheduling\n",mode,(uint32_t)cfg);}
 /* The game's language: TOTK_LANG as given (a Switch language code), otherwise from a locale: TOTK_LOCALE, which the
    launcher sets to the app's first preferred language (BCP 47, e.g. "pt-BR"; it follows a per-app language), or else
-   the Mac's current locale. Brazil maps to "pt-BR" only in the 1.4.3 build, whose RomFS has the official USpt text. */
+   the Mac's current locale, mapped by game_language.h (regional variants as on the console: en-GB, fr-CA, es-419, and pt-BR
+   only in the 1.4.3 build and in Breath of the Wild 1.9.0, whose RomFS have the official USpt text). */
 static uint64_t desired_language(void) {
  const char *explicit=getenv("TOTK_LANG");char code[8]={0};
  if(explicit){if(strlen(explicit)>7)runtime_fail("language code too long");memcpy(code,explicit,strlen(explicit));}
  else {
-  char language[16]={0},region[4]={0};const char *tag=getenv("TOTK_LOCALE");
+  char language[16]={0},script[8]={0},region[4]={0};const char *tag=getenv("TOTK_LOCALE");
   if(tag&&*tag){
    size_t n=strcspn(tag,"-_");if(n<sizeof(language))memcpy(language,tag,n);
    for(const char *p=tag+n;*p;){p+=strspn(p,"-_");size_t k=strcspn(p,"-_");
-    if(k==2&&isalpha((unsigned char)p[0])&&isalpha((unsigned char)p[1])){region[0]=(char)toupper((unsigned char)p[0]);region[1]=(char)toupper((unsigned char)p[1]);}
+    if(k==2&&isalpha((unsigned char)p[0])&&isalpha((unsigned char)p[1])){region[0]=(char)toupper((unsigned char)p[0]);region[1]=(char)toupper((unsigned char)p[1]);region[2]=0;}
+    if(k==3&&isdigit((unsigned char)p[0])&&isdigit((unsigned char)p[1])&&isdigit((unsigned char)p[2]))memcpy(region,p,3);   /* UN M.49, e.g. es-419 */
+    if(k==4&&!script[0]&&isalpha((unsigned char)p[0])&&isalpha((unsigned char)p[3])){for(size_t i=0;i<4;i++)script[i]=(char)(i?tolower((unsigned char)p[i]):toupper((unsigned char)p[i]));}
     p+=k;}
   } else {
    CFLocaleRef locale=CFLocaleCopyCurrent();
    CFStringRef value=CFLocaleGetValue(locale,kCFLocaleLanguageCode);
    if(value)CFStringGetCString(value,language,sizeof(language),kCFStringEncodingUTF8);
+   value=CFLocaleGetValue(locale,kCFLocaleScriptCode);
+   if(value)CFStringGetCString(value,script,sizeof(script),kCFStringEncodingUTF8);
    value=CFLocaleGetValue(locale,kCFLocaleCountryCode);
    if(value)CFStringGetCString(value,region,sizeof(region),kCFStringEncodingUTF8);CFRelease(locale);
   }
-#ifdef TOTK_GAME_V143
-  const char *portuguese=!strcmp(region,"BR")?"pt-BR":"pt";
+#if defined(TOTK_GAME_V143) || defined(GAME_BOTW190)
+  const int brazil=1;
 #else
-  const char *portuguese="pt";
+  const int brazil=0;
 #endif
-  const char *selected=!strcmp(language,"ja")?"ja":!strcmp(language,"de")?"de":!strcmp(language,"fr")?"fr":!strcmp(language,"es")?"es":!strcmp(language,"it")?"it":!strcmp(language,"nl")?"nl":!strcmp(language,"ru")?"ru":!strcmp(language,"ko")?"ko":!strcmp(language,"zh")?"zh-Hans":!strcmp(language,"pt")?portuguese:"en-US";
+  const char *selected=game_language(language,script,region,brazil);
   memcpy(code,selected,strlen(selected));
  }
- uint64_t result;memcpy(&result,code,8);return result;
+ uint64_t result;memcpy(&result,code,8);
+ fprintf(stderr,"[totk] language: %s (TOTK_LANG=%s TOTK_LOCALE=%s)\n",code,explicit?explicit:"-",getenv("TOTK_LOCALE")?getenv("TOTK_LOCALE"):"-");
+ return result;
 }
+/* One line per game allocation came in bursts of 1000-3000 while the world streams (each a write to the log),
+   so only failures are logged unless TOTK_TRACE_ALLOC=1. */
+static int trace_alloc(void){static int v=-1;if(v<0){const char *e=getenv("TOTK_TRACE_ALLOC");v=e&&*e&&strcmp(e,"0");}return v;}
 static uint32_t observed_region(uint64_t *out,uint64_t size){
  uint8_t *fn=runtime_symbol("_ZN2nn2os21AllocateAddressRegionEPmm");uint32_t r=((uint32_t(*)(uint64_t *,uint64_t))fn)(out,size);
- fprintf(stderr,"[totk] AllocateAddressRegion size=%llx result=%x address=%llx\n",(unsigned long long)size,r,(unsigned long long)(r?0:*out));
+ if(r||trace_alloc())fprintf(stderr,"[totk] AllocateAddressRegion size=%llx result=%x address=%llx\n",(unsigned long long)size,r,(unsigned long long)(r?0:*out));
  if(r&&getenv("TOTK_TRACE_VAMM")){
   uint8_t *sdk=fn-0x12ca60;uint64_t root;memcpy(&root,sdk+0xd16bb8,8);uint64_t *v=(void *)(uintptr_t)(root+0x418);
   for(unsigned i=0;i<10;i++)fprintf(stderr,"[totk] VAMM +%x=%llx\n",i*8,(unsigned long long)v[i]);
@@ -280,7 +328,7 @@ static uint32_t observed_region(uint64_t *out,uint64_t size){
  }
  return r;
 }
-static uint32_t observed_pages(uint64_t addr,uint64_t size){uint32_t r=((uint32_t(*)(uint64_t,uint64_t))runtime_symbol("_ZN2nn2os19AllocateMemoryPagesEmm"))(addr,size);fprintf(stderr,"[totk] AllocateMemoryPages address=%llx size=%llx result=%x\n",(unsigned long long)addr,(unsigned long long)size,r);return r;}
+static uint32_t observed_pages(uint64_t addr,uint64_t size){uint32_t r=((uint32_t(*)(uint64_t,uint64_t))runtime_symbol("_ZN2nn2os19AllocateMemoryPagesEmm"))(addr,size);if(r||trace_alloc())fprintf(stderr,"[totk] AllocateMemoryPages address=%llx size=%llx result=%x\n",(unsigned long long)addr,(unsigned long long)size,r);return r;}
 void *runtime_observer(const char *name) {
  static const struct {const char *name;void *fn;} entries[]={
  {"_ZN2nn2os21AllocateAddressRegionEPmm",observed_region},{"_ZN2nn2os19AllocateMemoryPagesEmm",observed_pages},{"nnosInitialize",observed_os_init},{"nninitInitializeSdkModule",observed_sdk_init},{"nninitStartup",observed_startup},{"nnMain",observed_main}};
@@ -301,6 +349,13 @@ void *runtime_override(const char *name) {
  void *input=runtime_input_override(name);if(input)return input;void *font=runtime_font_override(name);if(font)return font;void *codec=runtime_codec_override(name);if(codec)return codec;void *movie=runtime_movie_override(name);if(movie)return movie;void *clock=runtime_time_override(name);if(clock)return clock;void *applet=runtime_applet_override(name);if(applet)return applet;void *swkbd=runtime_swkbd_override(name);if(swkbd)return swkbd;void *account=runtime_account_override(name);if(account)return account;void *fs=runtime_fs_override(name);if(fs)return fs;void *front=runtime_front_override(name);return front?front:runtime_gfx_override(name);
 }
 void runtime_core_checkpoint(void);
+#ifdef GAME_BOTW
+/* Breath of the Wild (botw.md): the preemption point is also after every SVC. A thread the SVC woke competes for a core at
+   once (threads.c wake_queue); when it beats this one on this core, Horizon runs it before the SVC returns. */
+uint64_t runtime_svc_inner(unsigned num,uint64_t *r,const char *module,uint64_t offset);
+uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset){uint64_t v=runtime_svc_inner(num,r,module,offset);runtime_core_checkpoint();return v;}
+#define runtime_svc runtime_svc_inner
+#endif
 uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset) {
  runtime_core_checkpoint();
  // Successful SVCs occur several times per frame. Keep the detailed trace available
@@ -327,7 +382,7 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
   case 11:arc4random_buf(&value,8);break;
   case 12:value=ASLR_START;break;case 13:value=ASLR_SIZE;break;
   case 14:value=STACK_START;break;case 15:value=STACK_SIZE;break;
-  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=0x0100f2c0115b6000ULL;break;
+  case 16:value=SYSTEM_RESOURCE_BUDGET;break;case 17:value=sizeof(stack_maps)+sizeof(alias_pages);break;case 18:value=GAME_PROGRAM_ID;break;
   case 20:value=(uintptr_t)user_exception_context;break;   /* UserExceptionContextAddress: SDK stores e.g. the dying-message region at +0x1c0 */case 23:value=1;break;
   /* AliasRegionExtraSize (18.0.0+): our alias reservation contains no
    * kernel-owned extension outside the range reported by ids 2 and 3. */
@@ -374,9 +429,16 @@ uint64_t runtime_svc(unsigned num,uint64_t *r,const char *module,uint64_t offset
  case 0x0e: r[0]=0;r[1]=0;r[2]=15;return 0;
  case 0x25: {uint64_t id;pthread_threadid_np(NULL,&id);r[0]=0;r[1]=id;return 0;}
  case 0x10:r[0]=0;return 0;
+ /* SynchronizePreemptionState: the SDK calls it after clearing ThreadLocalRegion disable_count (+0x100) when interrupt_flag
+    (+0x102) was set by a preemption that had to wait (threads.c totk_preempt_signal). The switch itself happened at this
+    SVC's entry (runtime_core_checkpoint); here the flag is cleared, as Horizon does. */
+ case 0x36:{volatile uint16_t *tlr=pthread_getspecific(runtime_keys[2]);if(tlr)tlr[0x102/2]=0;r[0]=0;return 0;}
  case 0x26: {uint32_t result=0;if(r[1]&&r[2]>=4)memcpy(&result,(void *)(uintptr_t)r[1],4);fprintf(stderr,"[totk] guest Break reason=%llx result=%x\n",(unsigned long long)r[0],result);runtime_trace_guest(r[29],r[30]);if(r[0]&0x80000000ULL)return 0;runtime_fail("original SDK Break");}
  case 0x27: {size_t n=r[1];if(n>65536)runtime_fail("debug string too long");fwrite((void *)(uintptr_t)r[0],1,n,stderr);r[0]=0;return 0;}
  case 0x0b:{int64_t ns=(int64_t)r[0];if(ns>0){struct timespec t={ns/1000000000,ns%1000000000};nanosleep(&t,NULL);}r[0]=0;return 0;}
  default:fprintf(stderr,"[totk] unimplemented SVC 0x%x at %s+%#llx\n",num,module,(unsigned long long)offset);if(num==0x1f)fprintf(stderr,"[totk] named port %.12s\n",(const char *)(uintptr_t)r[1]);runtime_trace_guest(r[29],r[30]);runtime_fail("system service not implemented");return 0;
  }
 }
+#ifdef GAME_BOTW
+#undef runtime_svc
+#endif
