@@ -14,8 +14,7 @@
 #import "touch_pad.h"
 #include "../../vendor/savesync/savesync.h"
 #include "../../vendor/gamesettings/gamesettings.h"
-int fps_overlay_hints_enabled(void);
-int fps_overlay_toggle_hints(void);
+#include "fps_overlay.h"
 uint64_t dm_nvn_frame_count(void);
 
 /* The Settings sheet's graphics on iPhone / iPad (vendor/gamesettings): the picture shape, MetalFX, the FPS overlay, and
@@ -52,10 +51,12 @@ static int console_get(void) {
     return 0;
 }
 static void console_set(int v) { if (v >= 0 && v < 3) [NSUserDefaults.standardUserDefaults setObject:@(console_values[v]) forKey:@"TOTKOperationMode"]; }
-static int overlay_get(void) { return fps_overlay_hints_enabled(); }
-static void overlay_set(int v) { if (overlay_get() != v) fps_overlay_toggle_hints(); }
+/* The FPS overlay: hidden, the FPS line only, or everything (shader collection and load too). */
+static const int overlay_modes[] = {HUD_MODE_OFF, HUD_MODE_MINIMAL, HUD_MODE_ALL};
+static int overlay_get(void) { int m = fps_overlay_hud_mode(); return m == HUD_MODE_ALL ? 2 : m == HUD_MODE_MINIMAL ? 1 : 0; }
+static void overlay_set(int v) { if (v >= 0 && v < 3) fps_overlay_set_hud_mode(overlay_modes[v]); }
 static const char *const shape_choices[] = {"The screen's shape", "16:9 (the game's own)"};
-static const char *const overlay_choices[] = {"Hidden", "Shown"};
+static const char *const overlay_choices[] = {"Hidden", "FPS only", "Everything"};
 static const char *const upscale_choices[] = {"Off (720p, or 1080p docked; the system scales it)", "MetalFX at full resolution"};
 static const char *const interp_choices[] = {"Off", "30 + 30", "Half the refresh rate", "Unlimited"};
 static const char *const motion_choices[] = {"Off", "On"};
@@ -67,7 +68,7 @@ static gamesettings_choice graphics_settings[] = {
     {"upscale", "Upscaling", upscale_choices, 2, upscale_get, upscale_set, "MetalFX scales the 720p picture to the screen's own pixels. New on iPad: uses more GPU time and battery."},
     {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60). New on iPad."},
     {"motion", "Motion controls", motion_choices, 2, motion_get, motion_set, "Tilt and turn the device (or a controller with a gyro, such as a DualSense) to aim, like the Switch's motion controls. Which actions use motion is set in the game's own Options."},
-    {"overlay", "FPS overlay", overlay_choices, 2, overlay_get, overlay_set, NULL},
+    {"overlay", "FPS overlay", overlay_choices, 3, overlay_get, overlay_set, NULL},
 };
 /* Console mode and render resolution are read at start from NSUserDefaults, before the settings are loaded (they are applied
    after 60 frames). Shared through iCloud they came a start late, and an iPhone and an iPad overwrote each other's size;
