@@ -223,6 +223,7 @@ NSString *totk_rt_variant(NSString *shader, int stage, const uint8_t *control, c
     static NSMutableSet<NSString *> *missed; if (!missed) missed = [NSMutableSet set];
     if (![missed containsObject:variant]) {
         [missed addObject:variant];
+        atomic_fetch_add(&g_new_variants, 1); atomic_store(&g_new_variant_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));   // the overlay's "new shaders" on the phone
         [[json_string(rq) dataUsingEncoding:NSUTF8StringEncoding] writeToFile:[NSString stringWithFormat:@"shader-requests/%@.json", variant] atomically:YES];
         totk_contrib_add(shader, answers);   // not in the prepared seed, so not in the shared shader list yet
         LOG("[shader-miss] %s %s 不在手机的翻译缓存里：跳过用到它的绘制，请求已存 shader-requests/（第 %lu 个；在 Mac 上 ios/tools/fill_shaders.py 补上后下次启动预热）",

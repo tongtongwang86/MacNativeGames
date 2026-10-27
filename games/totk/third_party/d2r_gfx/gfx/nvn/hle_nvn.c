@@ -2270,6 +2270,34 @@ static lf_rec g_lf[LFN];
 __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[长帧] %s", what); }   // 缺省（图形单测）；宿主 diag.c 的强定义补上场景上下文并写 perf.txt | Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
 extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
 static const char *const g_tname[6] = {"帧时间", "出帧工作", "NVN 提交+出图", "GPU", "翻译层录制期", "翻译层提交期"};
+/* TOTK (2026-10-21): GPU keep-alive self-calibration. The spinner (nvn_mtl.m keepalive_start) made the M4's world frames
+   ~25% faster on the GPU, but on an M2 Max the game is CPU-bound and the spinning GPU costs the CPU clock: with MetalFX 2K
+   the replay took 9.84 ms of CPU a frame with it and 8.96 ms without (same instruction count), frame 16.33 -> 15.46 ms.
+   So once the game has run a while (~1 min of frames), the spinner is switched off and on in 8 alternating windows of 150
+   world frames (1500+ draws); the median frame time of each window (its first 30 frames left out) decides: the spinner stays off only when the
+   off windows are at least 1% faster on average. The effect depends on the scene (M2 Max, MetalFX 2K: none at the Great
+   Sky Island start, 16.16 -> 15.31 ms at the river), so the test repeats every ~3 minutes of frames. A window whose median
+   is above 40 ms or a frame that is not a world frame interrupts it (back to the current choice, retried later, 3 tries). TOTK_GPU_KEEPALIVE_AUTO=0 keeps the configured setting; "flag keepalive_us" still overrides. */
+int mtl_keepalive_get_us(void); void mtl_keepalive_set_us(int us);
+static int ka_cmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return x < y ? -1 : x > y; }
+static void ka_calibrate(double fr, uint64_t draws) {
+    enum { KA_WIN = 150, KA_SKIP = 30, KA_N = 8 };
+    static int state = -1, base_us, win, tries, cur_us; static uint64_t at; static double w[KA_WIN], med[KA_N]; static int wn;
+    if (state == 2) return;
+    if (state < 0) { const char *e = getenv("TOTK_GPU_KEEPALIVE_AUTO"); base_us = mtl_keepalive_get_us();
+                     state = (e && !strcmp(e, "0")) || !base_us ? 2 : 0; at = g_frame + 3600; cur_us = base_us; return; }
+    if (state == 0) { if (g_frame < at || draws < 1500) return; state = 1; win = 0; wn = 0; mtl_keepalive_set_us(base_us); return; }
+    if (draws < 1500) { ka_interrupt: mtl_keepalive_set_us(cur_us); state = 0; at = g_frame + (++tries < 3 ? 1800 : 10800); if (tries >= 3) tries = 0;
+                        LOG("[keepalive] calibration interrupted (window %d not steady world play), spinner stays %s", win, cur_us ? "on" : "off"); return; }
+    if (wn >= KA_SKIP) w[wn - KA_SKIP] = fr;
+    if (++wn < KA_WIN) return;
+    qsort(w, KA_WIN - KA_SKIP, sizeof *w, ka_cmp); med[win] = w[(KA_WIN - KA_SKIP) / 2]; wn = 0;
+    if (med[win] > 40) goto ka_interrupt;
+    if (++win < KA_N) { mtl_keepalive_set_us(win & 1 ? 0 : base_us); return; }
+    double on = 0, off = 0; for (int i = 0; i < KA_N; i++) { if (i & 1) off += med[i]; else on += med[i]; } on /= KA_N / 2; off /= KA_N / 2;
+    int keep_off = off <= on * 0.99; cur_us = keep_off ? 0 : base_us; mtl_keepalive_set_us(cur_us); state = 0; tries = 0; at = g_frame + 10800;
+    LOG("[keepalive] calibration: frame median %.2f ms with the GPU spinner, %.2f ms without -> spinner %s", on, off, keep_off ? "off" : "on");
+}
 static void tpush(int k, double v) { g_tw[k][g_tn[k]++ % TWIN] = v; }
 // 发热归因（iOS DM_HEAT）：每帧 GPU 毫秒另存一圈，取「上次取数以来」的均值 / p95（最多最近 HRN 帧），与计时汇总的 300 帧窗口互不干扰
 // Thermal attribution (iOS DM_HEAT): per-frame GPU milliseconds are kept in a separate ring, taking the mean / p95 "since the last read" (at most the last HRN frames), without interfering with the timing summary's 300-frame window
@@ -2644,6 +2672,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
             trow(f, "@call_ms", (t0 - g_t0_ns) / 1e6);
         }
         trow(f, "@passes", (double)(ps - prev_pass)); trow(f, "@draws", (double)(dr - prev_draw));
+        ka_calibrate(fr, dr - prev_draw);
         static uint64_t pl, pst, pf, pudc; uint64_t l, st, fu; mtl_bw(&l, &st, &fu);
         trow(f, "@rt_load_mb", (l - pl) / 1048576.0); trow(f, "@rt_store_mb", (st - pst) / 1048576.0); trow(f, "@pass_full_rw", (double)(fu - pf));
         uint64_t udc = mtl_udc_saved_bytes(); trow(f, "@unwritten_dc_mb", (udc - pudc) / 1048576.0);

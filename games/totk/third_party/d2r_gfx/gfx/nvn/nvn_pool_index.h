@@ -89,3 +89,28 @@ static inline pidx_ent *pidx_find_cached(pidx *x, pidx_query_cache *cache, uintp
     cache->misses++;
     return found;
 }
+
+/* Most-recently-found pools (TOTK, 2026-10-21): the replay asks for a few dozen addresses per draw that fall in a handful
+   of pools (vertex / index / uniform / storage), and the binary search was ~7% of the replay thread. An entry i answers
+   a query exactly as pidx_find would when it contains [addr, addr + len] and the next entry starts above addr: then
+   pidx_upper(addr) - 1 == i and the backwards walk returns e[i] first. Slots hold indices and are dropped when the index
+   changes (epoch, bumped together with pidx_query_invalidate). Same mutex as the index. */
+#define PIDX_MRU 4
+typedef struct { int idx[PIDX_MRU]; uint64_t epoch, hits, misses; } pidx_mru;
+static inline pidx_ent *pidx_find_mru(pidx *x, pidx_mru *m, uint64_t epoch, uintptr_t addr, uint64_t len) {
+    uintptr_t end = addr + (uintptr_t)len;
+    if (m->epoch != epoch) { for (int k = 0; k < PIDX_MRU; k++) m->idx[k] = -1; m->epoch = epoch; }
+    if (end >= addr) for (int k = 0; k < PIDX_MRU; k++) {
+        int i = m->idx[k];
+        if (i < 0 || i >= x->n) continue;
+        const pidx_ent *e = &x->e[i];
+        if (e->lo <= addr && e->hi >= end && (i + 1 == x->n || x->e[i + 1].lo > addr)) {
+            if (k) { memmove(m->idx + 1, m->idx, (size_t)k * sizeof *m->idx); m->idx[0] = i; }
+            m->hits++; return (pidx_ent *)e;
+        }
+    }
+    pidx_ent *found = pidx_find_mut(x, addr, len);
+    if (found) { memmove(m->idx + 1, m->idx, (PIDX_MRU - 1) * sizeof *m->idx); m->idx[0] = (int)(found - x->e); }
+    m->misses++;
+    return found;
+}

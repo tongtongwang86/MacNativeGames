@@ -234,16 +234,22 @@ static void patch_render_res(Module *m) {
    in true 2K); 0 = the game's own 1920x1080, no switching. iOS and the iOS export (TOTK_EXPORT_IOS) keep the game's own size. Decided once;
    every caller sees the same answer. Mac only. */
 static int output_full_at_start = 1;
+enum { DP_OUTPUT_SIZE = 32, DP_RENDERER = 40 };   /* data page: the output size {w, h} the game reads; the renderer it stores */
+static _Atomic(uint8_t *) output_page;
+static unsigned output_w, output_h;   /* the largest output size (the swapchain) */
+static uint64_t pack_size(unsigned w, unsigned h) { return (uint64_t)h << 32 | w; }
+uint64_t runtime_output_size_current(void) {
+    uint8_t *page = atomic_load(&output_page);
+    return page ? atomic_load((_Atomic uint64_t *)(void *)(page + DP_OUTPUT_SIZE)) : pack_size(1920, 1080);
+}
+static void output_request(unsigned w, unsigned h);
+#include "output_modes.h"   /* key 3's list of sizes, the Settings window's Picture */
 static int output_res_auto(unsigned *w, unsigned *h) {
 #if TARGET_OS_OSX
     if (getenv("TOTK_EXPORT_IOS")) return 0;
-    const char *dir = getenv("TOTK_ROMFS_PATCHES_OUT"); char path[4096];
-    snprintf(path, sizeof path, "%s/2560x1440/manifest.tsv", dir ? dir : "extracted/" TOTK_GAME_DIR "/romfs-patches-out");
-    FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr, "[totk] true 2K (TOTK_OUTPUT_RES=auto): off, %s is missing (make romfs-patches)\n", path); return 0; }
-    fclose(f);
-    *w = 2560; *h = 1440; output_full_at_start = 0;
-    fprintf(stderr, "[totk] true 2K (TOTK_OUTPUT_RES=auto): starts at 1920x1080 (the default); key 3 switches between 1920x1080 and 2560x1440\n");
+    if (!output_overlay_largest(w, h)) { fprintf(stderr, "[totk] larger output (TOTK_OUTPUT_RES=auto): off, no HeapDef overlay was built (make romfs-patches)\n"); return 0; }
+    output_full_at_start = 0;
+    fprintf(stderr, "[totk] larger output (TOTK_OUTPUT_RES=auto): up to %ux%u, starts at 1920x1080 (the default); key 3 cycles the sizes\n", *w, *h);
     return 1;
 #else
     (void)w; (void)h; return 0;
@@ -282,14 +288,6 @@ uint64_t runtime_output_res_extra_bytes(void) {
     uint64_t kib = (uint64_t)ceil(113664.0 * ratio / 1024.0) * 1024 - 113664;
     return kib << 10;
 }
-enum { DP_OUTPUT_SIZE = 32, DP_RENDERER = 40 };   /* data page: the output size {w, h} the game reads; the renderer it stores */
-static _Atomic(uint8_t *) output_page;
-static unsigned output_w, output_h;   /* the largest output size (the swapchain) */
-static uint64_t pack_size(unsigned w, unsigned h) { return (uint64_t)h << 32 | w; }
-uint64_t runtime_output_size_current(void) {
-    uint8_t *page = atomic_load(&output_page);
-    return page ? atomic_load((_Atomic uint64_t *)(void *)(page + DP_OUTPUT_SIZE)) : pack_size(1920, 1080);
-}
 static void patch_output_res(Module *m) {
     unsigned w, h;
     if (CODE_PATCHED_AT_BUILD || !output_res(&w, &h)) return;
@@ -317,13 +315,9 @@ static void patch_output_res(Module *m) {
     fprintf(stderr, "[totk] output resolution patch: swapchain %ux%u (main+0xe996ac), the game's output %s from the data page (main+0xc630a4); texture heap and Graphics +%llu KiB (HeapDef overlay)\n",
             w, h, output_full_at_start ? "at that size" : "1920x1080 for now", (unsigned long long)(runtime_output_res_extra_bytes() >> 10));
 }
-/* Two-state output-size helper retained for internal use: switch between the largest size and 1920x1080. The renderer
-   lays out again at the next frame (see patch_output_res). */
-int runtime_output_res_toggle(void) {
-    if (!output_page) { fprintf(stderr, "[totk] key 3: switching the output size needs a 2K-capable start (TOTK_OUTPUT_RES auto with the HeapDef overlay, or <w>x<h>)\n"); return 0; }
-    _Atomic uint64_t *size = (_Atomic uint64_t *)(void *)(output_page + DP_OUTPUT_SIZE);
-    int full = atomic_load(size) != pack_size(output_w, output_h);
-    atomic_store(size, full ? pack_size(output_w, output_h) : pack_size(1920, 1080));
+/* The game's output at w x h from its next display layout (see patch_output_res). */
+static void output_request(unsigned w, unsigned h) {
+    atomic_store((_Atomic uint64_t *)(void *)(output_page + DP_OUTPUT_SIZE), pack_size(w, h));
     uint64_t renderer = atomic_load((_Atomic uint64_t *)(void *)(output_page + DP_RENDERER));
     const char *before = "";
     if (renderer) {
@@ -331,31 +325,14 @@ int runtime_output_res_toggle(void) {
         before = old & 0x200u ? " (the previous switch was still pending)" : "";
         runtime_oe_push_message(30);   /* nn::oe "operation mode changed": the game runs its display handler (main+0x1185310) */
     }
-    fprintf(stderr, "[totk] key 3: the game's output %ux%u (%s)%s%s\n", full ? output_w : 1920u, full ? output_h : 1080u,
-            full ? "true 2K: the canvas and the UI at that size" : "the 2K output: 1080p canvas, MetalFX scales it at present",
+    fprintf(stderr, "[totk] the game's output %ux%u%s%s\n", w, h,
             renderer ? " from the next layout" : "; the game has not laid out its displays yet, it takes this size when it does", before);
-    return 1;
 }
-/* Key 3: cycle the active 2K presentation path. The normal startup is 1080p game output with the MetalFX output scaler
-   enabled; native 2K switches the game's canvas/UI to 2560x1440; off returns to 1080p and disables the output scaler. */
-int runtime_output_mode_cycle(void) {
-    if (!output_page) {
-        fprintf(stderr, "[totk] key 3: 2K mode cycling needs a 2K-capable start (TOTK_OUTPUT_RES=auto with the HeapDef overlay, or <w>x<h>)\n");
-        return 0;
-    }
-    _Atomic uint64_t *size = (_Atomic uint64_t *)(void *)(output_page + DP_OUTPUT_SIZE);
-    int full = atomic_load(size) == pack_size(output_w, output_h);
-    extern int mfxup_output_enabled(void);
-    extern void dm_gfx_set_flag(const char *name, int value);
-    int next_full, next_mfx;
-    const char *name;
-    if (full) { next_full = 0; next_mfx = 0; name = "关闭 2K"; }
-    else if (mfxup_output_enabled()) { next_full = 1; next_mfx = 0; name = "原生 2K"; }
-    else { next_full = 0; next_mfx = 1; name = "MetalFX 2K"; }
-    if (full != next_full) runtime_output_res_toggle();
-    dm_gfx_set_flag("mfx_output", next_mfx);
-    dm_gfx_set_flag("mfx_upscale", next_mfx);
-    fprintf(stderr, "[totk] key 3: %s\n", name);
+/* Two-state output-size helper retained for internal use: switch between the largest size and 1920x1080. */
+int runtime_output_res_toggle(void) {
+    if (!output_page) return 0;
+    int full = runtime_output_size_current() != pack_size(output_w, output_h);
+    output_request(full ? output_w : 1920u, full ? output_h : 1080u);
     return 1;
 }
 

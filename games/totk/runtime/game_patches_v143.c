@@ -115,7 +115,10 @@ void runtime_game_patches(Module *m) {
     patch_render_res(m);
     { static const uint64_t sites[] = {0x628c74, 0xb43460, 0x1ff04f4, 0x253fbb0};   /* camera update and setup, viewport x2 */
       aspect_install(m, "1.4.3", sites, 4, ((m->text_end + 15) & ~15ULL) + 48,   /* after the two veneers above */
-                     (m->file_size + 0x3fff) & ~0x3fffULL); }
+                     (m->file_size + 0x3fff) & ~0x3fffULL);
+      static const uint64_t fov[] = {0x628c68, 0xb43458};   /* the camera update's and setup's tangent stores */
+      aspect_install_fov(m, "1.4.3", fov, 2, ((m->text_end + 15) & ~15ULL) + 48 + ASPECT_STUB * 4,
+                         (m->file_size + 0x3fff) & ~0x3fffULL); }
     const char *enabled = getenv("TOTK_FPS60");
     if (enabled && !strcmp(enabled, "0")) {
         fprintf(stderr, "[totk] 1.4.3 shipping frame controller (TOTK_FPS60=0)\n");
@@ -154,6 +157,8 @@ uint64_t runtime_output_size_current(void){
     uint8_t *page=atomic_load(&output_page);
     return page?atomic_load((_Atomic uint64_t *)(void *)(page+32)):pack_size(1920,1080);
 }
+static void output_request(unsigned w,unsigned h);
+#include "output_modes.h"   /* key 3's list of sizes, the Settings window's Picture */
 int runtime_output_res(unsigned *w,unsigned *h){
     static int decided,on;static unsigned cw,ch;
     if(!decided){
@@ -166,12 +171,7 @@ int runtime_output_res(unsigned *w,unsigned *h){
             on=0;
             if(e&&*e&&strcmp(e,"0")&&strcmp(e,"auto"))fprintf(stderr,"[totk] TOTK_OUTPUT_RES=%s ignored: iOS shows 720p only\n",e);
         }else if(e&&!strcmp(e,"0"))on=0;
-        else if(!e||!*e||!strcmp(e,"auto")){
-            const char *dir=getenv("TOTK_ROMFS_PATCHES_OUT");char path[4096];
-            snprintf(path,sizeof path,"%s/2560x1440/manifest.tsv",dir?dir:"extracted/v143/romfs-patches-out");
-            FILE *f=fopen(path,"r");if(f){fclose(f);on=1;cw=2560;ch=1440;}
-            output_full_at_start=0;
-        }else{
+        else if(!e||!*e||!strcmp(e,"auto")){on=output_overlay_largest(&cw,&ch);output_full_at_start=0;}else{
             char tail;
             if(sscanf(e,"%ux%u%c",&cw,&ch,&tail)!=2||cw<640||ch<360||cw>7680||ch>4320)runtime_fail("TOTK_OUTPUT_RES must be auto, 0 or widthxheight");
             on=1;output_full_at_start=1;
@@ -225,7 +225,7 @@ static void patch_output_res(Module *m){
     atomic_store((_Atomic uint64_t *)(void *)(page+32),output_full_at_start?pack_size(w,h):pack_size(1920,1080));
     atomic_store((_Atomic uint64_t *)(void *)(page+40),0);
     atomic_store(&output_page,page);   /* Publish initialized state to the HUD on the main thread. */
-    fprintf(stderr,"[totk] 1.4.3 output: %ux%u swapchain; starts %s, key 3 cycles MetalFX / native / off; display-config veneer +%#llx\n",w,h,output_full_at_start?"at requested resolution":"at 1920x1080",(unsigned long long)stub);
+    fprintf(stderr,"[totk] 1.4.3 output: %ux%u swapchain; starts %s, key 3 cycles %d picture modes up to that size; display-config veneer +%#llx\n",w,h,output_full_at_start?"at requested resolution":"at 1920x1080",runtime_output_mode_count(),(unsigned long long)stub);
 }
 /* Render resolution (TOTK_RENDER_RES=<w>x<h>, e.g. 960x540) - the 1.4.3 port of game_patches.c's patch.
    1.4.3 keeps the same graphics-parameter entry (+0x30 of the mode entry: handheld 1280x720, docked 1600x900) and the
@@ -287,25 +287,16 @@ static void patch_render_res(Module *m){
     fprintf(stderr,"[totk] 1.4.3 render resolution patch: scene render size %ux%u%s (4 instructions at main+0x585e48, value on the data page)\n",
             w,h,set?"":" (the game's handheld size; TOTK_RENDER_RES not set)");
 }
-int runtime_output_res_toggle(void){
-    if(!output_page)return 0;
-    _Atomic uint64_t *size=(_Atomic uint64_t *)(void *)(output_page+32);
-    int full=atomic_load(size)!=pack_size(output_w,output_h);
-    atomic_store(size,full?pack_size(output_w,output_h):pack_size(1920,1080));
+/* The game's output at w x h from its next display layout (the "operation mode changed" path, see above). */
+static void output_request(unsigned w,unsigned h){
+    atomic_store((_Atomic uint64_t *)(void *)(output_page+32),pack_size(w,h));
     uint64_t config=atomic_load((_Atomic uint64_t *)(void *)(output_page+40));
     if(config){__atomic_fetch_or((uint32_t *)(uintptr_t)(config+8),1u<<21,__ATOMIC_SEQ_CST);runtime_oe_push_message(30);}
-    fprintf(stderr,"[totk] 1.4.3 output requested %ux%u (display config %s)\n",full?output_w:1920,full?output_h:1080,config?"ready":"not published yet");
-    return 1;
+    fprintf(stderr,"[totk] 1.4.3 output requested %ux%u (display config %s)\n",w,h,config?"ready":"not published yet");
 }
-int runtime_output_mode_cycle(void){
+int runtime_output_res_toggle(void){
     if(!output_page)return 0;
-    extern int mfxup_output_enabled(void);extern void dm_gfx_set_flag(const char *,int);
-    int full=atomic_load((_Atomic uint64_t *)(void *)(output_page+32))==pack_size(output_w,output_h);
-    int native=0,mfx=0;const char *name;
-    if(full)name="关闭 2K";
-    else if(mfxup_output_enabled()){native=1;name="原生 2K";}
-    else{mfx=1;name="MetalFX 2K";}
-    if(full!=native)runtime_output_res_toggle();
-    dm_gfx_set_flag("mfx_output",mfx);dm_gfx_set_flag("mfx_upscale",mfx);
-    fprintf(stderr,"[totk] key 3: %s\n",name);return 1;
+    int full=runtime_output_size_current()!=pack_size(output_w,output_h);
+    output_request(full?output_w:1920,full?output_h:1080);
+    return 1;
 }

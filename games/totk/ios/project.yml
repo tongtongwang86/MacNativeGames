@@ -19,6 +19,16 @@ targets:
       - path: ../third_party/d2r_gfx/gfx/nvn
       - path: ../third_party/d2r_gfx/gfx/tex
       - path: Gen/embed.S
+      - path: ../vendor/gamesettings
+        excludes:
+          - "*.md"
+          - "tests/**"
+          - "tools/**"
+          - "assets/**"
+      - path: ../vendor/savesync
+        excludes:
+          - "tests/**"
+          - "*.md"
       - path: ../runtime/loader.c
         compilerFlags: "-Dmain=totk_host_main"
     info:
@@ -30,6 +40,12 @@ targets:
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: TOTKScene
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIRequiresFullScreen: true

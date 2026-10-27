@@ -9,6 +9,17 @@
 #include "game_version.h"
 #include "totk_ui_lang.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
+#include "../vendor/gamesettings/gamesettings.h"
+/* Console mode (the Settings window): docked (the default) or handheld, kept in the app's defaults and read here before
+   the game asks (services.c reads TOTK_OPERATION_MODE once), so a change takes effect at the next start. A mode already
+   in the environment (a test run) wins. */
+__attribute__((constructor)) static void console_mode_from_settings(void){
+ if(getenv("TOTK_OPERATION_MODE"))return;
+ NSString *v=[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKOperationMode"];
+ if([v isEqualToString:@"handheld"])setenv("TOTK_OPERATION_MODE","handheld",1);
+}
+int fps_overlay_hints_enabled(void);
+void dm_gfx_set_flag(const char *name,int v);
 int mfxup_output_enabled(void);
 static NSWindow *window;
 uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented so far */
@@ -102,7 +113,11 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 -(BOOL)acceptsFirstResponder{return YES;}
 -(void)keyDown:(NSEvent *)e{runtime_input_key(e.keyCode,1);}
 -(void)keyUp:(NSEvent *)e{runtime_input_key(e.keyCode,0);}
--(void)flagsChanged:(NSEvent *)e{if(e.keyCode==56)runtime_input_key(56,!!(e.modifierFlags&NSEventModifierFlagShift));if(e.keyCode==58)runtime_input_key(58,!!(e.modifierFlags&NSEventModifierFlagOption));}
+/* Modifier keys arrive as flag changes; any of them can be bound (Settings window) except Command, which stays the app's. */
+-(void)flagsChanged:(NSEvent *)e{NSEventModifierFlags f=e.modifierFlags;int down;
+ switch(e.keyCode){case 56:case 60:down=!!(f&NSEventModifierFlagShift);break;case 58:case 61:down=!!(f&NSEventModifierFlagOption);break;
+  case 59:case 62:down=!!(f&NSEventModifierFlagControl);break;case 63:down=!!(f&NSEventModifierFlagFunction);break;default:return;}
+ runtime_input_key(e.keyCode,down);}
 @end
 @interface TOTKShortcutHelp:NSView
 @property(strong) NSTextField *label;
@@ -124,12 +139,10 @@ static NSString *shortcut_text(void){
   default:interp=TOTK_UI("关闭","off");break;
  }
  uint64_t size=runtime_output_size_current();unsigned w=(uint32_t)size,h=(uint32_t)(size>>32);
- NSString *picture;
- if(mfxup_output_enabled())picture=@"MetalFX 2K";
- else if(w==2560&&h==1440)picture=@(TOTK_UI("原生 2K","native 2K"));
- else if(w!=1920||h!=1080)picture=[NSString stringWithFormat:@(TOTK_UI("原生 %u×%u","native %u×%u")),w,h];
- else picture=@(TOTK_UI("关闭","off"));
- return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  显示 / 隐藏所有提示\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  21:9 宽屏：开 / 关","Shortcuts\n1  Show / hide all overlays\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Ultrawide 21:9: on / off")),[NSString stringWithUTF8String:interp],picture];
+ int mode=runtime_output_mode_get();
+ NSString *picture=mode>=0?@(runtime_output_mode_name(mode)):[NSString stringWithFormat:@"%u×%u",w,h];
+ if(runtime_mfx_upscale_get())picture=[picture stringByAppendingString:@" + MetalFX"];
+ return [NSString stringWithFormat:@(TOTK_UI("快捷键说明\n1  显示 / 隐藏所有提示\n2  补帧：当前 %@（按键切换）\n3  画质：当前 %@（按键切换）\n4  画面比例：窗口 / 16:9","Shortcuts\n1  Show / hide all overlays\n2  Interpolation: %@ (current; press to cycle)\n3  Picture: %@ (current; press to cycle)\n4  Picture shape: the window's / 16:9")),[NSString stringWithUTF8String:interp],picture];
 }
 -(instancetype)initWithFrame:(NSRect)frame{if((self=[super initWithFrame:frame])){int compact=hud_compact();self.wantsLayer=YES;self.layer.backgroundColor=[NSColor colorWithCalibratedWhite:0.04 alpha:compact?0.72:0.86].CGColor;self.layer.cornerRadius=compact?7:14;self.layer.borderWidth=1;self.layer.borderColor=[NSColor colorWithCalibratedWhite:1 alpha:compact?0.14:0.2].CGColor;
  self.label=[NSTextField labelWithString:shortcut_text()];self.label.font=[NSFont systemFontOfSize:17 weight:NSFontWeightMedium];self.label.textColor=NSColor.whiteColor;self.label.alignment=NSTextAlignmentCenter;self.label.maximumNumberOfLines=0;self.label.lineBreakMode=NSLineBreakByWordWrapping;self.label.frame=NSInsetRect(self.bounds,20,18);self.label.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[self addSubview:self.label];
@@ -166,7 +179,9 @@ static CGFloat drawable_scale(void){static CGFloat f=-1;if(f<0){const char *e=ge
 static void front_sync_drawable(void){
  NSView *v=window.contentView;if(!v||!metalLayer)return;
  CGFloat s=window.backingScaleFactor>0?window.backingScaleFactor:1,ts=drawable_scale();CGSize px=CGSizeMake(round(v.bounds.size.width*s*ts),round(v.bounds.size.height*s*ts));
- if(px.width<1||px.height<1||CGSizeEqualToSize(metalLayer.drawableSize,px))return;
+ if(px.width<1||px.height<1)return;
+ runtime_aspect_window(px.width,px.height);   /* the picture follows the window's shape (aspect_patch.h) */
+ if(CGSizeEqualToSize(metalLayer.drawableSize,px))return;
  metalLayer.contentsScale=s;metalLayer.drawableSize=px;fprintf(stderr,"[totk] window drawable %.0fx%.0f (scale %.0f)\n",px.width,px.height,s);
 }
 @interface TOTKWindowDelegate:NSObject<NSWindowDelegate>
@@ -197,18 +212,54 @@ static TOTKWindowDelegate *windowDelegate;
 int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
 void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(), ^{[window performClose:nil];});}
 /* Use the window-close path, not terminate:, so Command-Q also waits for active saves. */
+/* The Settings window's graphics (vendor/gamesettings): the same four things the 1-4 keys change, read from and
+   applied to the renderer directly. Picture lists the modes this start can show (runtime/output_modes.h, filled in
+   runtime_front_run); shape is stepped with its key action until it matches. */
+static int picture_get(void){int m=runtime_output_mode_get();return m<0?0:m;}
+static void picture_set(int v){runtime_output_mode_set(v);}
+static int console_get(void){return [[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKOperationMode"] isEqualToString:@"handheld"];}
+static void console_set(int v){[NSUserDefaults.standardUserDefaults setObject:v?@"handheld":@"docked" forKey:@"TOTKOperationMode"];}
+static const char *const console_choices[]={"Docked","Handheld"};
+static int metalfx_get(void){return runtime_mfx_upscale_get();}
+static void metalfx_set(int v){runtime_mfx_upscale_set(v);}
+static int interp_get(void){return mfx_enabled();}
+static void interp_set(int v){dm_gfx_set_flag("mfx_interp",v);}
+static int shape_get(void){return runtime_aspect_on()?0:1;}
+static void shape_set(int v){if(shape_get()!=v)runtime_aspect_toggle();}
+static int overlay_get(void){return fps_overlay_hints_enabled();}
+static void overlay_set(int v){if(overlay_get()!=v)runtime_shortcut_help_toggle();}
+static const char *picture_choices[16]={"1080p"};   /* one entry where the output cannot switch */
+static const char *const metalfx_choices[]={"Off","On"};
+static const char *const interp_choices[]={"Off","30 + 30","Half the refresh rate","Unlimited"};
+static const char *const shape_choices[]={"The window's shape","16:9 (the game's own)"};
+static const char *const overlay_choices[]={"Hidden","Shown"};
+static gamesettings_choice graphics_settings[]={
+ {"size","Picture size",picture_choices,1,picture_get,picture_set,"The game draws its frame and UI at this size, its 3D scene at about 5/6 of it. Key 3."},
+ {"console_mac","Console mode",console_choices,2,console_get,console_set,"Docked is the game's TV mode; handheld draws less (the game's own handheld detail and resolution). Takes effect the next time the game starts."},
+ {"metalfx","MetalFX upscaling",metalfx_choices,2,metalfx_get,metalfx_set,"MetalFX enlarges the picture to the window, at any size (instead of plain scaling), and upscales the 3D scene."},
+ {"interpolation","Frame interpolation",interp_choices,4,interp_get,interp_set,"MetalFX generates in-between frames. Key 2."},
+ {"shape","Picture shape",shape_choices,2,shape_get,shape_set,"The camera follows the window as you resize it or go full screen (1.2.1, 1.4.3). Key 4."},
+ {"overlay","FPS and shortcut overlay",overlay_choices,2,overlay_get,overlay_set,"Key 1."},
+};
+static const gamesettings_config settings_config={"0100F2C0115B6000","Tears of the Kingdom","[totk]",graphics_settings,sizeof graphics_settings/sizeof *graphics_settings};
+/* The saved graphics settings go in once the game is drawing (the renderer and the output size are ready then). */
+static void apply_settings_when_drawing(void){
+ [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){if(dm_nvn_frame_count()<60)return;[t invalidate];gamesettings_apply_graphics();}];
+}
 static void front_install_menu(void){
  NSMenu *menu=[NSMenu new],*appMenu=[NSMenu new];
  NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[menu addItem:appItem];
  NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@(TOTK_UI("退出 Tears of the Kingdom","Quit Tears of the Kingdom")) action:@selector(performClose:) keyEquivalent:@"q"];
  quit.keyEquivalentModifierMask=NSEventModifierFlagCommand;quit.target=window;
- [appMenu addItem:quit];NSApp.mainMenu=menu;
+ [appMenu addItem:quit];gamesettings_add_menu_item(appMenu);NSApp.mainMenu=menu;
 }
 static void *guest_main(void *callback){@autoreleasepool{((void(*)(void))callback)();}return NULL;}
 void runtime_front_run(void(*callback)(void)){
  @autoreleasepool{
   bootStartNS=runtime_now_ns();
   [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+  {int n=runtime_output_mode_count();if(n>16)n=16;for(int i=0;i<n;i++)picture_choices[i]=runtime_output_mode_name(i);if(n)graphics_settings[0].nchoices=(unsigned)n;}
+  gamesettings_start(&settings_config);   /* keyboard bindings and graphics, this Mac's copy or iCloud's */
   runtime_gamepad_start();
   /* Default window: the docked output size, 1920x1080, scaled down (16:9 kept) when the screen's visible area is smaller. */
   /* TOTK_WINDOW_SIZE=<w>x<h> (test scripts only, e.g. the 2K output test; the desktop launcher never sets it): another starting size. */
@@ -221,7 +272,7 @@ void runtime_front_run(void(*callback)(void)){
   const char *owner=getenv("TOTK_SLOT_OWNER"),*purpose=getenv("TOTK_SLOT_PURPOSE");
   window.title=owner&&*owner&&strcmp(owner,"user")?[NSString stringWithFormat:@(TOTK_UI("测试局（%s）Ver. %s：%s — 存档副本，进度不会存进你的存档，脚本会自己关闭","Test session (%s) Ver. %s: %s — save copy, progress is not saved to your save, the script closes it")),owner,TOTK_GAME_VERSION,purpose&&*purpose?purpose:TOTK_UI("代理测试","agent test")]:[NSString stringWithFormat:@"Tears of the Kingdom  Mac — Ver. %s",TOTK_GAME_VERSION];
   windowDelegate=[TOTKWindowDelegate new];window.delegate=windowDelegate;
-  front_install_menu();
+  front_install_menu();apply_settings_when_drawing();
   window.collectionBehavior|=NSWindowCollectionBehaviorFullScreenPrimary;
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];
   metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.drawableSize=CGSizeMake(ww,wh);
