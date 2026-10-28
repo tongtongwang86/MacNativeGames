@@ -2360,7 +2360,7 @@ static int phone_holds_30(void) {
     return 0;
 #endif
 }
-/* The frame lock (the Mac settings panel, runtime/settings_panel.h; user 2026-10-25 "锁帧"): 0 off, 30, 40 or 60. The game is
+/* The frame lock (the Mac Settings window, runtime/frontend.m; user 2026-10-25 "锁帧"): 0 off, 30, 40 or 60. The game is
    then paced at exactly that rate as the 30 fps hold above does it (display ticks where the rate divides the display's,
    our own clock otherwise), with the uncapped clock suspended; the real-time frame step keeps game speed right. A movie
    or the phone's 30 fps hold still wins; so do the interpolation modes that hold the game (30+30, 40+40, 50+50), which the
@@ -2790,7 +2790,7 @@ static void present_cfg(const win_t *o) {
 }
 static unsigned present_ticks(const win_t *o) {   /* display ticks per game frame */
     present_cfg(o);
-    /* TOTK_MFX / the settings panel: MetalFX makes the frame between two game frames. 30+30 / 40+40 / 50+50 (and the frame
+    /* TOTK_MFX / the Settings window: MetalFX makes the frame between two game frames. 30+30 / 40+40 / 50+50 (and the frame
        lock): hz / rate ticks (50 at 100 Hz: 2; where the rate does not divide the display's, the own clock paces,
        mfx_own_clock). Held here and not only by the game's controller, because the code carries the 60 FPS patch (the
        controller may choose 1); the real-time frame step keeps game speed right. Uncapped interpolation paces as uncapped. */

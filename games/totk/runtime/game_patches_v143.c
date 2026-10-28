@@ -466,8 +466,12 @@ static void patch_output_res(Module *m){
 static uint8_t *render_page;static unsigned render_w,render_h;static int render_canvas;
 static void render_res_publish(unsigned canvas_w){
     if(!render_page)return;
-    float k=canvas_w/1920.0f,v[2]={render_w/k,render_h/k};
-    if(render_canvas){v[0]=1920;v[1]=1080;render_w=(unsigned)(1920*k);render_h=(unsigned)(1080*k);}   /* the game's scaling makes it the canvas */
+    /* The game scales the size it reads by the canvas over its mode's own picture: 1920 wide docked, 1280 in handheld mode
+       (the Mac's console mode set to handheld: 960x540 asked for came out 1440x808, and the canvas-sized scene 2880x1620,
+       2026-10-28). */
+    unsigned bw=runtime_handheld_mode()?1280:1920,bh=bw==1280?720:1080;
+    float k=canvas_w/(float)bw,v[2]={render_w/k,render_h/k};
+    if(render_canvas){v[0]=(float)bw;v[1]=(float)bh;render_w=(unsigned)(bw*k);render_h=(unsigned)(bh*k);}   /* the game's scaling makes it the canvas */
     memcpy(render_page+16,v,sizeof v);
     fprintf(stderr,"[totk] 1.4.3 render resolution: %ux%u on a %u-wide canvas (game size %.0fx%.0f, scaled by %.4f)\n",render_w,render_h,canvas_w,v[0],v[1],k);
 }

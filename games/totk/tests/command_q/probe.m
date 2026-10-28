@@ -28,7 +28,7 @@ int fps_overlay_full_hud(void){return 1;}
 int dm_gfx_fps_now(int *generated){if(generated)*generated=0;return -1;}
 void runtime_aspect_view(double w,double h){(void)w;(void)h;}
 int taa_enabled(void){return 0;}
-/* The settings panel (runtime/settings_panel.h) is not opened here. */
+/* The Settings window (vendor/gamesettings) is not opened here. */
 void taa_set(int on){(void)on;}
 int mfx_requested(void){return 0;}
 int fps_overlay_hud_mode(void){return 1;}

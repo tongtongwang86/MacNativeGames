@@ -419,7 +419,14 @@ static GSController *controller;
 @implementation GSController
 - (void)refresh {
     for (unsigned i = 0; i < NINPUT; i++) self.keyButtons[i].title = (NSInteger)i == self.recording ? @"Press a key…" : keys_title(i);
-    for (unsigned i = 0; i < self.popups.count; i++) if (cfg->graphics[i].get) [self.popups[i] selectItemAtIndex:cfg->graphics[i].get()];
+    for (unsigned i = 0; i < self.popups.count; i++) {
+        /* a setting's choices can change after the window was made (a game knows some only once its code is in) */
+        const gamesettings_choice *g = &cfg->graphics[i]; NSPopUpButton *p = self.popups[i];
+        BOOL same = p.numberOfItems == (NSInteger)g->nchoices;
+        for (unsigned c = 0; same && c < g->nchoices; c++) same = [[p itemAtIndex:c].title isEqualToString:@(g->choices[c])];
+        if (!same) { [p removeAllItems]; for (unsigned c = 0; c < g->nchoices; c++) [p addItemWithTitle:@(g->choices[c])]; }
+        if (g->get) [p selectItemAtIndex:g->get()];
+    }
     self.diagram.recording = (int)self.recording; self.diagram.needsDisplay = YES;
     self.localPath.stringValue = save_local ?: @"Known once the game has opened its saves.";
     self.cloudPath.stringValue = save_cloud ?: @"No iCloud copy (iCloud is off, or SaveSync has not found its folder).";
@@ -498,7 +505,7 @@ static NSView *top_aligned(NSView *content, BOOL scrolls) {
         [self.popups addObject:p];
     }
     [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
-    NSStackView *stack = [NSStackView stackViewWithViews:@[hint_label(@"Applied at once and kept for this game in iCloud. The 1–4 keys change the same settings."), grid]];
+    NSStackView *stack = [NSStackView stackViewWithViews:@[hint_label(@"Applied at once and kept for this game in iCloud."), grid]];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.alignment = NSLayoutAttributeLeading; stack.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
     return top_aligned(stack, NO);
 }

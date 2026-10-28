@@ -1079,6 +1079,8 @@ int runtime_aspect_set_ratio(float r) {
 }
 float runtime_aspect_ratio(void) { return g_uw_main ? (atomic_load(&g_uw_on) ? g_uw_wide : (float)ASPECT_GAME) : 0; }
 float runtime_aspect_start(void) { return g_uw_start; }
+int runtime_aspect_fit(void) { return 0; }       /* following the window's shape: Tears of the Kingdom only */
+int runtime_aspect_fitting(void) { return 0; }
 /* iPhone (frontend_ios.m reports the drawable once the view is made): the phone fills its screen as Tears of the Kingdom
    does there (aspect_patch.h, user 2026-10-23 "iphone 全屏"): the wide ratio becomes the screen's shape (2.16 on an
    iPhone 14) and is on from the start, so the camera draws that view into the 1280x720 canvas, the present widens it over

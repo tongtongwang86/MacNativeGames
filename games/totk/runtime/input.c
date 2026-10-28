@@ -33,9 +33,9 @@ static void user_input(const char *what){
  fprintf(stderr,"[input] user input (%s)%s%s\n",what,agent?": the user is playing this test session of ":"",agent?owner:"");
 }
 /* Keys from the window are the user's; scripted and auto-load presses use the synthetic entry.
-   Key 1 (Mac key code 18) opens and closes the settings panel (frontend.m: overlay, frame interpolation, picture, aspect
-   ratio, edge smoothing, controller type, mouse); held-key repeats do not toggle it. Keys 2-7 are no shortcuts any more
-   (user 2026-10-25: the panel replaces them). The window's other keys go through the player's bindings (user_keys). */
+   Key 1 (Mac key code 18) opens the Settings window (frontend.m; also Command-comma): overlay, frame lock and
+   interpolation, resolution, aspect ratio, edge smoothing, controller type, mouse, console mode. Held-key repeats do not
+   reopen it. Keys 2-7 are no shortcuts any more. The window's other keys go through the player's bindings (user_keys). */
 enum { KEY_SETTINGS = 18 };
 static uint64_t bound_button(unsigned code){unsigned char one[128]={0};one[code]=1;return gamesettings_buttons(one);}
 static void key_event(unsigned code,int down,int user){if(code>=128)return;unsigned char *k=user?user_keys:keys;pthread_mutex_lock(&inputLock);int press=down&&!k[code];if(press)pending|=user?bound_button(code):button(code);k[code]=(unsigned char)!!down;pthread_mutex_unlock(&inputLock);

@@ -19,6 +19,14 @@ __attribute__((constructor)) static void console_mode_from_settings(void){
  NSString *v=[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKOperationMode"];
  if([v isEqualToString:@"handheld"])setenv("TOTK_OPERATION_MODE","handheld",1);
 }
+/* The 3D render resolution (the Settings window): the scene's size below the picture's, e.g. 960x540 with MetalFX bringing
+   it up to 1080p. Read before the game's code is patched (game_patches_v143.c render_res reads TOTK_RENDER_RES once), so it
+   takes effect at the next start; one in the environment (a test run) wins. */
+__attribute__((constructor)) static void render_res_from_settings(void){
+ if(getenv("TOTK_RENDER_RES"))return;
+ NSString *v=[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKRenderResMac"];
+ if(v.length)setenv("TOTK_RENDER_RES",v.UTF8String,1);
+}
 int fps_overlay_hints_enabled(void);
 void dm_gfx_set_flag(const char *name,int v);
 int mfxup_output_enabled(void);
@@ -30,17 +38,14 @@ static NSView *bootOverlay;
 static NSTextField *bootStage,*bootDetail;
 static NSProgressIndicator *bootProgress;
 static NSView *hudBox;   /* the FPS / shader / load box (TOTKHudBox), nil with TOTK_HUD=corners */
-/* The settings panel (key 1, settings_panel.h): while it is open the game gets no keyboard or mouse input. */
-static int settingsOpen;
-static void settings_show(int open);
-/* Mouse mode (the settings panel, runtime/gamepad.m): while it is on and the window has the keyboard, the window holds the
-   pointer -- moved to the window's centre, detached from the mouse and hidden -- and sends the mouse's buttons and
-   movement to gamepad.m. It lets go when the window loses the keyboard (Command-Tab, a click elsewhere), during text
-   entry, while the settings panel is open and when mouse mode goes off (front_mouse_update). */
+/* Mouse mode (the Settings window, runtime/gamepad.m): while it is on and the window has the keyboard, the window holds
+   the pointer -- moved to the window's centre, detached from the mouse and hidden -- and sends the mouse's buttons and
+   movement to gamepad.m. It lets go when the window loses the keyboard (Command-Tab, a click elsewhere, the Settings
+   window), during text entry and when mouse mode goes off (front_mouse_update). */
 static BOOL mouseHeld;
 static int textEntryOpen;
 static void front_mouse_update(void);
-int taa_enabled(void);   /* third_party/d2r_gfx/gfx/nvn/totk_taa.m: edge smoothing in the settings panel */
+int taa_enabled(void);   /* third_party/d2r_gfx/gfx/nvn/totk_taa.m: edge smoothing (the Settings window) */
 void taa_set(int on);
 static uint64_t bootStartNS;
 static _Atomic uint64_t presentedFrames;
@@ -129,16 +134,12 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 @end
 @implementation TOTKInputView
 -(BOOL)acceptsFirstResponder{return YES;}
-/* While the settings panel is open only key 1 (it closes the panel, runtime/input.c) and Esc (closes it here, not the game's
-   menu) do anything; releases still go through so nothing stays held. */
--(void)keyDown:(NSEvent *)e{if(settingsOpen&&e.keyCode!=18){if(e.keyCode==53)settings_show(0);return;}runtime_input_key(e.keyCode,1);}
+-(void)keyDown:(NSEvent *)e{runtime_input_key(e.keyCode,1);}
 -(void)keyUp:(NSEvent *)e{runtime_input_key(e.keyCode,0);}
-/* Modifier keys arrive as flag changes; any of them can be bound (Settings window) except Command, which stays the app's.
-   While the settings panel is open it takes the presses (releases still reach the game, so no key stays held). */
+/* Modifier keys arrive as flag changes; any of them can be bound (Settings window) except Command, which stays the app's. */
 -(void)flagsChanged:(NSEvent *)e{NSEventModifierFlags f=e.modifierFlags;int down;
  switch(e.keyCode){case 56:case 60:down=!!(f&NSEventModifierFlagShift);break;case 58:case 61:down=!!(f&NSEventModifierFlagOption);break;
   case 59:case 62:down=!!(f&NSEventModifierFlagControl);break;case 63:down=!!(f&NSEventModifierFlagFunction);break;default:return;}
- if(settingsOpen&&down)return;
  runtime_input_key(e.keyCode,down);}
 /* The game has no mouse controls. In native full screen, keep the pointer out of the picture while idle, but show it again
    as soon as it moves; restore it when the window loses focus or leaves full screen. */
@@ -176,7 +177,7 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 }
 @end
 static void front_mouse_update(void){   /* main thread; also runtime/gamepad.m's hook when mouse mode changes */
- BOOL want=window&&runtime_mouse_enabled()&&window.isKeyWindow&&!textEntryOpen&&!settingsOpen;
+ BOOL want=window&&runtime_mouse_enabled()&&window.isKeyWindow&&!textEntryOpen;
  if(want==mouseHeld)return;
  mouseHeld=want;
  if(want){
@@ -226,7 +227,7 @@ static void front_mouse_update(void){   /* main thread; also runtime/gamepad.m's
  CGFloat w=self.textSize.width+16,h=self.textSize.height+10,m=10;NSRect f=NSMakeRect(floor(self.superview.bounds.size.width-w-m),floor(self.superview.bounds.size.height-h-m),w,h);
  if(!NSEqualRects(self.frame,f))self.frame=f;self.label.frame=NSMakeRect(8,5,self.textSize.width,self.textSize.height);}
 @end
-#include "settings_panel.h"
+#include "aspect_math.h"   /* aspect_near, ASPECT_GAME: the Settings window's aspect ratios */
 /* The live FPS in the menu bar: a menu of the game's own, after its app menu on the left, whose title is the frame rate
    ("60 FPS", "50+50 FPS" while frame interpolation shows generated frames), refreshed twice a second with the value the
    overlay uses. Part of the app's own menu bar, so macOS shows it whenever the game is in front (a status item next to
@@ -331,19 +332,124 @@ static TOTKWindowDelegate *windowDelegate;
 int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
 void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(), ^{[window performClose:nil];});}
 /* Use the window-close path, not terminate:, so Command-Q also waits for active saves. */
-/* The Settings window (vendor/gamesettings, Command-comma): the keyboard bindings, and the console mode, which the key-1
-   settings panel does not have. The picture, MetalFX, frame interpolation, aspect ratio and overlay are the panel's. */
+/* The Settings window (vendor/gamesettings; Command-comma or key 1): every setting of the Mac version in one place, kept on
+   this Mac and in iCloud. It took over the rows of the key-1 settings panel (user 2026-10-28: one settings window) and
+   brings back "The window's shape", the camera following the window as it is resized. Each row maps the window's choice
+   (an index) to the game's value. A pick that sizes the window (a resolution, a fixed aspect ratio) does so only when the
+   player makes it in the window, not when the saved settings are put back at start. */
+void nvn_fps_lock_set(int fps);   /* gfx/nvn/hle_nvn.c: 0 off, 30, 40 or 60 */
+int nvn_fps_lock(void);
+static BOOL settings_by_player(void){NSWindow *k=NSApp.keyWindow;return k&&k!=window;}   /* the Settings window has the keyboard */
+static int settings_index(const int *values,int n,int v){for(int i=0;i<n;i++)if(values[i]==v)return i;return 0;}
+/* The window at a resolution's size (720p 1280x720, 1080p 1920x1080, MetalFX 2560x1440, native its own, 2K + MetalFX
+   3840x2160) in the shape of the aspect ratio in force, shrunk to fit the screen; full screen stays as it is. */
+static void settings_window_for(int mode){
+ if(!window||(window.styleMask&NSWindowStyleMaskFullScreen))return;
+ unsigned w=1920,h=1080;
+ if(mode==OUTPUT_MODE_METALFX){w=2560;h=1440;}
+ else if(mode==OUTPUT_MODE_NATIVE_METALFX){w=3840;h=2160;}
+ else if(mode==OUTPUT_MODE_720P){w=1280;h=720;}
+ else if(mode==OUTPUT_MODE_NATIVE&&!runtime_output_native(mode,&w,&h)){w=1920;h=1080;}
+ double ratio=runtime_aspect_ratio()>0?runtime_aspect_ratio():(double)w/h;
+ NSScreen *screen=window.screen?:NSScreen.mainScreen;if(!screen||!(ratio>0))return;
+ NSRect visible=screen.visibleFrame,content=[window contentRectForFrameRect:visible];
+ CGFloat ch=round(fmin(h,fmin(content.size.height,content.size.width/ratio))),cw=round(ch*ratio);
+ NSRect old=window.frame,f=[window frameRectForContentRect:NSMakeRect(0,0,cw,ch)];
+ f.origin=NSMakePoint(NSMidX(old)-f.size.width/2,NSMidY(old)-f.size.height/2);
+ f.origin.x=fmax(NSMinX(visible),fmin(f.origin.x,NSMaxX(visible)-f.size.width));
+ f.origin.y=fmax(NSMinY(visible),fmin(f.origin.y,NSMaxY(visible)-f.size.height));
+ [window setFrame:f display:YES];   /* windowDidResize follows the drawable (front_sync_drawable) */
+}
+static const char *const overlay_choices[]={"All (FPS, shaders, load)","FPS only","Off"};
+static const int overlay_values[]={HUD_MODE_ALL,HUD_MODE_MINIMAL,HUD_MODE_OFF};
+static int overlay_get(void){return settings_index(overlay_values,3,fps_overlay_hud_mode());}
+static void overlay_set(int v){fps_overlay_set_hud_mode(overlay_values[v]);[(TOTKHudBox *)hudBox refresh];}
+/* Frame lock and frame interpolation exclude each other: picking one turns the other off. */
+static const char *const lock_choices[]={"Off","30 fps","40 fps","60 fps"};
+static const int lock_values[]={0,30,40,60};
+static int lock_get(void){return settings_index(lock_values,4,nvn_fps_lock());}
+static void lock_set(int v){nvn_fps_lock_set(lock_values[v]);if(lock_values[v])dm_gfx_set_flag("mfx_interp",MFX_OFF);}
+static const char *const interp_choices[]={"Off","30 + 30","40 + 40","50 + 50","Unlimited"};
+static const int interp_values[]={MFX_OFF,MFX_30,MFX_40,MFX_50,MFX_MAX};
+static int interp_get(void){return settings_index(interp_values,5,mfx_requested());}
+static void interp_set(int v){dm_gfx_set_flag("mfx_interp",interp_values[v]);if(interp_values[v]!=MFX_OFF)nvn_fps_lock_set(0);}
+/* The resolutions this game and start offer (settings_fill: known once the game's code is in). */
+static const char *res_choices[5]={"1080p"};static int res_modes[5]={OUTPUT_MODE_OFF},res_count=1;
+static int res_get(void){return settings_index(res_modes,res_count,runtime_output_mode());}
+static void res_set(int v){if(v<res_count&&runtime_output_mode_set(res_modes[v])&&settings_by_player())settings_window_for(res_modes[v]);}
+/* The aspect ratios: the window's shape first, then the fixed ones (and TOTK_ASPECT's); one 16:9 where it cannot change. */
+static const char *aspect_choices[6]={"16:9 (the game's own)"};static float aspect_ratios[6]={(float)ASPECT_GAME};static int aspect_count=1,aspect_fit_offered;
+static int aspect_get(void){
+ if(aspect_fit_offered&&runtime_aspect_fitting())return 0;
+ float now=runtime_aspect_ratio();for(int i=aspect_fit_offered;i<aspect_count;i++)if(aspect_near(now,aspect_ratios[i]))return i;return aspect_fit_offered;}
+static void aspect_set(int v){
+ if(v>=aspect_count)return;
+ if(aspect_fit_offered&&v==0){runtime_aspect_fit();return;}   /* the window keeps its size; the picture takes its shape */
+ if(runtime_aspect_set_ratio(aspect_ratios[v])&&settings_by_player())runtime_front_resize_aspect(aspect_ratios[v]);}
+static const char *const onoff_choices[]={"Off","On"};
+static void taa_choice(int v){taa_set(v);}
+static const char *const pad_choices[]={"Automatic","Xbox","PlayStation","Switch"};
+static const int pad_values[]={GAMEPAD_TYPE_AUTO,GAMEPAD_TYPE_XBOX,GAMEPAD_TYPE_PLAYSTATION,GAMEPAD_TYPE_SWITCH};
+static int pad_get(void){return settings_index(pad_values,4,runtime_gamepad_type(NULL));}
+static void pad_set(int v){runtime_gamepad_type_set(pad_values[v]);}
+static void mouse_choice(int v){runtime_mouse_set(v);}
 static int console_get(void){return [[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKOperationMode"] isEqualToString:@"handheld"];}
 static void console_set(int v){[NSUserDefaults.standardUserDefaults setObject:v?@"handheld":@"docked" forKey:@"TOTKOperationMode"];}
 static const char *const console_choices[]={"Docked","Handheld"};
+/* The 3D scene's size (render_res_from_settings, next start) and what brings it up to the picture's size. */
+static const char *const scene_choices[]={"Same as the resolution","540p (960x540)","720p (1280x720)","900p (1600x900)"};
+static NSString *const scene_sizes[]={@"",@"960x540",@"1280x720",@"1600x900"};
+static int scene_get(void){NSString *v=[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKRenderResMac"]?:@"";
+ for(int i=0;i<4;i++)if([v isEqualToString:scene_sizes[i]])return i;return 0;}
+static void scene_set(int v){if(v>=0&&v<4)[NSUserDefaults.standardUserDefaults setObject:scene_sizes[v] forKey:@"TOTKRenderResMac"];}
+int mfxup_enabled(void);   /* gfx/nvn/totk_mfx_up.m: MetalFX instead of the game's own upscale of the scene */
+static const char *const upscaler_choices[]={"The game's own (FSR 1)","MetalFX"};
+static int upscaler_get(void){return mfxup_enabled()?1:0;}
+static void upscaler_set(int v){dm_gfx_set_flag("mfx_upscale",v);}
+enum { SETTING_RESOLUTION = 3, SETTING_ASPECT = 6 };
 static gamesettings_choice graphics_settings[]={
+ {"overlay_mac","Overlay",overlay_choices,3,overlay_get,overlay_set,"The FPS, shader and load box in the window's top-right corner."},
+ {"frame_lock","Frame lock",lock_choices,4,lock_get,lock_set,"Holds the game at this frame rate. Turns frame interpolation off."},
+ {"interpolation","Frame interpolation (MetalFX)",interp_choices,5,interp_get,interp_set,"MetalFX generates in-between frames. Turns the frame lock off."},
+ {"resolution_mac","Resolution",res_choices,1,res_get,res_set,"The game's picture and UI size; the window takes that size when you pick it here."},
+ {"render_res_mac","3D render resolution",scene_choices,4,scene_get,scene_set,"The 3D scene's size, below the resolution for speed; the upscaler brings it up. Takes effect the next time the game starts."},
+ {"upscaler_mac","Upscaling the 3D scene",upscaler_choices,2,upscaler_get,upscaler_set,"MetalFX, or the game's own one-pass upscale. Edge smoothing works with either."},
+ {"aspect_mac","Aspect ratio",aspect_choices,1,aspect_get,aspect_set,"Fill the window: the picture takes the window's shape and follows it as you resize it or go full screen, the HUD keeping its 16:9 shape in the middle. A fixed ratio gives the window that shape."},
+ {"edge_smoothing","Edge smoothing (MetalFX Temporal)",onoff_choices,2,taa_enabled,taa_choice,NULL},
+ {"controller_type","Controller type",pad_choices,4,pad_get,pad_set,"Which button prompts and layout the controller uses; Automatic goes by the controller connected."},
+ {"mouse","Mouse (camera, buttons)",onoff_choices,2,runtime_mouse_enabled,mouse_choice,"The mouse turns the camera and its buttons press the game's; the window holds the pointer while it has the keyboard."},
  {"console_mac","Console mode",console_choices,2,console_get,console_set,"Docked is the game's TV mode; handheld draws less (the game's own handheld detail and resolution). Takes effect the next time the game starts."},
 };
 static const gamesettings_config settings_config={"0100F2C0115B6000","Tears of the Kingdom","[totk]",graphics_settings,sizeof graphics_settings/sizeof *graphics_settings};
+/* The rows whose choices depend on the game's code (resolutions, whether the shape can change): filled once it is in. */
+static void settings_fill(void){
+ static char native[2][48];
+ int modes=runtime_output_modes();res_count=0;
+ static const int order[]={OUTPUT_MODE_720P,OUTPUT_MODE_OFF,OUTPUT_MODE_METALFX,OUTPUT_MODE_NATIVE,OUTPUT_MODE_NATIVE_METALFX};
+ for(unsigned i=0;i<sizeof order/sizeof *order;i++){
+  int m=order[i];if(!(modes&1<<m))continue;unsigned nw=0,nh=0;runtime_output_native(m,&nw,&nh);
+  const char *name=m==OUTPUT_MODE_720P?"720p":m==OUTPUT_MODE_OFF?"1080p":m==OUTPUT_MODE_METALFX?"1080p + MetalFX upscaling":
+   m==OUTPUT_MODE_NATIVE_METALFX?"2K + MetalFX upscaling (4K screens)":NULL;
+  if(!name){snprintf(native[0],sizeof native[0],nw==2560&&nh==1440?"2K (2560x1440)":"Native %ux%u",nw,nh);name=native[0];}
+  res_choices[res_count]=name;res_modes[res_count++]=m;}
+ if(!res_count){res_choices[0]="1080p";res_modes[0]=OUTPUT_MODE_OFF;res_count=1;}
+ graphics_settings[SETTING_RESOLUTION].nchoices=(unsigned)res_count;
+ aspect_count=0;aspect_fit_offered=runtime_aspect_ratio()>0;
+ if(aspect_fit_offered){
+  aspect_choices[aspect_count]="Fill the window (dynamic)";aspect_ratios[aspect_count++]=0;
+  static const struct{const char *name;float r;} fixed[]={{"16:9 (the game's own)",16.0f/9},{"16:10",16.0f/10},{"21:9",21.0f/9},{"32:9",32.0f/9}};
+  int listed=0;float start=runtime_aspect_start();
+  for(unsigned i=0;i<sizeof fixed/sizeof *fixed;i++){aspect_choices[aspect_count]=fixed[i].name;aspect_ratios[aspect_count++]=fixed[i].r;listed|=aspect_near(start,fixed[i].r);}
+  if(start>0&&!listed){snprintf(native[1],sizeof native[1],"%.2f:1 (TOTK_ASPECT)",start);aspect_choices[aspect_count]=native[1];aspect_ratios[aspect_count++]=start;}
+ }else{aspect_choices[0]="16:9 (the game's own)";aspect_ratios[0]=(float)ASPECT_GAME;aspect_count=1;}
+ graphics_settings[SETTING_ASPECT].nchoices=(unsigned)aspect_count;
+}
 /* The saved graphics settings go in once the game is drawing (the renderer and the output size are ready then). */
 static void apply_settings_when_drawing(void){
- [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){if(dm_nvn_frame_count()<60)return;[t invalidate];gamesettings_apply_graphics();}];
+ [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t){if(dm_nvn_frame_count()<60)return;[t invalidate];settings_fill();gamesettings_apply_graphics();}];
 }
+/* Key 1 (runtime/input.c) opens the Settings window; it has the keyboard then, so the game gets no input until it closes. */
+void runtime_settings_toggle(void){dispatch_async(dispatch_get_main_queue(), ^{settings_fill();gamesettings_show();});}
 static void front_install_menu(void){
  NSMenu *menu=[NSMenu new],*appMenu=[NSMenu new];
  NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[menu addItem:appItem];

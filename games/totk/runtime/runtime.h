@@ -110,13 +110,15 @@ void runtime_warm_done(void);
 void runtime_game_slot_acquire(const char *mode);   /* runtime/game_slot.c: one game at a time */
 void *runtime_front_override(const char *name);
 int runtime_front_focus(void);
-void runtime_settings_toggle(void);   /* key 1 (runtime/input.c): the settings panel opens or closes (frontend.m; nothing on the phone) */
+void runtime_settings_toggle(void);   /* key 1 (runtime/input.c): the Settings window opens (frontend.m; nothing on the phone) */
 void fps_overlay_set_hud_mode(int mode);   /* gfx/nvn/fps_overlay.h HUD_MODE_*: the panel's overlay choice */
 int fps_overlay_hud_mode(void);
 int fps_overlay_full_hud(void);
 int runtime_aspect_set_ratio(float r);   /* the settings panel (aspect_patch.h; game_patches_botw.c): 16:9, 16:10, 21:9, 32:9 ...; 0 where unavailable */
 float runtime_aspect_ratio(void);        /* the ratio picked (16:9 = the game's own); 0 where the shape cannot be changed */
 float runtime_aspect_start(void);        /* TOTK_ASPECT's ratio, 0 without it (the panel offers it too) */
+int runtime_aspect_fit(void);            /* Mac: the camera follows the window's shape (aspect_patch.h); 0 where unavailable */
+int runtime_aspect_fitting(void);        /* it does now */
 void runtime_aspect_view(double w, double h);   /* frontend.m: the window's drawable size, which key 4 follows */
 float runtime_aspect_now(void);     /* the ratio in force, 0 = the game's own 16:9 */
 void runtime_front_resize_aspect(double ratio);   /* Mac: resize the window to a selected picture ratio */

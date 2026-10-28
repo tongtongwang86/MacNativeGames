@@ -92,6 +92,18 @@ int runtime_aspect_set_ratio(float r) {
     return 1;
 }
 
+/* The Settings window's "The window's shape" (Mac): the camera takes the window's shape and follows it as the window is
+   resized or goes full screen, as the phone's takes its screen's (step _FIT; frontend.m reports every drawable size).
+   Returns 0 where the shape cannot be changed. */
+int runtime_aspect_fit(void) {
+    if (!g_aspect_slot) return 0;
+    atomic_store(&g_aspect_step, ASPECT_STEP_FIT);
+    aspect_apply();
+    fprintf(stderr, "[totk] aspect: the window's shape (%.4f)\n", runtime_aspect_now());
+    return 1;
+}
+int runtime_aspect_fitting(void) { return g_aspect_slot && atomic_load(&g_aspect_step) == ASPECT_STEP_FIT; }
+
 /* sites: instructions that leave the ratio in an s register (fdiv s<d>, ... or ldr s<d>, [x<n>, #imm]), each with a
    plain stub from stub_off (ASPECT_STUB bytes per site). The first ncam are camera sites: when vert_off is not 0 and
    the inlined setFovy is there, their fovy load also gets a Vert+ stub (ASPECT_VSTUB bytes each, from vert_off). Both

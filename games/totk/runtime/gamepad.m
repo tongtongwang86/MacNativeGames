@@ -105,7 +105,7 @@ static void setting_write(const char *name, const char *word, const char *what) 
     if (!ok) { fprintf(stderr, "[totk-input] could not save the %s to %s; it holds until the game closes\n", what, path); unlink(temp); }
 }
 
-/* Controller type (gamepad_layout.h GAMEPAD_TYPE_*), in the Mac settings panel, in controller-type.txt. */
+/* Controller type (gamepad_layout.h GAMEPAD_TYPE_*), in the Mac Settings window, in controller-type.txt. */
 static _Atomic int controllerType = GAMEPAD_TYPE_AUTO;
 
 static void load_controller_type(void) {
@@ -322,7 +322,7 @@ static HIDPadState hidPad;
 static void hid_pad_start(void) {}
 #endif
 
-/* ---- Mouse mode (Mac, the settings panel; in mouse.txt) ----
+/* ---- Mouse mode (Mac, the Settings window; in mouse.txt) ----
    The window (runtime/frontend.m) holds the pointer while mouse mode is on and the window has the keyboard, and sends
    the mouse's buttons and movement here. Buttons are physical buttons 17-21 of the controller layout (controller_map.h:
    left attack, right draw the bow with left to shoot, middle target), so controls.txt can change them. Movement goes to
@@ -391,7 +391,7 @@ static void load_mouse_mode(void) {
 int runtime_mouse_enabled(void) { return atomic_load(&mouseMode); }
 void runtime_mouse_set_hook(void (*hook)(void)) { mouseHook = hook; }
 
-/* The settings panel (key 1, frontend.m). */
+/* The Settings window (key 1 or Command-comma, frontend.m). */
 int runtime_mouse_set(int on) {
     on = !!on;
     if (on == atomic_load(&mouseMode)) return on;
@@ -512,7 +512,7 @@ static void attach_gamepad(GCController *controller) {
     refresh_gamepads();
 }
 
-/* The settings panel (key 1, frontend.m): auto, Xbox, PlayStation or Switch; the held buttons are read again at once. */
+/* The Settings window (frontend.m): auto, Xbox, PlayStation or Switch; the held buttons are read again at once. */
 int runtime_gamepad_type_set(int type) {
     if (type < GAMEPAD_TYPE_AUTO || type >= GAMEPAD_TYPE_COUNT) return atomic_load(&controllerType);
     if (type == atomic_load(&controllerType)) return type;

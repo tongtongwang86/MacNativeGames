@@ -1,5 +1,5 @@
 /* The shared shader list contribution sent with the GitHub CLI (gh): the Mac launcher's reminder ("Submit automatically",
-   app/launcher.m) and the settings panel's button (runtime/settings_panel.h). Mac only (NSTask). Uses totk_shader_contrib.h
+   app/launcher.m) and the game's own reminder. Mac only (NSTask). Uses totk_shader_contrib.h
    and game_version.h. */
 #pragma once
 #import <Foundation/Foundation.h>
