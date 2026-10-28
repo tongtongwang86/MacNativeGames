@@ -3,7 +3,8 @@
    the profile directory. Application save data is created on first start, as the system launcher does
    for titles that declare save data. Writes reach the host file immediately; Commit flushes them.
    Because of that, quitting in the middle of a save (the game writes several files, then commits) would leave a slot half
-   written: runtime_fs_save_busy tells the window close to wait until the save is done (runtime/frontend.m). */
+   written: runtime_fs_save_busy tells the window close to wait until the save is done (runtime/frontend.m), and its
+   upload to iCloud too: the close ends in _exit, which skips SaveSync's own flush at exit. */
 #include "autoload.h"
 #include "runtime.h"
 #include "fs_host.h"
@@ -58,10 +59,12 @@ static void need(int c, const char *m) { if (!c) runtime_fail(m); }
 static _Atomic int save_writers, save_dirty;
 static _Atomic uint64_t save_changed_ns;
 static void save_touched(void) { atomic_store(&save_changed_ns, runtime_now_ns()); atomic_store(&save_dirty, 1); }
-int runtime_fs_save_busy(void) {
+/* The game writing a save (SaveSync waits on this, never on its own uploads). */
+static int game_save_busy(void) {
     if (atomic_load(&save_writers) > 0) return 1;
     return atomic_load(&save_dirty) && runtime_now_ns() - atomic_load(&save_changed_ns) < 3000000000ull;
 }
+int runtime_fs_save_busy(void) { return game_save_busy() || savesync_busy(); }
 static void make_dir(const char *p) { if (mkdir(p, 0700) && errno != EEXIST) runtime_fail("create profile storage directory"); }
 static int remove_tree(const char *path) {
     DIR *d = opendir(path); if (!d) return errno == ENOENT ? 0 : -1;
@@ -82,9 +85,13 @@ static void init(void) {
     snprintf(p, sizeof p, "%s/save", profile); make_dir(p);
     need(snprintf(save_root, sizeof save_root, "%s/save/%016llx%016llx", profile, (unsigned long long)uid[1], (unsigned long long)uid[0]) < (int)sizeof save_root, "save path");
     make_dir(save_root);                                   /* launcher-style EnsureSaveData */
-    /* iCloud save sync (vendor/savesync): before the game reads its saves; uploads after commits (below). */
+    /* iCloud save sync (vendor/savesync): before the game reads its saves; uploads after commits (below). storage/ is
+       not a save: the game rewrites storage/CacheStorageKey.dat at every start, which made each start an upload and a
+       start on another device a conflict decided by time (a phone's older save replaced the Mac's, 2026-10-28). */
+    static const char *const save_not_synced[] = {"storage/", NULL};
     savesync_start(&(savesync_config){.title_id = "0100F2C0115B6000", .game_version = TOTK_GAME_VERSION, .save_dir = save_root,
-                                      .state_dir = profile, .log_tag = "[totk]", .save_busy = runtime_fs_save_busy});
+                                      .state_dir = profile, .log_tag = "[totk]", .save_busy = game_save_busy,
+                                      .exclude = save_not_synced});
     gamesettings_set_save_folders(save_root, savesync_cloud_folder());   /* the Settings window's Saves tab */
     snprintf(p, sizeof p, "%s/temp", profile); remove_tree(p); make_dir(p);
     snprintf(p, sizeof p, "%s/cache", profile); make_dir(p);
@@ -324,25 +331,25 @@ void runtime_save_probe(void) {
     unsigned checks = 0; uint64_t uid[2]; runtime_account_uid(uid); uint64_t h = 0;
 #define CHECK(c, what) do { checks++; if (!(c)) { fprintf(stderr, "save probe: %s\n", what); runtime_fail("save probe failed"); } } while (0)
     CHECK(mount_save("save", uid) == 0 && mount_temp("temp") == 0, "mount save and temporary storage");
-    CHECK(!runtime_fs_save_busy(), "idle at start");
-    CHECK(create_file("save:/a.sav", 16) == 0 && runtime_fs_save_busy(), "creating a save file starts a save");
-    CHECK(commit("save") == 0 && !runtime_fs_save_busy(), "commit ends it");
-    CHECK(open_file(&h, "save:/a.sav", OPEN_WRITE) == 0 && runtime_fs_save_busy(), "a save file open for writing");
+    CHECK(!game_save_busy(), "idle at start");
+    CHECK(create_file("save:/a.sav", 16) == 0 && game_save_busy(), "creating a save file starts a save");
+    CHECK(commit("save") == 0 && !game_save_busy(), "commit ends it");
+    CHECK(open_file(&h, "save:/a.sav", OPEN_WRITE) == 0 && game_save_busy(), "a save file open for writing");
     static const char data[16] = "progress";
-    CHECK(write_file(h, 0, data, sizeof data, NULL) == 0 && runtime_fs_save_busy(), "writing");
+    CHECK(write_file(h, 0, data, sizeof data, NULL) == 0 && game_save_busy(), "writing");
     atomic_store(&save_changed_ns, runtime_now_ns() - 10000000000ull);
-    CHECK(runtime_fs_save_busy(), "a file open for writing is busy however long ago it was written");
+    CHECK(game_save_busy(), "a file open for writing is busy however long ago it was written");
     close_file(h);
-    CHECK(runtime_fs_save_busy(), "closed but not committed yet (the next file of the save follows)");
-    CHECK(commit("save") == 0 && !runtime_fs_save_busy(), "committed");
-    CHECK(open_file(&h, "save:/a.sav", OPEN_READ) == 0 && !runtime_fs_save_busy(), "reading is not saving");
+    CHECK(game_save_busy(), "closed but not committed yet (the next file of the save follows)");
+    CHECK(commit("save") == 0 && !game_save_busy(), "committed");
+    CHECK(open_file(&h, "save:/a.sav", OPEN_READ) == 0 && !game_save_busy(), "reading is not saving");
     close_file(h);
-    CHECK(create_file("save:/b.sav", 4) == 0 && runtime_fs_save_busy(), "second change");
+    CHECK(create_file("save:/b.sav", 4) == 0 && game_save_busy(), "second change");
     atomic_store(&save_changed_ns, runtime_now_ns() - 4000000000ull);
-    CHECK(!runtime_fs_save_busy(), "uncommitted changes older than 3 s are not a save in progress");
-    CHECK(create_file("temp:/t.bin", 4) == 0 && !runtime_fs_save_busy(), "temporary storage does not count");
-    CHECK(rename_file("save:/b.sav", "save:/c.sav") == 0 && runtime_fs_save_busy(), "renaming save data");
-    CHECK(commit("save") == 0 && !runtime_fs_save_busy() && delete_file("save:/c.sav") == 0 && runtime_fs_save_busy() && commit("save") == 0, "delete and commit");
+    CHECK(!game_save_busy(), "uncommitted changes older than 3 s are not a save in progress");
+    CHECK(create_file("temp:/t.bin", 4) == 0 && !game_save_busy(), "temporary storage does not count");
+    CHECK(rename_file("save:/b.sav", "save:/c.sav") == 0 && game_save_busy(), "renaming save data");
+    CHECK(commit("save") == 0 && !game_save_busy() && delete_file("save:/c.sav") == 0 && game_save_busy() && commit("save") == 0, "delete and commit");
 #undef CHECK
     remove_tree(dir);
     printf("{\"status\":\"pass\",\"probe\":\"probe-save\",\"checks\":%u,\"scope\":\"save-in-progress state (runtime_fs_save_busy) through open / write / close / create / rename / delete / commit on a save mount; reads and temporary storage do not count; stale uncommitted changes do not hold a close\"}\n", checks);

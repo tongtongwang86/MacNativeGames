@@ -29,12 +29,14 @@ savesync_config c = {
     .state_dir    = profile,              // this device's state and save-backups/ (not synced)
     .container_id = NULL,                 // NULL: the app's own container (iOS) / any that holds the title (Mac)
     .log_tag      = "[totk]",
-    .save_busy    = runtime_fs_save_busy, // uploads wait while the game is writing
+    .save_busy    = game_save_busy,       // uploads wait while the game is writing (its own writes, never savesync_busy)
     .keep_backups = 0,                    // 0: 10
+    .exclude = (const char *[]){"storage/", NULL},   // not saves: a cache the game rewrites at every start
 };
 savesync_start(&c);      // once, off the main thread, before the game reads its saves (blocking)
 savesync_committed();    // after every save the game commits
 savesync_flush(20);      // optional: app going to the background (also runs at exit, 10 s)
+savesync_busy();         // an upload is scheduled or running: a quit through _exit waits while it is 1
 ```
 
 `savesync_start` returns 0 and everything else does nothing when there is no iCloud (no entitlement, signed out,
@@ -63,6 +65,12 @@ The **hash** is SHA-256 over every file's (path, NUL, size, bytes) in path order
 every device whatever the save folder is called (each device has its own account folder name). The manifest is
 written **last** and a reader only uses files that hash to it, so a copy iCloud has only partly delivered is never
 taken: it reads as "still arriving".
+
+**Excluded paths** (`exclude`, TOTK: `storage/`) are not saves: they are left out of the hash, the newest-change
+time and the cloud copy, and taking the cloud's saves never removes them from the save folder. A cloud copy sent
+before a path was excluded still lists it: the reader hashes every listed file to check the manifest, then leaves the
+excluded ones out, and a device that last agreed on that old hash still counts as agreed (no false conflict at the
+switch). The next send writes a copy without them and removes them from `files/`.
 
 **Device state** (`<state_dir>/savesync-<title id>.json`): `{"last": "<hash>"}`, the hash this device and the cloud
 last agreed on. It is what turns two snapshots into a three-way comparison.
@@ -161,4 +169,6 @@ another sync tool), `SAVESYNC_CONTAINER=iCloud.<id>` picks the container.
 
 `libs/savesync/tests/run.sh`: the decision table, then two simulated devices sharing a temporary cloud folder through
 every case above (first device, empty device, in step, upload during play, conflict, an upload during play racing
-another device's, newer game version, `SAVESYNC=0`). No game data or iCloud account needed.
+another device's, an excluded cache changing alone, `savesync_busy` until the delayed upload ran, a cloud copy from
+before the exclusion (`DEVICE_OLD=1` builds one), newer game version, `SAVESYNC=0`). No game data or iCloud account
+needed.

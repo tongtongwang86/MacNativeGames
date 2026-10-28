@@ -28,7 +28,32 @@ dev mac 1.0 commit "echo F > $T/mac/save/slot/progress.sav; echo E > $T/ipad/sav
 cloud E "an upload during play never overwrites another device's newer upload"
 dev mac 1.0;                                   check mac E "...and is settled at the next start: the newer (E) wins"
 grep -rqx F $T/mac/save-backups && echo "ok   ...and the older (F) is kept in save-backups" || { echo "FAIL F was lost"; fails=$((fails+1)); }
+# storage/ is a cache the game rewrites at every start (savesync_config.exclude): not a save, never synced or removed
+mkdir -p $T/mac/save/storage; echo key1 > $T/mac/save/storage/CacheStorageKey.dat
+out=$(dev mac 1.0); [[ $out == *"in step"* ]] && echo "ok   a cache change alone is no save (in step, nothing sent)" || { echo "FAIL a cache change was taken for a save: $out"; fails=$((fails+1)); }
+grep -q storage $T/cloud/manifest.json && { echo "FAIL the cache went to the cloud"; fails=$((fails+1)); } || echo "ok   the cache stays off the cloud"
+mkdir -p $T/ipad/save/storage; echo ipadkey > $T/ipad/save/storage/CacheStorageKey.dat
+echo H > $T/mac/save/slot/progress.sav; dev mac 1.0 commit >/dev/null; dev ipad 1.0 >/dev/null
+check ipad H "the other device takes the new save"
+[[ $(cat $T/ipad/save/storage/CacheStorageKey.dat 2>/dev/null) == ipadkey ]] && echo "ok   ...and keeps its own cache" || { echo "FAIL taking the cloud's saves removed the cache"; fails=$((fails+1)); }
+# a quit through _exit (the Mac window) waits while savesync_busy: 1 right after a commit, 0 once the upload has run
+$T/device $T/mac $T/mac/save 1.0 busy "echo I > $T/mac/save/slot/progress.sav" 2>&1 | sed "s/^\[test\] iCloud saves: /  mac: /"
+cloud I "busy until the delayed upload has run, then the cloud has it"
 python3 -c "import json,sys;p=sys.argv[1];m=json.load(open(p));m['version']='9.9';json.dump(m,open(p,'w'))" $T/cloud/manifest.json
 echo G > $T/mac/save/slot/progress.sav; dev mac 1.0; check mac G "a save from a newer game version is not taken"
+# a cloud copy sent before storage/ was excluded lists the cache: still read (its hash covers it), the cache never taken
+export SAVESYNC_DIR=$T/oldcloud; mkdir -p $T/om/save/slot $T/om/save/storage $T/oi/save
+echo P > $T/om/save/slot/progress.sav; echo key > $T/om/save/storage/CacheStorageKey.dat
+DEVICE_OLD=1 dev om 1.0 >/dev/null; DEVICE_OLD=1 dev oi 1.0 >/dev/null
+grep -q storage $T/oldcloud/manifest.json && echo "ok   (an old build sent the cache)" || { echo "FAIL the old build did not send the cache"; fails=$((fails+1)); }
+echo key2 > $T/om/save/storage/CacheStorageKey.dat
+out=$(dev om 1.0); [[ $out == *"in step"* ]] && echo "ok   an old cloud copy with the cache in it reads (in step)" || { echo "FAIL old cloud copy: $out"; fails=$((fails+1)); }
+echo Q > $T/om/save/slot/progress.sav; dev om 1.0 commit >/dev/null
+[[ $(cat $T/oldcloud/files/slot/progress.sav) == Q ]] && echo "ok   ...a new save goes up" || { echo "FAIL the new save was not sent"; fails=$((fails+1)); }
+grep -q storage $T/oldcloud/manifest.json || [[ -e $T/oldcloud/files/storage ]] && { echo "FAIL the old cache stayed in the cloud"; fails=$((fails+1)); } || echo "ok   ...and the old cache leaves the cloud"
+echo ipadkey > $T/oi/save/storage/CacheStorageKey.dat; dev oi 1.0 >/dev/null
+check oi Q "a device that last agreed on the old copy takes the new save"
+[[ $(cat $T/oi/save/storage/CacheStorageKey.dat) == ipadkey ]] && echo "ok   ...and keeps its own cache" || { echo "FAIL its cache was replaced"; fails=$((fails+1)); }
+export SAVESYNC_DIR=$T/cloud
 rm -rf $T/fresh; mkdir -p $T/fresh/save; SAVESYNC=0 $T/device $T/fresh $T/fresh/save 1.0 2>/dev/null && echo "FAIL SAVESYNC=0" || echo "ok   SAVESYNC=0 turns it off"
 [[ $fails == 0 ]] && echo "all passed" || { echo "$fails failed"; exit 1; }

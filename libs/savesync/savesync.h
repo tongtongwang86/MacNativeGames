@@ -17,8 +17,13 @@ typedef struct {
     const char *container_id;   /* iCloud container ("iCloud.com.example.game"); NULL: the app's first container on
                                    iOS, any container that already holds SaveSync/<title_id> on a Mac */
     const char *log_tag;        /* log line prefix, e.g. "[totk]"; NULL: "[savesync]" */
-    int (*save_busy)(void);     /* the game is writing saves right now (uploads wait); may be NULL */
+    int (*save_busy)(void);     /* the game is writing saves right now (uploads wait); may be NULL. The game's own
+                                   writes only: not savesync_busy, or an upload would wait for itself */
     unsigned keep_backups;      /* replaced saves kept in state_dir/save-backups; 0: 10 */
+    const char *const *exclude; /* NULL-terminated paths under save_dir that are not saves (a cache the game rewrites at
+                                   every start): never synced, hashed or dated, and never removed when the cloud's saves
+                                   are taken. A path ending in "/" covers a folder. A cloud copy sent before a path
+                                   was excluded is still read; the next send drops the path from it. May be NULL */
 } savesync_config;
 
 /* Finds the cloud folder and does the first sync, blocking (seconds at most; iOS waits up to 20 s for iCloud's
@@ -30,6 +35,8 @@ int savesync_start(const savesync_config *config);
 void savesync_committed(void);
 /* Upload now if there is something to upload, waiting up to timeout_s seconds (app going to the background, quit). */
 void savesync_flush(double timeout_s);
+/* An upload is scheduled or running: a quit that skips atexit (_exit) should wait while this is 1. Any thread. */
+int savesync_busy(void);
 /* The game's folder in iCloud (SaveSync/<title id>), NULL when syncing is off. */
 const char *savesync_cloud_folder(void);
 

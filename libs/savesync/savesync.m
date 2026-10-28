@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <TargetConditionals.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,20 +19,29 @@
 
 static savesync_config cfg;
 static NSString *tag, *title, *version, *save_dir, *state_dir, *container, *cloud_dir;   /* nil cloud_dir: off */
+static NSArray<NSString *> *excluded;   /* cfg.exclude, copied */
 static dispatch_queue_t queue;
 static uint64_t push_generation;
+static _Atomic uint64_t uploads_asked, uploads_done;   /* savesync_busy: commits asked for an upload that has not run yet */
+
+/* A path under the save folder that is not a save (savesync_config.exclude). */
+static BOOL is_excluded(NSString *rel) {
+    for (NSString *x in excluded) if ([x hasSuffix:@"/"] ? [rel hasPrefix:x] || [[rel stringByAppendingString:@"/"] isEqualToString:x] : [rel isEqualToString:x]) return YES;
+    return NO;
+}
 
 static void say(NSString *s) { fprintf(stderr, "%s iCloud saves: %s\n", tag.UTF8String ?: "[savesync]", s.UTF8String); }
 
 /* ======================= 1. sets ======================= */
 typedef NSDictionary<NSString *, NSData *> Set;
-/* Every regular file under dir, without hidden files (.DS_Store, iCloud placeholders); nil when one cannot be read. */
-static Set *read_set(NSString *dir) {
+/* Every regular file under dir, without hidden files (.DS_Store, iCloud placeholders) and, with only_saves, without the
+   paths savesync_config.exclude names; nil when one cannot be read. */
+static Set *read_set(NSString *dir, BOOL only_saves) {
     NSMutableDictionary *set = [NSMutableDictionary dictionary];
     NSDirectoryEnumerator *e = [NSFileManager.defaultManager enumeratorAtPath:dir];
     for (NSString *rel in e) {
         BOOL folder = [e.fileAttributes[NSFileType] isEqual:NSFileTypeDirectory];
-        if ([rel.lastPathComponent hasPrefix:@"."]) { if (folder) [e skipDescendants]; continue; }
+        if ([rel.lastPathComponent hasPrefix:@"."] || (only_saves && is_excluded(folder ? [rel stringByAppendingString:@"/"] : rel))) { if (folder) [e skipDescendants]; continue; }
         if (![e.fileAttributes[NSFileType] isEqual:NSFileTypeRegular]) continue;
         NSData *d = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:rel] options:0 error:nil];
         if (!d) return nil;
@@ -53,16 +63,23 @@ static NSString *hash_set(Set *set) {
 }
 static NSDate *newest_change(NSString *dir) {
     NSDate *newest = NSDate.distantPast; NSDirectoryEnumerator *e = [NSFileManager.defaultManager enumeratorAtPath:dir];
-    for (NSString *rel in e) { (void)rel; NSDate *m = e.fileAttributes[NSFileModificationDate]; if (m && [m compare:newest] == NSOrderedDescending) newest = m; }
+    for (NSString *rel in e) {
+        BOOL folder = [e.fileAttributes[NSFileType] isEqual:NSFileTypeDirectory];
+        if (is_excluded(folder ? [rel stringByAppendingString:@"/"] : rel)) { if (folder) [e skipDescendants]; continue; }   /* a cache rewritten at start is no save */
+        NSDate *m = e.fileAttributes[NSFileModificationDate]; if (m && [m compare:newest] == NSOrderedDescending) newest = m;
+    }
     return newest;
 }
-/* Makes dir hold exactly set: unchanged files are not rewritten, the rest atomically, stale files and folders go. */
+/* Makes dir hold exactly set: unchanged files are not rewritten, the rest atomically, stale files and folders go
+   (in the save folder, the excluded paths stay: they are not saves). */
 static BOOL write_set(NSString *dir, Set *set) {
+    BOOL keep_excluded = [dir isEqualToString:save_dir];
     NSFileManager *fm = NSFileManager.defaultManager;
     [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     for (NSString *rel in [fm enumeratorAtPath:dir].allObjects.reverseObjectEnumerator) {   /* deepest first */
         if ([rel.lastPathComponent hasPrefix:@"."] || set[rel]) continue;
         NSString *p = [dir stringByAppendingPathComponent:rel]; BOOL folder = NO; [fm fileExistsAtPath:p isDirectory:&folder];
+        if (keep_excluded && is_excluded(folder ? [rel stringByAppendingString:@"/"] : rel)) continue;   /* not a save: left as it is */
         if (!folder || [fm contentsOfDirectoryAtPath:p error:nil].count == 0) [fm removeItemAtPath:p error:nil];
     }
     for (NSString *rel in set) {
@@ -136,18 +153,23 @@ static BOOL manifest_known(void) {
 static BOOL fetch(NSString *path, NSTimeInterval timeout) { (void)timeout; return [NSFileManager.defaultManager fileExistsAtPath:path]; }
 static BOOL manifest_known(void) { return [NSFileManager.defaultManager fileExistsAtPath:manifest_path()]; }
 #endif
-typedef struct { NSDictionary *manifest; Set *files; } Cloud;   /* files: nil while the copy is still arriving */
+/* files: the saves (excluded paths left out), nil while the copy is still arriving; hash: theirs. A copy uploaded
+   before a path was excluded lists it too: it is read to check the manifest's hash, then left out. */
+typedef struct { NSDictionary *manifest; Set *files; NSString *hash; } Cloud;
 static Cloud read_cloud(void) {
-    Cloud c = {nil, nil};
+    Cloud c = {nil, nil, nil};
     if (!manifest_known() || !fetch(manifest_path(), 30)) return c;
     NSData *d = [NSData dataWithContentsOfFile:manifest_path()];
     NSDictionary *m = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
     if (![m isKindOfClass:NSDictionary.class] || ![m[@"hash"] isKindOfClass:NSString.class] || ![m[@"files"] isKindOfClass:NSArray.class]) return c;
     c.manifest = m;
     for (id rel in m[@"files"]) if (![rel isKindOfClass:NSString.class] || !fetch([files_dir() stringByAppendingPathComponent:rel], 60)) return c;
-    Set *all = read_set(files_dir()); NSMutableDictionary *listed = [NSMutableDictionary dictionary];
+    Set *all = read_set(files_dir(), NO); NSMutableDictionary *listed = [NSMutableDictionary dictionary];
     for (NSString *rel in m[@"files"]) if (all[rel]) listed[rel] = all[rel];
-    if ([hash_set(listed) isEqualToString:m[@"hash"]]) c.files = listed;
+    if (![hash_set(listed) isEqualToString:m[@"hash"]]) return c;
+    NSMutableDictionary *saves = [NSMutableDictionary dictionary];
+    for (NSString *rel in listed) if (!is_excluded(rel)) saves[rel] = listed[rel];
+    c.files = saves; c.hash = hash_set(saves);
     return c;
 }
 static BOOL write_cloud(Set *set, NSString *hash) {
@@ -223,15 +245,19 @@ static int version_newer(NSString *cloud) { return [cloud compare:version option
 /* One sync: at_start may take the cloud's saves (the game has not read its own yet); later only uploads, and only when
    this device alone changed them, so a save made on another device meanwhile is settled at the next start. */
 static void sync_once(BOOL at_start) {
-    Set *local = read_set(save_dir); if (!local) { say(@"cannot read the local saves; not syncing"); return; }
+    Set *local = read_set(save_dir, YES); if (!local) { say(@"cannot read the local saves; not syncing"); return; }
     NSString *local_hash = hash_set(local), *last = last_agreed();
+    /* The hash agreed on before a path was excluded covered it: this device's and the cloud's saves, hashed the old way
+       too, still count as agreed then (no false conflict at the switch). */
+    Set *local_all = excluded.count ? read_set(save_dir, NO) : local;
+    NSString *local_old = local_all ? hash_set(local_all) : local_hash;
     if (!at_start && (!local.count || [local_hash isEqualToString:last])) return;   /* nothing new here */
-    Cloud c = read_cloud(); NSString *cloud_hash = c.manifest[@"hash"];
+    Cloud c = read_cloud(); NSString *cloud_hash = c.hash, *cloud_old = c.manifest[@"hash"];
     NSString *cloud_version = [c.manifest[@"version"] isKindOfClass:NSString.class] ? c.manifest[@"version"] : @"0";
     savesync_facts f = {
         .cloud_exists = c.manifest != nil, .cloud_complete = c.files != nil, .local_empty = local.count == 0,
-        .local_is_cloud = [local_hash isEqualToString:cloud_hash], .local_is_last = [local_hash isEqualToString:last],
-        .cloud_is_last = [cloud_hash isEqualToString:last], .cloud_newer_version = c.manifest && version_newer(cloud_version),
+        .local_is_cloud = [local_hash isEqualToString:cloud_hash], .local_is_last = [local_hash isEqualToString:last] || [local_old isEqualToString:last],
+        .cloud_is_last = [cloud_hash isEqualToString:last] || [cloud_old isEqualToString:last], .cloud_newer_version = c.manifest && version_newer(cloud_version),
         .cloud_newer_time = [[NSDate dateWithTimeIntervalSince1970:[c.manifest[@"time"] doubleValue]] compare:newest_change(save_dir)] == NSOrderedDescending};
     int conflict; savesync_action a = savesync_decide(&f, &conflict);
     if (!at_start && (a != SAVESYNC_SEND || conflict)) {
@@ -263,6 +289,9 @@ int savesync_start(const savesync_config *config) {
     @autoreleasepool {
         if (queue || !config || !config->title_id || !config->save_dir || !config->state_dir) return 0;
         cfg = *config; if (!cfg.keep_backups) cfg.keep_backups = 10;
+        NSMutableArray *x = [NSMutableArray array];
+        for (const char *const *p = config->exclude; p && *p; p++) [x addObject:@(*p)];
+        excluded = x; cfg.exclude = NULL;   /* copied: the caller's list need not outlive this call */
         tag = @(config->log_tag ?: "[savesync]"); title = @(config->title_id); version = @(config->game_version ?: "0");
         save_dir = @(config->save_dir); state_dir = @(config->state_dir);
         const char *env_container = getenv("SAVESYNC_CONTAINER");
@@ -276,24 +305,29 @@ int savesync_start(const savesync_config *config) {
         return 1;
     }
 }
-static void push_later(uint64_t generation) {
+/* asked: the uploads_asked count this upload covers; when it has run, savesync_busy is 0 up to there */
+static void push_later(uint64_t generation, uint64_t asked) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), queue, ^{
         if (generation != push_generation) return;   /* a later save comes after this one */
-        if (cfg.save_busy && cfg.save_busy()) { push_later(generation); return; }
+        if (cfg.save_busy && cfg.save_busy()) { push_later(generation, asked); return; }
         @autoreleasepool { sync_once(NO); }
+        atomic_store(&uploads_done, asked);
     });
 }
 void savesync_committed(void) {
     if (!queue) return;
-    dispatch_async(queue, ^{ push_later(++push_generation); });
+    uint64_t asked = atomic_fetch_add(&uploads_asked, 1) + 1;   /* counted here, not on the queue: busy at once */
+    dispatch_async(queue, ^{ push_later(++push_generation, asked); });
 }
 void savesync_flush(double timeout_s) {
     if (!queue) return;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    uint64_t asked = atomic_load(&uploads_asked);
     dispatch_async(queue, ^{
         ++push_generation;   /* a pending delayed upload is covered by this one */
-        if (!(cfg.save_busy && cfg.save_busy())) { @autoreleasepool { sync_once(NO); } }
+        if (!(cfg.save_busy && cfg.save_busy())) { @autoreleasepool { sync_once(NO); } atomic_store(&uploads_done, asked); }
         dispatch_semaphore_signal(done);
     });
     dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout_s * NSEC_PER_SEC)));
 }
+int savesync_busy(void) { return queue && atomic_load(&uploads_done) < atomic_load(&uploads_asked); }
