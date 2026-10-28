@@ -78,6 +78,7 @@ def main():
     p.add_argument('--platform',choices=['ios','visionos'],default='ios')
     p.add_argument('--image-outside',action='store_true',help='leave romfs.bin out: the device keeps it in Documents/GameData');p.add_argument('--app-name',default='Tears of the Kingdom');p.add_argument('--bundle-id',default='org.macnativegames.totk')
     p.add_argument('--icon',type=Path,help='an Icon Composer .icon package for the app icon')
+    p.add_argument('--launch-pattern',type=Path,help='the boot screen\'s swirl pattern (ios/tools/launch_pattern.py\'s folder), copied to GameData/launch')
     a=p.parse_args(); tree=a.tree.resolve(); ios=tree/'ios';gen=ios/'Gen';logs=a.logs.resolve(); out=a.out.resolve()
     if out.suffix.lower() not in ('.ipa','.app'): raise RuntimeError('iOS output path must end in .ipa (or .app: the unsigned folder)')
     env=dict(os.environ,DEVELOPER_DIR=developer_dir())
@@ -178,6 +179,9 @@ def main():
             info=plistlib.loads((dest/'Info.plist').read_bytes());info.update(plistlib.loads(partial.read_bytes()))
             (dest/'Info.plist').write_bytes(plistlib.dumps(info,fmt=plistlib.FMT_BINARY))
     res=dest/'GameData';res.mkdir(exist_ok=True)
+    if a.launch_pattern:   # the boot screen's pattern (runtime/boot_view_ios.m); the player's own picture, never in the repository
+        if not (a.launch_pattern/'pattern.json').is_file(): raise RuntimeError(f'--launch-pattern: no pattern.json in {a.launch_pattern}')
+        discard(res/'launch'); shutil.copytree(a.launch_pattern,res/'launch')
     romfs=tree/f'extracted/{a.version}/romfs'
     copy_tree(romfs,res/'romfs')
     if a.image_outside:   # the index stays (it changes with the build); the 17 GB image is in Documents/GameData (main.m)

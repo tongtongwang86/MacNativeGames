@@ -1,0 +1,40 @@
+# The boot screen on its own, for the Simulator (runtime/boot_view_ios.m): run.sh generates and builds it.
+# LAUNCH_PATTERN_DIR: the folder ios/tools/launch_pattern.py wrote (copied into the app as "launch").
+name: BootPreview
+options:
+  bundleIdPrefix: org.macnativegames
+  deploymentTarget:
+    iOS: "26.0"
+targets:
+  BootPreview:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: ../../../runtime/boot_view_ios.m
+      - path: ../../../runtime/boot_view_ios.h
+      - path: ${LAUNCH_PATTERN_DIR}
+        type: folder
+        buildPhase: resources
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Boot Preview
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIStatusBarHidden: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: PreviewScene
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.macnativegames.bootpreview
+      TARGETED_DEVICE_FAMILY: "1,2"
+      HEADER_SEARCH_PATHS: $(SRCROOT)/../../../runtime
+      CLANG_ENABLE_OBJC_ARC: YES
+      CODE_SIGNING_ALLOWED: NO

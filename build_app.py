@@ -1815,6 +1815,8 @@ def parse_args(argv):
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
     ap.add_argument('--icon', type=Path, help='an Icon Composer .icon package to use as the app icon instead of the game\'s own')
+    ap.add_argument('--launch-pattern', type=Path, help='iPhone / iPad: the boot screen\'s swirl pattern, the folder '
+                    'games/totk/ios/tools/launch_pattern.py makes from your own picture of it (without it, a plain background)')
     ap.add_argument('--mod', type=Path, metavar='FOLDER',
                     help='a mod folder prepared before the build: its exefs/ IPS / IPS32 / pchtxt patches for the main '
                          'module are merged into the code before it is rewritten (its romfs/ goes in with '
@@ -2009,7 +2011,8 @@ def main(argv):
     if device_app:
         run([py, 'ios/tools/build_ipa.py', '--tree', tree, '--out', out, '--version', version,
              '--logs', logs, '--app-name', IOS_APP_NAME, '--bundle-id', BUNDLE_ID, '--platform', args.platform,
-             *(['--image-outside'] if args.ios_game_data == 'documents' else []), *(['--icon', args.icon] if args.icon else [])],
+             *(['--image-outside'] if args.ios_game_data == 'documents' else []), *(['--icon', args.icon] if args.icon else []),
+             *(['--launch-pattern', args.launch_pattern.expanduser().resolve()] if args.launch_pattern else [])],
             logs/'build-ipa.log', cwd=tree, env=env)
         if not args.no_shader_reminder:
             # The iOS app never asks during play; while the device is connected, this Mac asks to send the shaders the
