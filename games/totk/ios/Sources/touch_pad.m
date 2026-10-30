@@ -11,16 +11,23 @@
    under ZL / ZR.
    A touch that misses every button is a stick, centred where the finger went down: the left stick on the left half,
    the camera (right stick) on the right half. Bits are the Npad buttons. While a game controller is connected the layer
-   is hidden; a touch shows it and works as usual, and it hides again 3 seconds after the last finger lifts. */
+   is hidden; a touch shows it and works as usual, and it hides again 3 seconds after the last finger lifts.
+   With the touch camera on (Settings › Controls; runtime_mouse_enabled) there is no camera stick: a drag on the right
+   half turns the camera like a trackpad, its movement sent as mouse movement (runtime/gamepad.m, runtime/mouse_look.h). */
 typedef struct { CGPoint at; uint64_t bit; NSString *label; CGFloat size; } TouchButton;
 enum { kButtonCount = 16 };
 static const CGFloat kButtonSize = 46;
 static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger lifts, with a controller connected
 
+@interface TOTKTouchPad () - (void)touchCameraChanged; @end
+static __weak TOTKTouchPad *shownPad;
+static void touch_camera_changed(void) { [shownPad touchCameraChanged]; }   /* main queue */
+
 @implementation TOTKTouchPad {
     NSMapTable<UITouch *, NSValue *> *points;
     NSMapTable<UITouch *, NSValue *> *leftOrigins;    // where each left-stick touch went down
     NSMapTable<UITouch *, NSValue *> *rightOrigins;   // the same for the camera stick
+    NSMapTable<UITouch *, NSValue *> *cameraLast;     // the touch camera: each drag's last point
     BOOL gamepad, concealed;                          // a controller is connected; the layer is hidden for it
     NSTimer *hideTimer;
 }
@@ -31,6 +38,8 @@ static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger l
         points = [NSMapTable strongToStrongObjectsMapTable];
         leftOrigins = [NSMapTable strongToStrongObjectsMapTable];
         rightOrigins = [NSMapTable strongToStrongObjectsMapTable];
+        cameraLast = [NSMapTable strongToStrongObjectsMapTable];
+        shownPad = self; runtime_mouse_set_hook(touch_camera_changed);
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
         [center addObserver:self selector:@selector(controllersChanged:) name:GCControllerDidConnectNotification object:nil];
         [center addObserver:self selector:@selector(controllersChanged:) name:GCControllerDidDisconnectNotification object:nil];
@@ -48,10 +57,15 @@ static const NSTimeInterval kHideAfter = 3;   // seconds after the last finger l
     if (gamepad) [self conceal]; else { concealed = NO; [self setNeedsDisplay]; }
 }
 
+- (void)touchCameraChanged {   /* the Settings switch: drop the drags of the other mode, draw the stick or not */
+    for (UITouch *t in [rightOrigins.keyEnumerator.allObjects arrayByAddingObjectsFromArray:cameraLast.keyEnumerator.allObjects]) [points removeObjectForKey:t];
+    [rightOrigins removeAllObjects]; [cameraLast removeAllObjects]; [self updateState];
+}
+
 - (void)conceal {
     concealed = YES;
     // Fingers on the screen when it hides would otherwise hold their buttons and sticks.
-    [points removeAllObjects]; [leftOrigins removeAllObjects]; [rightOrigins removeAllObjects]; [self updateState];
+    [points removeAllObjects]; [leftOrigins removeAllObjects]; [rightOrigins removeAllObjects]; [cameraLast removeAllObjects]; [self updateState];
 }
 
 - (void)hideLater {
@@ -126,7 +140,7 @@ static void stick_axes(CGPoint from, CGPoint to, CGFloat radius, int32_t *x, int
         CGPoint p = [points objectForKey:t].CGPointValue; NSValue *left = [leftOrigins objectForKey:t], *right = [rightOrigins objectForKey:t];
         if (left) stick_axes(left.CGPointValue, p, radius, &s.lx, &s.ly);
         else if (right) stick_axes(right.CGPointValue, p, radius, &s.rx, &s.ry);
-        else s.buttons |= [self buttonAt:p];
+        else if (![cameraLast objectForKey:t]) s.buttons |= [self buttonAt:p];
     }
     runtime_touch_pad_set(&s); [self setNeedsDisplay];
 }
@@ -138,18 +152,23 @@ static void stick_axes(CGPoint from, CGPoint to, CGFloat radius, int32_t *x, int
         if ([self gearAt:p]) { gamesettings_show(); continue; }
         NSValue *v = [NSValue valueWithCGPoint:p]; [points setObject:v forKey:t];
         if ([self buttonAt:p]) continue;
-        [(p.x < CGRectGetMidX(self.bounds) ? leftOrigins : rightOrigins) setObject:v forKey:t];
+        BOOL left = p.x < CGRectGetMidX(self.bounds);
+        [(left ? leftOrigins : runtime_mouse_enabled() ? cameraLast : rightOrigins) setObject:v forKey:t];
     }
     [self updateState];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *t in touches) [points setObject:[NSValue valueWithCGPoint:[t locationInView:self]] forKey:t];
+    for (UITouch *t in touches) {
+        CGPoint p = [t locationInView:self]; NSValue *v = [NSValue valueWithCGPoint:p]; [points setObject:v forKey:t];
+        NSValue *last = [cameraLast objectForKey:t];   /* the touch camera: the finger's movement since the last event */
+        if (last) { runtime_mouse_move(p.x - last.CGPointValue.x, p.y - last.CGPointValue.y); [cameraLast setObject:v forKey:t]; }
+    }
     [self updateState];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *t in touches) { [points removeObjectForKey:t]; [leftOrigins removeObjectForKey:t]; [rightOrigins removeObjectForKey:t]; }
+    for (UITouch *t in touches) { [points removeObjectForKey:t]; [leftOrigins removeObjectForKey:t]; [rightOrigins removeObjectForKey:t]; [cameraLast removeObjectForKey:t]; }
     [self updateState]; [self hideLater];
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self touchesEnded:touches withEvent:event]; }
@@ -171,7 +190,7 @@ static void draw_stick(CGContextRef c, CGPoint o, CGPoint p, CGFloat r) {
     CGFloat r = self.stickRadius;
     // Each stick is drawn where its finger went down, or at its resting place while idle.
     if (!leftOrigins.count) { CGPoint rest = [self restingStick:NO]; draw_stick(c, rest, rest, r); }
-    if (!rightOrigins.count) { CGPoint rest = [self restingStick:YES]; draw_stick(c, rest, rest, r); }
+    if (!rightOrigins.count && !runtime_mouse_enabled()) { CGPoint rest = [self restingStick:YES]; draw_stick(c, rest, rest, r); }
     for (UITouch *t in leftOrigins.keyEnumerator) draw_stick(c, [leftOrigins objectForKey:t].CGPointValue, [points objectForKey:t].CGPointValue, r);
     for (UITouch *t in rightOrigins.keyEnumerator) draw_stick(c, [rightOrigins objectForKey:t].CGPointValue, [points objectForKey:t].CGPointValue, r);
     NSDictionary *attrs = @{NSFontAttributeName: [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold], NSForegroundColorAttributeName: ink};

@@ -1,11 +1,11 @@
 /* GameSettings implementation. Layers, bottom to top (ARCHITECTURE.md has the whole picture):
      1. keyboard - the Switch inputs, the default keys, the bindings and the per-key lookup the game reads each frame
-     2. store    - Settings/keyboard.json (every game) and Settings/<title id>.json (one game), on this device and in
-                   iCloud; the newer copy wins, every change is written to both
+     2. store    - Settings/keyboard.json (every game) and Settings/<title id>.json (one game), on this device only
      3. editing  - giving an input a key, clearing it, the defaults, key names
      4. drawing  - a Switch Pro Controller showing each key at its button (Core Graphics; Mac and iOS)
-     5. windows  - the Settings window (Mac, ⌘,) and the Settings sheet (iPhone / iPad): Graphics and Keyboard */
+     5. windows  - the Settings window (Mac, ⌘,) and the Settings sheet (iPhone / iPad): Graphics, Controls, Saves */
 #import <Foundation/Foundation.h>
+#include <math.h>
 #include <TargetConditionals.h>
 #import <CoreText/CoreText.h>
 #if TARGET_OS_IPHONE
@@ -105,55 +105,18 @@ static NSString *local_dir(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/MacNativeGames/Settings"];
 #endif
 }
-/* Settings/ beside SaveSync/ in the iCloud container SaveSync uses (SAVESYNC_CONTAINER, or the one that holds
-   SaveSync/), nil without iCloud. GAMESETTINGS_CLOUD_DIR names the folder itself (tests). */
-static NSString *cloud_dir(void) {
-    static NSString *dir; static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        const char *env = getenv("GAMESETTINGS_CLOUD_DIR"); if (env && *env) { dir = @(env); return; }
-        const char *off = getenv("SAVESYNC"); if (off && !strcmp(off, "0")) return;
-        NSFileManager *fm = NSFileManager.defaultManager; const char *container = getenv("SAVESYNC_CONTAINER");
-#if TARGET_OS_IPHONE
-        NSURL *c = [fm URLForUbiquityContainerIdentifier:container && *container ? @(container) : nil];
-        if (c) dir = [c.path stringByAppendingPathComponent:@"Documents/Settings"];
-#else
-        NSString *root = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Mobile Documents"];
-        if (container && *container) {
-            NSString *top = [root stringByAppendingPathComponent:[@(container) stringByReplacingOccurrencesOfString:@"." withString:@"~"]];
-            if ([fm fileExistsAtPath:top]) dir = [top stringByAppendingPathComponent:@"Documents/Settings"];
-            return;
-        }
-        for (NSString *name in [fm contentsOfDirectoryAtPath:root error:nil]) {
-            NSString *docs = [[root stringByAppendingPathComponent:name] stringByAppendingPathComponent:@"Documents"]; BOOL folder = NO;
-            if ([name hasPrefix:@"iCloud~"] && [fm fileExistsAtPath:[docs stringByAppendingPathComponent:@"SaveSync"] isDirectory:&folder] && folder) {
-                dir = [docs stringByAppendingPathComponent:@"Settings"]; break;
-            }
-        }
-#endif
-    });
-    return dir;
-}
 static NSDictionary *read_json(NSString *path) {
     NSData *d = [NSData dataWithContentsOfFile:path];
     id j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
     return [j isKindOfClass:NSDictionary.class] ? j : nil;
 }
-/* The newer of this device's copy and iCloud's ("time"), or nil. */
-static NSDictionary *load(NSString *name) {
-    NSDictionary *local = read_json([local_dir() stringByAppendingPathComponent:name]);
-    NSDictionary *cloud = cloud_dir() ? read_json([cloud_dir() stringByAppendingPathComponent:name]) : nil;
-    if (!cloud) return local;
-    if (!local) return cloud;
-    return [cloud[@"time"] doubleValue] > [local[@"time"] doubleValue] ? cloud : local;
-}
+/* Settings stay on this device: each device has its own screen, controls and speed. */
+static NSDictionary *load(NSString *name) { return read_json([local_dir() stringByAppendingPathComponent:name]); }
 static void save(NSString *name, NSDictionary *body) {
     NSMutableDictionary *j = [body mutableCopy]; j[@"time"] = @(NSDate.date.timeIntervalSince1970); j[@"format"] = @1;
     NSData *d = [NSJSONSerialization dataWithJSONObject:j options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
-    for (NSString *dir in @[local_dir(), cloud_dir() ?: @""]) {
-        if (!dir.length) continue;
-        [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        [d writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES];
-    }
+    [NSFileManager.defaultManager createDirectoryAtPath:local_dir() withIntermediateDirectories:YES attributes:nil error:nil];
+    [d writeToFile:[local_dir() stringByAppendingPathComponent:name] atomically:YES];
 }
 static NSString *graphics_name(void) { return [NSString stringWithFormat:@"%s.json", cfg->title_id]; }
 
@@ -190,7 +153,7 @@ void gamesettings_start(const gamesettings_config *config) {
         load_keyboard();
         NSDictionary *v = load(graphics_name())[@"values"];
         graphics_saved = [v isKindOfClass:NSDictionary.class] ? v : @{};
-        say([NSString stringWithFormat:@"keyboard and %lu graphics settings from %@", (unsigned long)graphics_saved.count, cloud_dir() ? @"iCloud / this device" : @"this device"]);
+        say([NSString stringWithFormat:@"keyboard and %lu graphics settings from %@", (unsigned long)graphics_saved.count, local_dir()]);
     }
 }
 void gamesettings_apply_graphics(void) {
@@ -217,28 +180,32 @@ static NSString *saves_note(void) {
 }
 
 /* ======================= 3. editing (Mac and iOS) ======================= */
-/* Gives input i the key: it replaces the input's keys, or with append joins them (up to MAX_KEYS). A key does one
-   thing: it leaves any other input it was on. Saved and live at once. */
-static void assign_key(unsigned i, uint8_t code, int append) {
-    if (i >= NINPUT || code >= 128) return;
+/* An input's keys packed at the front of its MAX_KEYS slots; returns how many it has. */
+static int pack(unsigned j) {
+    uint8_t packed[MAX_KEYS]; memset(packed, NONE, MAX_KEYS); int n = 0;
+    for (int k = 0; k < MAX_KEYS; k++) if (bound[j][k] < 128) packed[n++] = bound[j][k];
+    memcpy(bound[j], packed, MAX_KEYS); return n;
+}
+/* Puts the key in input i's slot (each input has MAX_KEYS); a slot past the input's keys is its next free one. A key
+   does one thing: it leaves any other input or slot it was on. Saved and live at once. */
+static void assign_key(unsigned i, uint8_t code, int slot) {
+    if (i >= NINPUT || code >= 128 || slot < 0 || slot >= MAX_KEYS) return;
+    if (bound[i][slot] == code) return;
     for (unsigned j = 0; j < NINPUT; j++) for (int k = 0; k < MAX_KEYS; k++) if (bound[j][k] == code) bound[j][k] = NONE;
-    uint8_t *b = bound[i];
-    if (!append) { memset(b, NONE, MAX_KEYS); b[0] = code; }
-    else { int k = 0; while (k < MAX_KEYS - 1 && b[k] < 128) k++; b[k] = code; }
-    for (unsigned j = 0; j < NINPUT; j++) {   /* each input's keys packed at the front */
-        uint8_t packed[MAX_KEYS]; memset(packed, NONE, MAX_KEYS); int n = 0;
-        for (int k = 0; k < MAX_KEYS; k++) if (bound[j][k] < 128) packed[n++] = bound[j][k];
-        memcpy(bound[j], packed, MAX_KEYS);
-    }
+    int n = pack(i);
+    bound[i][slot < n ? slot : n] = code;
+    for (unsigned j = 0; j < NINPUT; j++) pack(j);
     rebuild_lookup(); save_keyboard();
 }
-static void clear_input(unsigned i) { if (i < NINPUT) { memset(bound[i], NONE, MAX_KEYS); rebuild_lookup(); save_keyboard(); } }
+static void clear_slot(unsigned i, int slot) {
+    if (i >= NINPUT || slot < 0 || slot >= MAX_KEYS) return;
+    bound[i][slot] = NONE; pack(i); rebuild_lookup(); save_keyboard();
+}
+/* The slot a click on the controller drawing records: the input's first free one, else its first. */
+static int free_slot(unsigned i) { for (int k = 0; k < MAX_KEYS; k++) if (bound[i][k] >= 128) return k; return 0; }
 static void restore_defaults(void) { set_defaults(); rebuild_lookup(); save_keyboard(); }
 static int bindable(int code) { return code >= 0 && code < 128 && code != 54 && code != 55 && code != 57; }   /* not Command, Caps Lock */
-static NSString *keys_title(unsigned i) {
-    NSMutableArray *n = [NSMutableArray array]; for (int k = 0; k < MAX_KEYS; k++) if (bound[i][k] < 128) [n addObject:key_name(bound[i][k])];
-    return n.count ? [n componentsJoinedByString:@", "] : @"—";
-}
+static NSString *slot_title(unsigned i, int k) { return bound[i][k] < 128 ? key_name(bound[i][k]) : @"–"; }
 /* The compact name drawn on the controller. */
 static NSString *short_name(uint8_t c) {
     static NSDictionary *s;
@@ -399,11 +366,14 @@ static void draw_controller(CGContextRef c, CGRect bounds, int recording) {
 @property(strong) GSDiagramView *diagram;
 @property(strong) NSMutableArray<NSButton *> *keyButtons;
 @property(strong) NSMutableArray<NSPopUpButton *> *popups;
+@property(strong) NSMutableArray<NSSwitch *> *switches;   /* the Off / On settings */
+@property(strong) NSMutableArray<NSSlider *> *sliders;     /* settings without choice titles, with their value labels */
+@property(strong) NSMutableArray<NSTextField *> *sliderLabels;
 @property(strong) NSTextField *localPath, *cloudPath;
 @property(strong) NSButton *cloudButton;
 @property(strong) id monitor;
-@property NSInteger recording, appending;   /* the input being recorded, -1 none */
-- (void)record:(NSInteger)i appending:(BOOL)append;
+@property NSInteger recording, slot;   /* the input and slot being recorded, -1 none */
+- (void)record:(NSInteger)i slot:(NSInteger)slot;
 @end
 static GSController *controller;
 
@@ -412,16 +382,24 @@ static GSController *controller;
 - (void)drawRect:(NSRect)dirty { (void)dirty; draw_controller(NSGraphicsContext.currentContext.CGContext, self.bounds, self.recording); }
 - (void)mouseDown:(NSEvent *)e {
     int i = part_at([self convertPoint:e.locationInWindow fromView:nil], self.bounds);
-    if (i >= 0) [self.owner record:i appending:NO];
+    if (i >= 0) [self.owner record:i slot:free_slot((unsigned)i)];
 }
 @end
 
 @implementation GSController
 - (void)refresh {
-    for (unsigned i = 0; i < NINPUT; i++) self.keyButtons[i].title = (NSInteger)i == self.recording ? @"Press a key…" : keys_title(i);
-    for (unsigned i = 0; i < self.popups.count; i++) {
+    for (NSButton *b in self.keyButtons) {   /* tag: input * MAX_KEYS + slot */
+        unsigned i = (unsigned)b.tag / MAX_KEYS; int k = (int)(b.tag % MAX_KEYS);
+        b.title = (NSInteger)i == self.recording && k == self.slot ? @"Press a key…" : slot_title(i, k);
+    }
+    for (NSSwitch *w in self.switches) { const gamesettings_choice *g = &cfg->graphics[w.tag]; if (g->get) w.state = g->get() ? NSControlStateValueOn : NSControlStateValueOff; }
+    for (NSUInteger i = 0; i < self.sliders.count; i++) {
+        NSSlider *s = self.sliders[i]; const gamesettings_choice *g = &cfg->graphics[s.tag];
+        const int now = g->get ? g->get() : 0; s.integerValue = now; self.sliderLabels[i].stringValue = [NSString stringWithFormat:@"%d", now + 1];
+    }
+    for (NSPopUpButton *p in self.popups) {
         /* a setting's choices can change after the window was made (a game knows some only once its code is in) */
-        const gamesettings_choice *g = &cfg->graphics[i]; NSPopUpButton *p = self.popups[i];
+        const gamesettings_choice *g = &cfg->graphics[p.tag];
         BOOL same = p.numberOfItems == (NSInteger)g->nchoices;
         for (unsigned c = 0; same && c < g->nchoices; c++) same = [[p itemAtIndex:c].title isEqualToString:@(g->choices[c])];
         if (!same) { [p removeAllItems]; for (unsigned c = 0; c < g->nchoices; c++) [p addItemWithTitle:@(g->choices[c])]; }
@@ -434,33 +412,51 @@ static GSController *controller;
 }
 - (void)stopRecording { if (self.monitor) [NSEvent removeMonitor:self.monitor]; self.monitor = nil; self.recording = -1; [self refresh]; }
 /* The next key (modifiers too) goes to input i. ⌘-keys keep working (⌘W, ⌘Q, ⌘,). */
-- (void)record:(NSInteger)i appending:(BOOL)append {
-    [self stopRecording]; self.recording = i; self.appending = append; [self refresh];
+- (void)record:(NSInteger)i slot:(NSInteger)slot {
+    [self stopRecording]; self.recording = i; self.slot = slot; [self refresh];
     __weak GSController *weak = self;
     self.monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskFlagsChanged handler:^NSEvent *(NSEvent *e) {
         GSController *me = weak; if (!me || me.recording < 0) return e;
         if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;
         if (e.type == NSEventTypeFlagsChanged && !(e.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask & ~NSEventModifierFlagCapsLock)) return nil;   /* a release */
         if (!bindable(e.keyCode)) return nil;
-        assign_key((unsigned)me.recording, (uint8_t)e.keyCode, (int)me.appending); [me stopRecording];
+        assign_key((unsigned)me.recording, (uint8_t)e.keyCode, (int)me.slot); [me stopRecording];
         return nil;
     }];
 }
-- (void)keyClicked:(NSButton *)b { [self record:b.tag appending:NO]; }
-- (void)addClicked:(NSButton *)b { [self record:b.tag appending:YES]; }
-- (void)clearClicked:(NSButton *)b { [self stopRecording]; clear_input((unsigned)b.tag); [self refresh]; }
+- (void)slotClicked:(NSButton *)b {
+    if (b.tag / MAX_KEYS == self.recording && b.tag % MAX_KEYS == self.slot) { [self stopRecording]; return; }   /* again: cancel */
+    [self record:b.tag / MAX_KEYS slot:b.tag % MAX_KEYS];
+}
+- (void)clearSlot:(NSMenuItem *)m { [self stopRecording]; clear_slot((unsigned)m.tag / MAX_KEYS, (int)(m.tag % MAX_KEYS)); [self refresh]; }
 - (void)defaultsClicked:(id)s { (void)s; [self stopRecording]; restore_defaults(); [self refresh]; }
 - (void)choiceChanged:(NSPopUpButton *)p {
     const gamesettings_choice *g = &cfg->graphics[p.tag];
     if (g->set) g->set((int)p.indexOfSelectedItem);
     save_graphics(); [self refresh];
 }
+- (void)switchChanged:(NSSwitch *)w {
+    const gamesettings_choice *g = &cfg->graphics[w.tag];
+    if (g->set) g->set(w.state == NSControlStateValueOn);
+    save_graphics(); [self refresh];
+}
+- (void)sliderChanged:(NSSlider *)s {
+    const gamesettings_choice *g = &cfg->graphics[s.tag];
+    if (g->set) g->set((int)s.integerValue);
+    save_graphics(); [self refresh];
+}
 - (void)windowWillClose:(NSNotification *)n { (void)n; [self stopRecording]; }
 - (void)showLocal:(id)s { (void)s; if (save_local) [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:save_local isDirectory:YES]]; }
 - (void)showCloud:(id)s { (void)s; if (save_cloud) [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:save_cloud isDirectory:YES]]; }
+/* The look of System Settings: a heading, then a rounded box of rows, each with its name and note on the left and its
+   control on the right; Off / On settings are switches. */
+#define CONTENT_W 560
 static NSTextField *hint_label(NSString *s) {
     NSTextField *t = [NSTextField wrappingLabelWithString:s]; t.textColor = NSColor.secondaryLabelColor;
-    t.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize]; [t.widthAnchor constraintEqualToConstant:500].active = YES; return t;
+    t.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize]; [t.widthAnchor constraintEqualToConstant:CONTENT_W].active = YES; return t;
+}
+static NSTextField *heading(NSString *s) {
+    NSTextField *t = [NSTextField labelWithString:s]; t.font = [NSFont systemFontOfSize:NSFont.systemFontSize weight:NSFontWeightSemibold]; return t;
 }
 static NSView *top_aligned(NSView *content, BOOL scrolls) {
     NSView *doc = [GSFlippedView new]; doc.translatesAutoresizingMaskIntoConstraints = NO; content.translatesAutoresizingMaskIntoConstraints = NO;
@@ -473,70 +469,158 @@ static NSView *top_aligned(NSView *content, BOOL scrolls) {
     [doc.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor].active = YES;
     return scroll;
 }
-- (NSView *)keyboardTab {
+/* One row: name (and a note under it, smaller and grey) on the left, the control on the right. */
+static NSView *setting_row(NSString *title, NSString *note, NSView *control) {
+    NSView *row = [NSView new]; row.translatesAutoresizingMaskIntoConstraints = NO;
+    NSTextField *name = [NSTextField labelWithString:title]; name.font = [NSFont systemFontOfSize:NSFont.systemFontSize];
+    NSMutableArray *left = [NSMutableArray arrayWithObject:name];
+    if (note.length) {
+        NSTextField *n = [NSTextField wrappingLabelWithString:note]; n.textColor = NSColor.secondaryLabelColor;
+        n.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize]; n.preferredMaxLayoutWidth = 330; [left addObject:n];
+    }
+    NSStackView *text = [NSStackView stackViewWithViews:left]; text.orientation = NSUserInterfaceLayoutOrientationVertical;
+    text.alignment = NSLayoutAttributeLeading; text.spacing = 3; text.translatesAutoresizingMaskIntoConstraints = NO;
+    control.translatesAutoresizingMaskIntoConstraints = NO;   /* as wide as its text, right-aligned */
+    [control setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [row addSubview:text]; [row addSubview:control];
+    [NSLayoutConstraint activateConstraints:@[
+        [text.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:14], [text.widthAnchor constraintLessThanOrEqualToConstant:340],
+        [text.topAnchor constraintEqualToAnchor:row.topAnchor constant:10], [text.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-10],
+        [control.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-14], [control.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [control.leadingAnchor constraintGreaterThanOrEqualToAnchor:text.trailingAnchor constant:16],
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:40]]];
+    return row;
+}
+/* Rows in a rounded box, a hairline between each two. */
+static NSView *group_box(NSArray<NSView *> *rows) {
+    NSBox *box = [NSBox new]; box.boxType = NSBoxCustom; box.titlePosition = NSNoTitle; box.cornerRadius = 10;
+    box.borderWidth = 0; box.fillColor = [NSColor.labelColor colorWithAlphaComponent:0.05]; box.contentViewMargins = NSZeroSize;   /* no outline */
+    box.translatesAutoresizingMaskIntoConstraints = NO; [box.widthAnchor constraintEqualToConstant:CONTENT_W].active = YES;
+    NSMutableArray *views = [NSMutableArray array];
+    for (NSView *r in rows) {
+        if (views.count) { NSBox *line = [NSBox new]; line.boxType = NSBoxSeparator; [views addObject:line]; }
+        [views addObject:r];
+    }
+    NSStackView *stack = [NSStackView stackViewWithViews:views]; stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.spacing = 0;
+    stack.alignment = NSLayoutAttributeWidth; stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [box.contentView addSubview:stack];
+    for (NSView *v in views) if ([v isKindOfClass:NSBox.class]) {   /* hairlines start under the text, as in System Settings */
+        [v.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor constant:14].active = YES; [v.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES; }
+    [NSLayoutConstraint activateConstraints:@[[stack.topAnchor constraintEqualToAnchor:box.contentView.topAnchor], [stack.bottomAnchor constraintEqualToAnchor:box.contentView.bottomAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:box.contentView.leadingAnchor], [stack.trailingAnchor constraintEqualToAnchor:box.contentView.trailingAnchor]]];
+    return box;
+}
+static BOOL is_switch(const gamesettings_choice *g) {
+    return g->choices && g->nchoices == 2 && !strcmp(g->choices[0], "Off") && !strcmp(g->choices[1], "On");
+}
+/* The game's rows for one tab (controls: the Controls tab's) as headings and boxes; empty when it has none. */
+- (NSArray<NSView *> *)groups:(BOOL)controls {
+    if (!self.popups) { self.popups = [NSMutableArray array]; self.switches = [NSMutableArray array]; self.sliders = [NSMutableArray array]; self.sliderLabels = [NSMutableArray array]; }
+    NSMutableArray *out = [NSMutableArray array], *rows = [NSMutableArray array];
+    for (unsigned i = 0; cfg && i < cfg->ngraphics; i++) {
+        const gamesettings_choice *g = &cfg->graphics[i];
+        if (!g->controls != !controls) continue;
+        if (g->group && rows.count) { [out addObject:group_box(rows)]; rows = [NSMutableArray array]; }
+        if (g->group) [out addObject:heading(@(g->group))];
+        NSControl *c;
+        if (!g->choices) {
+            NSSlider *s = [NSSlider sliderWithValue:0 minValue:0 maxValue:g->nchoices - 1 target:self action:@selector(sliderChanged:)];
+            s.tag = i; [s.widthAnchor constraintEqualToConstant:160].active = YES;
+            NSTextField *label = [NSTextField labelWithString:@""]; label.alignment = NSTextAlignmentRight; label.font = [NSFont monospacedDigitSystemFontOfSize:NSFont.systemFontSize weight:NSFontWeightRegular];
+            [label.widthAnchor constraintEqualToConstant:28].active = YES;
+            [self.sliders addObject:s]; [self.sliderLabels addObject:label];
+            [rows addObject:setting_row(@(g->title), g->note ? @(g->note) : nil, [NSStackView stackViewWithViews:@[s, label]])];
+            continue;
+        }
+        if (is_switch(g)) { NSSwitch *w = [NSSwitch new]; w.target = self; w.action = @selector(switchChanged:); [self.switches addObject:w]; c = w; }
+        else {
+            NSPopUpButton *p = [NSPopUpButton new]; p.target = self; p.action = @selector(choiceChanged:);
+            for (unsigned k = 0; k < g->nchoices; k++) [p addItemWithTitle:@(g->choices[k])];
+            [self.popups addObject:p]; c = p;
+        }
+        c.tag = i;
+        [rows addObject:setting_row(@(g->title), g->note ? @(g->note) : nil, c)];
+    }
+    if (rows.count) [out addObject:group_box(rows)];
+    return out;
+}
+static NSStackView *page_stack(NSArray<NSView *> *views) {
+    NSStackView *stack = [NSStackView stackViewWithViews:views];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.alignment = NSLayoutAttributeLeading; stack.spacing = 8;
+    stack.edgeInsets = NSEdgeInsetsMake(20, 30, 24, 30);
+    for (NSView *v in views) if ([v isKindOfClass:NSBox.class]) [stack setCustomSpacing:22 afterView:v];   /* room before the next heading */
+    return stack;
+}
+/* The game's control settings (mouse, controller type), then the keyboard bindings. */
+- (NSView *)controlsTab {
+    NSMutableArray<NSView *> *views = [NSMutableArray arrayWithArray:[self groups:YES]];
+    [views addObject:heading(@"Keyboard")];
     self.diagram = [GSDiagramView new]; self.diagram.owner = self; self.diagram.recording = -1;
     [self.diagram.widthAnchor constraintEqualToConstant:540].active = YES; [self.diagram.heightAnchor constraintEqualToConstant:540 * DESIGN_H / DESIGN_W].active = YES;
-    NSGridView *grid = [NSGridView gridViewWithNumberOfColumns:4 rows:0]; grid.rowSpacing = 4; grid.columnSpacing = 8;
+    NSStackView *grid = [NSStackView new]; grid.orientation = NSUserInterfaceLayoutOrientationVertical; grid.alignment = NSLayoutAttributeLeading; grid.spacing = 4;
     self.keyButtons = [NSMutableArray array];
-    for (unsigned i = 0; i < NINPUT; i++) {
-        NSButton *key = [NSButton buttonWithTitle:@"" target:self action:@selector(keyClicked:)]; key.tag = i;
-        [key.widthAnchor constraintEqualToConstant:180].active = YES;
-        NSButton *add = [NSButton buttonWithTitle:@"+" target:self action:@selector(addClicked:)]; add.tag = i; add.toolTip = @"Add another key";
-        NSButton *clear = [NSButton buttonWithTitle:@"×" target:self action:@selector(clearClicked:)]; clear.tag = i; clear.toolTip = @"No key";
-        [grid addRowWithViews:@[[NSTextField labelWithString:@(inputs[i].title)], key, add, clear]];
-        [self.keyButtons addObject:key];
+    for (unsigned i = 0; i < NINPUT; i++) {   /* MAX_KEYS slots per input: click one, press the key; right-click clears it */
+        NSTextField *name = [NSTextField labelWithString:@(inputs[i].title)]; name.alignment = NSTextAlignmentRight;
+        [name.widthAnchor constraintEqualToConstant:130].active = YES;
+        NSMutableArray *row = [NSMutableArray arrayWithObject:name];
+        for (int k = 0; k < MAX_KEYS; k++) {
+            NSButton *slot = [NSButton buttonWithTitle:@"" target:self action:@selector(slotClicked:)]; slot.tag = i * MAX_KEYS + k;
+            [slot.widthAnchor constraintEqualToConstant:118].active = YES;
+            NSMenu *menu = [NSMenu new]; NSMenuItem *clear = [menu addItemWithTitle:@"Clear" action:@selector(clearSlot:) keyEquivalent:@""];
+            clear.target = self; clear.tag = slot.tag; slot.menu = menu;
+            [row addObject:slot]; [self.keyButtons addObject:slot];
+        }
+        NSStackView *line = [NSStackView stackViewWithViews:row]; line.spacing = 8; [grid addView:line inGravity:NSStackViewGravityTop];
     }
-    [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
     NSButton *defaults = [NSButton buttonWithTitle:@"Restore Defaults" target:self action:@selector(defaultsClicked:)];
-    NSStackView *stack = [NSStackView stackViewWithViews:@[hint_label(@"Click a button on the controller or a key box below, then press the key. + adds a second key, × removes them. Used by every game and kept in iCloud; 1–4 stay the picture shortcuts."), self.diagram, grid, defaults]];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.alignment = NSLayoutAttributeLeading; stack.edgeInsets = NSEdgeInsetsMake(12, 16, 12, 16);
-    return top_aligned(stack, YES);
+    [views addObjectsFromArray:@[hint_label(@"Each action has three slots: click one (or a button on the controller), then press the key. Right-click a slot to clear it. Used by every game on this Mac; key 1 stays the Settings key."), self.diagram, grid, defaults]];
+    return top_aligned(page_stack(views), YES);
 }
 - (NSView *)graphicsTab {
-    NSGridView *grid = [NSGridView gridViewWithNumberOfColumns:2 rows:0]; grid.rowSpacing = 10; grid.columnSpacing = 10;
-    self.popups = [NSMutableArray array];
-    for (unsigned i = 0; i < cfg->ngraphics; i++) {
-        const gamesettings_choice *g = &cfg->graphics[i];
-        NSPopUpButton *p = [NSPopUpButton new]; p.tag = i; p.target = self; p.action = @selector(choiceChanged:);
-        for (unsigned c = 0; c < g->nchoices; c++) [p addItemWithTitle:@(g->choices[c])];
-        [grid addRowWithViews:@[[NSTextField labelWithString:@(g->title)], p]];
-        if (g->note) { NSTextField *n = hint_label(@(g->note)); [n.widthAnchor constraintEqualToConstant:320].active = NO;
-            [n.widthAnchor constraintEqualToConstant:320].active = YES; [grid addRowWithViews:@[[NSGridCell emptyContentView], n]]; }
-        [self.popups addObject:p];
-    }
-    [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
-    NSStackView *stack = [NSStackView stackViewWithViews:@[hint_label(@"Applied at once and kept for this game in iCloud."), grid]];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.alignment = NSLayoutAttributeLeading; stack.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
-    return top_aligned(stack, NO);
+    NSMutableArray<NSView *> *views = [NSMutableArray arrayWithArray:[self groups:NO]];
+    [views addObject:hint_label(@"Settings stored locally, auto saved.")];
+    return top_aligned(page_stack(views), YES);
 }
 static NSTextField *path_label(void) {
     NSTextField *t = [NSTextField labelWithString:@""]; t.selectable = YES; t.lineBreakMode = NSLineBreakByTruncatingMiddle;
     t.font = [NSFont monospacedSystemFontOfSize:NSFont.smallSystemFontSize weight:NSFontWeightRegular]; t.textColor = NSColor.secondaryLabelColor;
-    [t.widthAnchor constraintEqualToConstant:500].active = YES; return t;
+    [t setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal]; return t;
+}
+/* A row whose note is a folder path (filled in by refresh). */
+static NSView *folder_row(NSString *title, NSTextField *path, NSButton *button) {
+    NSView *row = setting_row(title, @" ", button);
+    NSStackView *text = (NSStackView *)row.subviews.firstObject;
+    [text removeView:text.views.lastObject]; [text addView:path inGravity:NSStackViewGravityTop];
+    return row;
 }
 - (NSView *)savesTab {
-    NSTextField *local = [NSTextField labelWithString:@"On this Mac"], *cloud = [NSTextField labelWithString:@"In iCloud (Game Saves)"];
-    local.font = cloud.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
     self.localPath = path_label(); self.cloudPath = path_label();
     NSButton *showLocal = [NSButton buttonWithTitle:@"Show in Finder" target:self action:@selector(showLocal:)];
-    self.cloudButton = [NSButton buttonWithTitle:@"Show iCloud Copy" target:self action:@selector(showCloud:)];
-    NSStackView *stack = [NSStackView stackViewWithViews:@[hint_label(saves_note()), local, self.localPath, showLocal, cloud, self.cloudPath, self.cloudButton]];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical; stack.alignment = NSLayoutAttributeLeading; stack.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
-    [stack setCustomSpacing:18 afterView:showLocal];
-    return top_aligned(stack, NO);
+    self.cloudButton = [NSButton buttonWithTitle:@"Show in Finder" target:self action:@selector(showCloud:)];
+    NSArray *views = @[heading(@"Save folders"),
+                       group_box(@[folder_row(@"On this Mac", self.localPath, showLocal), folder_row(@"In iCloud (Game Saves)", self.cloudPath, self.cloudButton)]),
+                       hint_label(saves_note())];
+    return top_aligned(page_stack(views), NO);
 }
 - (void)show {
     if (!self.window) {
         self.recording = -1;
-        NSTabView *tabs = [NSTabView new];
-        NSTabViewItem *g = [NSTabViewItem tabViewItemWithViewController:[NSViewController new]]; g.label = @"Graphics"; g.view = [self graphicsTab];
-        NSTabViewItem *k = [NSTabViewItem tabViewItemWithViewController:[NSViewController new]]; k.label = @"Keyboard"; k.view = [self keyboardTab];
-        NSTabViewItem *v = [NSTabViewItem tabViewItemWithViewController:[NSViewController new]]; v.label = @"Saves"; v.view = [self savesTab];
-        [tabs addTabViewItem:g]; [tabs addTabViewItem:k]; [tabs addTabViewItem:v];
-        self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 580, 720) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
-                                                    backing:NSBackingStoreBuffered defer:NO];
+        NSTabViewController *tabs = [NSTabViewController new]; tabs.tabStyle = NSTabViewControllerTabStyleToolbar;
+        tabs.canPropagateSelectedChildViewControllerTitle = NO;
+        NSArray *pages = @[@[@"Graphics", @"display", [self graphicsTab]], @[@"Controls", @"gamecontroller", [self controlsTab]],
+                           @[@"Saves", @"externaldrive.badge.icloud", [self savesTab]]];
+        for (NSArray *p in pages) {
+            NSViewController *vc = [NSViewController new]; vc.view = p[2]; vc.title = p[0]; vc.preferredContentSize = NSMakeSize(CONTENT_W + 60, 720);
+            NSTabViewItem *item = [NSTabViewItem tabViewItemWithViewController:vc]; item.label = p[0];
+            item.image = [NSImage imageWithSystemSymbolName:p[1] accessibilityDescription:p[0]];
+            [tabs addTabViewItem:item];
+        }
+        self.window = [NSWindow windowWithContentViewController:tabs];
+        self.window.styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+        self.window.toolbarStyle = NSWindowToolbarStylePreference;
         self.window.title = [NSString stringWithFormat:@"%s Settings", cfg && cfg->game_name ? cfg->game_name : "Game"];
-        self.window.contentView = tabs; self.window.releasedWhenClosed = NO; self.window.delegate = self; [self.window center];
+        [self.window setContentSize:NSMakeSize(CONTENT_W + 60, 720)]; self.window.contentMinSize = NSMakeSize(CONTENT_W + 60, 360);
+        self.window.releasedWhenClosed = NO; self.window.delegate = self; [self.window center];
     }
     [self refresh]; [self.window makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES];
 }
@@ -558,23 +642,26 @@ void gamesettings_add_menu_item(NSMenu *app_menu) {
 @class GSPhoneController;
 @interface GSTouchDiagram : UIView @property(weak) GSPhoneController *owner; @property int recording; @end
 
-/* Graphics and Keyboard in one sheet. Keys are recorded from a hardware keyboard (Magic Keyboard, Bluetooth). */
+/* Graphics, Controls and Saves in one sheet. Keys are recorded from a hardware keyboard (Magic Keyboard, Bluetooth). */
 @interface GSPhoneController : UIViewController
+@property(strong) NSMutableArray<UISlider *> *sliders;     /* settings without choice titles, with their value labels */
+@property(strong) NSMutableArray<UILabel *> *sliderLabels;
 @property(strong) UISegmentedControl *tabs;
-@property(strong) UIScrollView *graphicsPage, *keyboardPage, *savesPage;
+@property(strong) UIScrollView *graphicsPage, *controlsPage, *savesPage;
 @property(strong) UILabel *localPath, *cloudPath;
 @property(strong) UIButton *cloudButton;
 @property(strong) GSTouchDiagram *diagram;
 @property(strong) NSMutableArray<UIButton *> *keyButtons, *choiceButtons;
-@property NSInteger recording, appending;
-- (void)record:(NSInteger)i appending:(BOOL)append;
+@property(strong) NSMutableArray<UISwitch *> *switches;   /* the Off / On settings */
+@property NSInteger recording, slot;   /* the input and slot being recorded, -1 none */
+- (void)record:(NSInteger)i slot:(NSInteger)slot;
 @end
 
 @implementation GSTouchDiagram
 - (void)drawRect:(CGRect)dirty { (void)dirty; draw_controller(UIGraphicsGetCurrentContext(), self.bounds, self.recording); }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event; int i = part_at([touches.anyObject locationInView:self], self.bounds);
-    if (i >= 0) [self.owner record:i appending:NO];
+    if (i >= 0) [self.owner record:i slot:free_slot((unsigned)i)];
 }
 @end
 
@@ -587,6 +674,7 @@ static UILabel *note_label(NSString *s) {
 static UIScrollView *page(NSArray<UIView *> *views) {
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:views]; stack.axis = UILayoutConstraintAxisVertical; stack.spacing = 12;
     stack.alignment = UIStackViewAlignmentFill; stack.translatesAutoresizingMaskIntoConstraints = NO;
+    for (UIView *v in views) if (v.layer.cornerRadius > 0) [stack setCustomSpacing:24 afterView:v];   /* room before the next heading */
     UIScrollView *scroll = [UIScrollView new]; scroll.translatesAutoresizingMaskIntoConstraints = NO; [scroll addSubview:stack];
     UILayoutGuide *c = scroll.contentLayoutGuide, *f = scroll.frameLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[[stack.topAnchor constraintEqualToAnchor:c.topAnchor constant:16], [stack.bottomAnchor constraintEqualToAnchor:c.bottomAnchor constant:-16],
@@ -603,9 +691,78 @@ static UIScrollView *page(NSArray<UIView *> *views) {
     }
     return [UIMenu menuWithChildren:actions];
 }
-- (UIView *)row:(NSString *)title control:(UIView *)control {
-    UILabel *l = [UILabel new]; l.text = title; [l setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    UIStackView *r = [[UIStackView alloc] initWithArrangedSubviews:@[l, control]]; r.spacing = 12; r.alignment = UIStackViewAlignmentCenter; return r;
+/* As the Mac window: a heading, then a rounded box of rows, each with its name and note on the left and its control on
+   the right; Off / On settings are switches. */
+static UILabel *heading_label(NSString *s) {
+    UILabel *h = [UILabel new]; h.text = s; h.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]; return h;
+}
+static UIView *setting_row(NSString *title, UILabel *note, UIView *control) {
+    UILabel *name = [UILabel new]; name.text = title; name.numberOfLines = 0; name.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:note ? @[name, note] : @[name]]; text.axis = UILayoutConstraintAxisVertical; text.spacing = 3;
+    [text setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [control setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [control setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *r = [[UIStackView alloc] initWithArrangedSubviews:@[text, control]]; r.spacing = 16; r.alignment = UIStackViewAlignmentCenter;
+    r.layoutMargins = UIEdgeInsetsMake(11, 16, 11, 16); r.layoutMarginsRelativeArrangement = YES;
+    return r;
+}
+static UIView *group_box(NSArray<UIView *> *rows) {
+    NSMutableArray *views = [NSMutableArray array];
+    for (UIView *r in rows) {
+        if (views.count) {   /* a hairline, starting under the text */
+            UIView *line = [UIView new], *pad = [UIView new]; line.backgroundColor = UIColor.separatorColor; line.translatesAutoresizingMaskIntoConstraints = NO;
+            [pad addSubview:line];
+            [NSLayoutConstraint activateConstraints:@[[pad.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
+                [line.topAnchor constraintEqualToAnchor:pad.topAnchor], [line.bottomAnchor constraintEqualToAnchor:pad.bottomAnchor],
+                [line.leadingAnchor constraintEqualToAnchor:pad.leadingAnchor constant:16], [line.trailingAnchor constraintEqualToAnchor:pad.trailingAnchor]]];
+            [views addObject:pad];
+        }
+        [views addObject:r];
+    }
+    UIStackView *box = [[UIStackView alloc] initWithArrangedSubviews:views]; box.axis = UILayoutConstraintAxisVertical;
+    box.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor; box.layer.cornerRadius = 10; box.layer.cornerCurve = kCACornerCurveContinuous; box.clipsToBounds = YES;
+    return box;
+}
+static BOOL is_switch(const gamesettings_choice *g) {
+    return g->choices && g->nchoices == 2 && !strcmp(g->choices[0], "Off") && !strcmp(g->choices[1], "On");
+}
+/* The game's rows for one tab (controls: the Controls tab's) as headings and boxes. */
+- (NSArray<UIView *> *)groups:(BOOL)controls {
+    NSMutableArray *out = [NSMutableArray array], *rows = [NSMutableArray array];
+    for (unsigned i = 0; cfg && i < cfg->ngraphics; i++) {
+        const gamesettings_choice *g = &cfg->graphics[i];
+        if (!g->controls != !controls) continue;
+        if (g->group && rows.count) { [out addObject:group_box(rows)]; rows = [NSMutableArray array]; }
+        if (g->group) [out addObject:heading_label(@(g->group))];
+        UIView *c;
+        if (!g->choices) {
+            UISlider *s = [UISlider new]; s.tag = i; s.minimumValue = 0; s.maximumValue = g->nchoices - 1; [s addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+            [s.widthAnchor constraintEqualToConstant:130].active = YES;
+            UILabel *label = [UILabel new]; label.textAlignment = NSTextAlignmentRight; label.font = [UIFont monospacedDigitSystemFontOfSize:UIFont.labelFontSize weight:UIFontWeightRegular];
+            [label.widthAnchor constraintEqualToConstant:32].active = YES;
+            [self.sliders addObject:s]; [self.sliderLabels addObject:label];
+            UIStackView *both = [[UIStackView alloc] initWithArrangedSubviews:@[s, label]]; both.spacing = 8; both.alignment = UIStackViewAlignmentCenter; c = both;
+        } else if (is_switch(g)) {
+            UISwitch *w = [UISwitch new]; w.tag = i; [w addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+            [self.switches addObject:w]; c = w;
+        } else {
+            UIButton *b = [UIButton buttonWithConfiguration:UIButtonConfiguration.grayButtonConfiguration primaryAction:nil];
+            b.showsMenuAsPrimaryAction = YES; b.changesSelectionAsPrimaryAction = NO; b.tag = i; [self.choiceButtons addObject:b]; c = b;
+        }
+        [rows addObject:setting_row(@(g->title), g->note ? note_label(@(g->note)) : nil, c)];
+    }
+    if (rows.count) [out addObject:group_box(rows)];
+    return out;
+}
+- (void)switchChanged:(UISwitch *)w {
+    const gamesettings_choice *g = &cfg->graphics[w.tag];
+    if (g->set) g->set(w.on ? 1 : 0);
+    save_graphics(); [self refresh];
+}
+- (void)sliderChanged:(UISlider *)s {
+    const gamesettings_choice *g = &cfg->graphics[s.tag];
+    if (g->set) g->set((int)lroundf(s.value));
+    save_graphics(); [self refresh];
 }
 - (UIButton *)button:(NSString *)title action:(SEL)action tag:(NSInteger)tag {
     UIButtonConfiguration *c = UIButtonConfiguration.grayButtonConfiguration; c.title = title;
@@ -617,50 +774,57 @@ static UIScrollView *page(NSArray<UIView *> *views) {
     self.title = [NSString stringWithFormat:@"%s Settings", cfg && cfg->game_name ? cfg->game_name : "Game"];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(done)];
     /* Graphics */
-    NSMutableArray *g = [NSMutableArray arrayWithObject:note_label(@"Applied at once and kept for this game in iCloud.")];
-    self.choiceButtons = [NSMutableArray array];
-    for (unsigned i = 0; cfg && i < cfg->ngraphics; i++) {
-        UIButton *b = [UIButton buttonWithConfiguration:UIButtonConfiguration.grayButtonConfiguration primaryAction:nil];
-        b.showsMenuAsPrimaryAction = YES; b.changesSelectionAsPrimaryAction = NO; b.tag = i; [self.choiceButtons addObject:b];
-        [g addObject:[self row:@(cfg->graphics[i].title) control:b]];
-        if (cfg->graphics[i].note) [g addObject:note_label(@(cfg->graphics[i].note))];
-    }
+    self.choiceButtons = [NSMutableArray array]; self.switches = [NSMutableArray array]; self.sliders = [NSMutableArray array]; self.sliderLabels = [NSMutableArray array];
+    NSMutableArray *g = [NSMutableArray arrayWithArray:[self groups:NO]];
+    [g addObject:note_label(@"Settings stored locally, auto saved.")];
     self.graphicsPage = page(g);
-    /* Keyboard */
+    /* Controls: the game's control rows (motion, controller) above, then the keyboard */
+    NSMutableArray *k = [NSMutableArray arrayWithArray:[self groups:YES]];
+    [k addObject:heading_label(@"Keyboard")];
     self.diagram = [GSTouchDiagram new]; self.diagram.owner = self; self.diagram.recording = -1; self.diagram.backgroundColor = UIColor.clearColor;
     [self.diagram.heightAnchor constraintEqualToAnchor:self.diagram.widthAnchor multiplier:DESIGN_H / DESIGN_W].active = YES;
-    NSMutableArray *k = [NSMutableArray arrayWithObjects:note_label(@"With a keyboard connected: tap a button on the controller or a key box, then press the key. + adds a second key, × removes them. Shared with every game and kept in iCloud."), self.diagram, nil];
+    [k addObjectsFromArray:@[note_label(@"With a keyboard connected: each action has three slots. Tap one (or a button on the controller), then press the key; touch and hold a slot to clear it. Shared with every game on this device."), self.diagram]];
     self.keyButtons = [NSMutableArray array];
-    for (unsigned i = 0; i < NINPUT; i++) {
-        UIButton *key = [self button:@"" action:@selector(keyTapped:) tag:i]; [self.keyButtons addObject:key];
-        UIButton *add = [self button:@"+" action:@selector(addTapped:) tag:i], *clear = [self button:@"×" action:@selector(clearTapped:) tag:i];
-        for (UIButton *b in @[add, clear]) { [b.widthAnchor constraintEqualToConstant:48].active = YES; [b setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal]; }
-        [key setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    for (unsigned i = 0; i < NINPUT; i++) {   /* MAX_KEYS slots per input: tap one, press the key; a long press clears it */
         UILabel *name = [UILabel new]; name.text = @(inputs[i].title); [name.widthAnchor constraintEqualToConstant:150].active = YES;
-        UIStackView *r = [[UIStackView alloc] initWithArrangedSubviews:@[name, key, add, clear]]; r.spacing = 8; r.alignment = UIStackViewAlignmentCenter;
+        NSMutableArray *slots = [NSMutableArray array];
+        for (int s = 0; s < MAX_KEYS; s++) {
+            NSInteger tag = i * MAX_KEYS + s;
+            UIButton *b = [self button:@"" action:@selector(slotTapped:) tag:tag]; [self.keyButtons addObject:b]; [slots addObject:b];
+            __weak GSPhoneController *weak = self;
+            b.menu = [UIMenu menuWithChildren:@[[UIAction actionWithTitle:@"Clear" image:nil identifier:nil handler:^(UIAction *a) { (void)a;
+                weak.recording = -1; clear_slot((unsigned)tag / MAX_KEYS, (int)(tag % MAX_KEYS)); [weak refresh]; }]]];
+        }
+        UIStackView *keys = [[UIStackView alloc] initWithArrangedSubviews:slots]; keys.spacing = 8; keys.distribution = UIStackViewDistributionFillEqually;
+        UIStackView *r = [[UIStackView alloc] initWithArrangedSubviews:@[name, keys]]; r.spacing = 8; r.alignment = UIStackViewAlignmentCenter;
         [k addObject:r];
     }
     [k addObject:[self button:@"Restore Defaults" action:@selector(defaultsTapped) tag:0]];
-    self.keyboardPage = page(k);
+    self.controlsPage = page(k);
     /* Saves: the game's folders, opened in the Files app */
-    UILabel *local = [UILabel new], *cloud = [UILabel new]; local.text = @"On this device"; cloud.text = @"In iCloud (Game Saves)";
-    local.font = cloud.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
     self.localPath = note_label(@""); self.cloudPath = note_label(@"");
-    self.cloudButton = [self button:@"Open iCloud Copy in Files" action:@selector(openCloud) tag:0];
-    self.savesPage = page(@[note_label(saves_note()), local, self.localPath, [self button:@"Open in Files" action:@selector(openLocal) tag:0], cloud, self.cloudPath, self.cloudButton]);
-    self.tabs = [[UISegmentedControl alloc] initWithItems:@[@"Graphics", @"Keyboard", @"Saves"]]; self.tabs.selectedSegmentIndex = 0;
+    for (UILabel *p in @[self.localPath, self.cloudPath]) {
+        p.font = [UIFont monospacedSystemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote].pointSize weight:UIFontWeightRegular];
+        p.numberOfLines = 2; p.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    }
+    self.cloudButton = [self button:@"Open in Files" action:@selector(openCloud) tag:0];
+    self.savesPage = page(@[heading_label(@"Save folders"),
+        group_box(@[setting_row(@"On this device", self.localPath, [self button:@"Open in Files" action:@selector(openLocal) tag:0]),
+                    setting_row(@"In iCloud (Game Saves)", self.cloudPath, self.cloudButton)]),
+        note_label(saves_note())]);
+    self.tabs = [[UISegmentedControl alloc] initWithItems:@[@"Graphics", @"Controls", @"Saves"]]; self.tabs.selectedSegmentIndex = 0;
     [self.tabs addTarget:self action:@selector(tabChanged) forControlEvents:UIControlEventValueChanged]; self.tabs.translatesAutoresizingMaskIntoConstraints = NO;
-    for (UIView *v in @[self.tabs, self.graphicsPage, self.keyboardPage, self.savesPage]) [self.view addSubview:v];
+    for (UIView *v in @[self.tabs, self.graphicsPage, self.controlsPage, self.savesPage]) [self.view addSubview:v];
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[[self.tabs.topAnchor constraintEqualToAnchor:safe.topAnchor constant:12], [self.tabs.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor]]];
-    for (UIScrollView *p in @[self.graphicsPage, self.keyboardPage, self.savesPage])
+    for (UIScrollView *p in @[self.graphicsPage, self.controlsPage, self.savesPage])
         [NSLayoutConstraint activateConstraints:@[[p.topAnchor constraintEqualToAnchor:self.tabs.bottomAnchor constant:8], [p.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
             [p.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor], [p.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor]]];
     [self tabChanged]; [self refresh];
 }
 - (void)tabChanged {
     NSInteger t = self.tabs.selectedSegmentIndex;
-    self.graphicsPage.hidden = t != 0; self.keyboardPage.hidden = t != 1; self.savesPage.hidden = t != 2; [self refresh];
+    self.graphicsPage.hidden = t != 0; self.controlsPage.hidden = t != 1; self.savesPage.hidden = t != 2; [self refresh];
 }
 /* The Files app at a folder of this app (its Documents are shared: UIFileSharingEnabled) or of iCloud Drive. */
 static void open_in_files(NSString *path) {
@@ -671,24 +835,31 @@ static void open_in_files(NSString *path) {
 - (void)openLocal { open_in_files(save_local); }
 - (void)openCloud { open_in_files(save_cloud); }
 - (void)refresh {
-    for (unsigned i = 0; i < self.keyButtons.count; i++) {
-        UIButtonConfiguration *c = self.keyButtons[i].configuration; c.title = (NSInteger)i == self.recording ? @"Press a key…" : keys_title(i);
-        c.baseBackgroundColor = (NSInteger)i == self.recording ? UIColor.systemBlueColor : nil; self.keyButtons[i].configuration = c;
+    for (UIButton *b in self.keyButtons) {   /* tag: input * MAX_KEYS + slot */
+        unsigned i = (unsigned)b.tag / MAX_KEYS; int k = (int)(b.tag % MAX_KEYS); BOOL rec = (NSInteger)i == self.recording && k == self.slot;
+        UIButtonConfiguration *c = b.configuration; c.title = rec ? @"Press a key…" : slot_title(i, k);
+        c.baseBackgroundColor = rec ? UIColor.systemBlueColor : nil; b.configuration = c;
     }
-    for (unsigned i = 0; i < self.choiceButtons.count; i++) {
-        const gamesettings_choice *g = &cfg->graphics[i]; int now = g->get ? g->get() : -1;
-        UIButtonConfiguration *c = self.choiceButtons[i].configuration; c.title = now >= 0 && (unsigned)now < g->nchoices ? @(g->choices[now]) : @"—";
-        self.choiceButtons[i].configuration = c; self.choiceButtons[i].menu = [self menuFor:i];
+    for (UISwitch *w in self.switches) { const gamesettings_choice *g = &cfg->graphics[w.tag]; if (g->get) w.on = g->get() != 0; }
+    for (NSUInteger i = 0; i < self.sliders.count; i++) {
+        UISlider *s = self.sliders[i]; const gamesettings_choice *g = &cfg->graphics[s.tag];
+        const int now = g->get ? g->get() : 0; s.value = now; self.sliderLabels[i].text = [NSString stringWithFormat:@"%d", now + 1];
+    }
+    for (UIButton *b in self.choiceButtons) {
+        const gamesettings_choice *g = &cfg->graphics[b.tag]; int now = g->get ? g->get() : -1;
+        UIButtonConfiguration *c = b.configuration; c.title = now >= 0 && (unsigned)now < g->nchoices ? @(g->choices[now]) : @"—";
+        b.configuration = c; b.menu = [self menuFor:(unsigned)b.tag];
     }
     self.diagram.recording = (int)self.recording; [self.diagram setNeedsDisplay];
     self.localPath.text = save_local ?: @"Known once the game has opened its saves.";
     self.cloudPath.text = save_cloud ?: @"No iCloud copy (iCloud is off, or SaveSync has not found its folder).";
     self.cloudButton.enabled = save_cloud != nil;
 }
-- (void)record:(NSInteger)i appending:(BOOL)append { self.recording = i; self.appending = append; [self becomeFirstResponder]; [self refresh]; }
-- (void)keyTapped:(UIButton *)b { [self record:b.tag appending:NO]; }
-- (void)addTapped:(UIButton *)b { [self record:b.tag appending:YES]; }
-- (void)clearTapped:(UIButton *)b { self.recording = -1; clear_input((unsigned)b.tag); [self refresh]; }
+- (void)record:(NSInteger)i slot:(NSInteger)slot { self.recording = i; self.slot = slot; [self becomeFirstResponder]; [self refresh]; }
+- (void)slotTapped:(UIButton *)b {
+    if (b.tag / MAX_KEYS == self.recording && b.tag % MAX_KEYS == self.slot) { self.recording = -1; [self refresh]; return; }   /* again: cancel */
+    [self record:b.tag / MAX_KEYS slot:b.tag % MAX_KEYS];
+}
 - (void)defaultsTapped { self.recording = -1; restore_defaults(); [self refresh]; }
 - (void)done { [self dismissViewControllerAnimated:YES completion:nil]; }
 - (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
@@ -696,7 +867,7 @@ static void open_in_files(NSString *path) {
     for (UIPress *p in presses) {
         if (!p.key || (p.key.modifierFlags & UIKeyModifierCommand)) continue;
         int code = gamesettings_mac_key_from_hid(p.key.keyCode); if (!bindable(code)) continue;
-        assign_key((unsigned)self.recording, (uint8_t)code, (int)self.appending); self.recording = -1; [self refresh]; return;
+        assign_key((unsigned)self.recording, (uint8_t)code, (int)self.slot); self.recording = -1; [self refresh]; return;
     }
     [super pressesBegan:presses withEvent:event];
 }

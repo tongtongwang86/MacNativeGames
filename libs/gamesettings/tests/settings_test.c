@@ -1,5 +1,5 @@
-/* GameSettings without a window: default keys, a saved rebinding, the newer of this device's copy and iCloud's, and a
-   game's graphics choice applied. Run by run.sh with GAMESETTINGS_LOCAL_DIR and GAMESETTINGS_CLOUD_DIR set. */
+/* GameSettings without a window: default keys, this device's saved rebinding and graphics choice applied. Run by
+   run.sh with GAMESETTINGS_LOCAL_DIR set. */
 #include <stdio.h>
 #include <string.h>
 #include "../gamesettings.h"
@@ -11,7 +11,7 @@ static void expect(const char *name, long long got, long long want) {
 static int get(void) { return 0; }
 static void set(int v) { applied = v; }
 static const char *const choices[] = {"off", "on", "max"};
-static const gamesettings_choice g[] = {{"mode", "Mode", choices, 3, get, set, NULL}};
+static const gamesettings_choice g[] = {{"mode", "Mode", choices, 3, get, set, NULL, 0, NULL}};
 static const gamesettings_config c = {"0100000000000000", "Test", "[test]", g, 1};
 
 int main(int argc, char **argv) {

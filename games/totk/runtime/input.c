@@ -34,7 +34,7 @@ static void user_input(const char *what){
 }
 /* Keys from the window are the user's; scripted and auto-load presses use the synthetic entry.
    Key 1 (Mac key code 18) opens the Settings window (frontend.m; also Command-comma): overlay, frame lock and
-   interpolation, resolution, aspect ratio, edge smoothing, controller type, mouse, console mode. Held-key repeats do not
+   interpolation, resolution, aspect ratio, anti-aliasing, controller type, mouse, console mode. Held-key repeats do not
    reopen it. Keys 2-7 are no shortcuts any more. The window's other keys go through the player's bindings (user_keys). */
 enum { KEY_SETTINGS = 18 };
 static uint64_t bound_button(unsigned code){unsigned char one[128]={0};one[code]=1;return gamesettings_buttons(one);}
@@ -158,6 +158,7 @@ extern void runtime_front_request_close(void);
 static void *input_file(void *arg) {
     FILE *f = fopen((const char *)arg, "r"); if (!f) runtime_fail("cannot open TOTK_INPUT_FILE");
     char line[1200];
+    double mouse_x, mouse_y;
     for (;;) {
         if (!fgets(line, sizeof line, f)) { if (ferror(f)) runtime_fail("diagnostic input read"); clearerr(f); usleep(100000); continue; }
         if (runtime_survey_command(line)) continue;
@@ -169,6 +170,8 @@ static void *input_file(void *arg) {
         } else if (sscanf(line, "key %u %u %n", &code, &ms, &used) == 2 && used && !line[used] && code < 128 && ms > 0 && ms <= 5000) {
             fprintf(stderr, "[totk-input] file: key %u for %u ms\n", code, ms);
             runtime_input_key_synthetic(code, 1); usleep(ms * 1000); runtime_input_key_synthetic(code, 0);
+        } else if (sscanf(line, "mouse %lf %lf %n", &mouse_x, &mouse_y, &used) == 2 && used && !line[used]) {   /* "mouse <dx> <dy>": points of movement */
+            runtime_mouse_move(mouse_x, mouse_y);
         } else if (sscanf(line, "passdump %u %n", &code, &used) == 1 && used && !line[used] && code > 0 && code < 16) {
             extern void dm_gfx_passdump_next(long n); dm_gfx_passdump_next((long)code);
         } else if (!strncmp(line, "anomdump", 8) && (line[8] == '\n' || line[8] == '\r' || !line[8])) {   /* TOTK_ANOMALY=<dir>: write the per-draw records (with GPU sample counts) of the last frames now */

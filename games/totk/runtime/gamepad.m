@@ -322,7 +322,10 @@ static HIDPadState hidPad;
 static void hid_pad_start(void) {}
 #endif
 
-/* ---- Mouse mode (Mac, the Settings window; in mouse.txt) ----
+/* ---- Mouse mode (Mac, the Settings window; in mouse.txt), and the touch camera (iPhone / iPad) ----
+   On iOS the same switch is Settings › Controls › Touch camera: drags on the right half of the screen come here as
+   mouse movement (ios/Sources/touch_pad.m) instead of a drawn camera stick. They drive the right stick only: the
+   device's own motion sensors keep the gyro.
    The window (runtime/frontend.m) holds the pointer while mouse mode is on and the window has the keyboard, and sends
    the mouse's buttons and movement here. Buttons are physical buttons 17-21 of the controller layout (controller_map.h:
    left attack, right draw the bow with left to shoot, middle target), so controls.txt can change them. Movement goes to
@@ -340,10 +343,79 @@ static dispatch_source_t mouseTimer;
 static int mouseTicksByHand;                   /* tests/mouse/probe.m drives mouse_tick itself */
 static void (*mouseHook)(void);                /* the window: mouse mode changed */
 
+/* The direct camera (1.4.3, game_patches_v143.c): in the follow camera and when aiming, movement turns the camera itself,
+   a set angle per point (sensitivity 50: 0.2 degrees on the Mac, 0.35 for a finger; aiming has its own sensitivity), so
+   the stick stays centred and the gyro still. The modes that do not take it (climbing and the rest) keep the stick and
+   the gyro below; while the game runs neither camera for DIRECT_STALE_NS, movement goes there. */
+#if TARGET_OS_IPHONE
+#define DIRECT_DEG_PER_POINT 0.35
+#else
+#define DIRECT_DEG_PER_POINT 0.2
+#endif
+enum { DIRECT_STALE_NS = 250000000 };
+uintptr_t runtime_camera_direct_mode, runtime_camera_direct_aim;
+static _Atomic double directX, directY;        /* points not yet given to the camera */
+static _Atomic uint64_t directSeen;            /* when the game last ran a camera that takes movement */
+static _Atomic int directInvertY;
+static _Atomic int mouseSensitivity, aimSensitivity = 25;   /* 1..100; mouseSensitivity 0: TOTK_MOUSE_SENSITIVITY */
+static void atomic_fetch_add_double(_Atomic double *to, double by) { double was = atomic_load(to); while (!atomic_compare_exchange_weak(to, &was, was + by)) { } }
+
+/* The Settings window's sliders: 0..99 is sensitivity 1..100. */
+int runtime_mouse_sensitivity(void) { const int s = atomic_load(&mouseSensitivity); return (s ? s : mouse_look_setting(getenv("TOTK_MOUSE_SENSITIVITY"), 1, 100, 50)) - 1; }
+void runtime_mouse_set_sensitivity(int v) {
+    const int s = v < 0 ? 1 : v > 99 ? 100 : v + 1;
+    atomic_store(&mouseSensitivity, s);
+    pthread_mutex_lock(&gamepadLock); mouseSettings.sensitivity = s; pthread_mutex_unlock(&gamepadLock);
+}
+int runtime_aim_sensitivity(void) { return atomic_load(&aimSensitivity) - 1; }
+void runtime_aim_set_sensitivity(int v) { atomic_store(&aimSensitivity, v < 0 ? 1 : v > 99 ? 100 : v + 1); }
+
+/* The game's thread, on its stack, from the veneer (gate.S). Mouse right turns like stick right, mouse up like stick up. */
+void runtime_camera_direct(uint8_t *controller, uint8_t *camera) {
+    if (!runtime_camera_direct_mode || !atomic_load(&mouseMode)) return;
+    const uintptr_t mode = *(uintptr_t *)(*(uint8_t **)controller + 0x120);
+    const int aiming = mode == runtime_camera_direct_aim;
+    if (mode != runtime_camera_direct_mode && !aiming) return;
+    atomic_store(&directSeen, runtime_now_ns());
+    const double x = atomic_exchange(&directX, 0), y = atomic_exchange(&directY, 0);
+    if (x == 0 && y == 0) return;
+    const double k = (aiming ? atomic_load(&aimSensitivity) : runtime_mouse_sensitivity() + 1) / 50.0 * DIRECT_DEG_PER_POINT;
+    const double yaw = x * k, pitch = (atomic_load(&directInvertY) ? -y : y) * k;
+    if (aiming) {   /* the aiming camera keeps its angles, in degrees, in its controller */
+        float *lat = (float *)(controller + 0x154), *lng = (float *)(controller + 0x158);
+        const float next = *lat + (float)pitch;
+        *lat = next > 70 ? 70 : next < -70 ? -70 : next;
+        const float turned = *lng - (float)yaw;
+        *lng = turned > 180 ? turned - 360 : turned < -180 ? turned + 360 : turned;
+        return;
+    }
+    /* The first movement after a load: the camera is still in its starting state, which keeps pulling the latitude to the
+       default until the stick is used. A stick reading too small to turn anything moves it on as the stick does. */
+    if (*(int *)(controller + 0x180) < 4) *(float *)(camera + 0x420) = 1e-3f;
+    if (yaw != 0) {
+        float *eye = (float *)(camera + 0x338), *at = (float *)(camera + 0x344);
+        const float dx = eye[0] - at[0], dz = eye[2] - at[2], c = (float)cos(yaw * M_PI / 180), s = (float)sin(yaw * M_PI / 180);
+        eye[0] = at[0] + dx * c - dz * s;
+        eye[2] = at[2] + dx * s + dz * c;
+    }
+    if (pitch != 0) {
+        float *lat = (float *)(controller + 0x108);
+        const float next = *lat + (float)pitch;
+        *lat = next > 89 ? 89 : next < -85 ? -85 : next;
+    }
+}
+static int direct_active(void) {
+    const uint64_t seen = atomic_load(&directSeen);
+    return runtime_camera_direct_mode && seen && runtime_now_ns() - seen < DIRECT_STALE_NS;
+}
+
 static void mouse_tick(void) {
     double gyro[3], acc[3]; int32_t rx, ry;
+    const int direct = direct_active();
+    if (!direct) { atomic_store(&directX, 0); atomic_store(&directY, 0); }
     pthread_mutex_lock(&gamepadLock);
     mouse_look_tick(&mouseLook, &mouseSettings, &rx, &ry, gyro, acc);
+    if (direct) { mouseLook.x = mouseLook.y = 0; rx = ry = 0; mouseLook.pitch = 0; gyro[0] = gyro[1] = gyro[2] = 0; acc[0] = acc[1] = 0; acc[2] = -1; }
     mouseRX = rx; mouseRY = ry;
     int feed = mouseGyro;
     pthread_mutex_unlock(&gamepadLock);
@@ -356,6 +428,11 @@ static void mouse_apply(int on) {   /* start or stop the ticks and the gyro take
         MouseLookSettings settings = mouse_look_settings(getenv("TOTK_MOUSE_SENSITIVITY"), getenv("TOTK_MOUSE_INVERT_Y"),
                                                          getenv("TOTK_MOUSE_COUNTERWEIGHT"), getenv("TOTK_MOUSE_DECAY"), getenv("TOTK_MOUSE_MIN_DECAY"));
         int gyro = runtime_gyro_enabled() && !(g && !strcmp(g, "0"));
+        settings.sensitivity = runtime_mouse_sensitivity() + 1;
+        atomic_store(&directInvertY, settings.invert_y);
+#if TARGET_OS_IPHONE
+        gyro = 0;   /* the touch camera: the stick only, device motion keeps the gyro */
+#endif
         pthread_mutex_lock(&gamepadLock);
         mouseSettings = settings; mouse_look_reset(&mouseLook); mouseRX = mouseRY = 0; mouseGyro = gyro;
         pthread_mutex_unlock(&gamepadLock);
@@ -407,6 +484,10 @@ void runtime_mouse_move(double dx, double dy) {   /* the window, while it holds 
     pthread_mutex_lock(&gamepadLock);
     mouse_look_move(&mouseLook, dx, dy, &mouseSettings);
     pthread_mutex_unlock(&gamepadLock);
+    if (isfinite(dx) && isfinite(dy) && direct_active()) {
+        atomic_fetch_add_double(&directX, dx);
+        atomic_fetch_add_double(&directY, dy);
+    }
 }
 
 void runtime_mouse_button(int button, int down) {   /* main thread */

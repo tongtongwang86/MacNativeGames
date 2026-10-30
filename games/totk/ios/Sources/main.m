@@ -60,19 +60,24 @@ static const char *const overlay_choices[] = {"Hidden", "FPS only", "Everything"
 static const char *const upscale_choices[] = {"Off (720p, or 1080p docked; the system scales it)", "MetalFX at full resolution"};
 static const char *const interp_choices[] = {"Off", "30 + 30", "Half the refresh rate", "Unlimited"};
 static const char *const motion_choices[] = {"Off", "On"};
+/* The touch camera: runtime/gamepad.m's mouse mode, fed by drags on the right half of the screen (touch_pad.m). */
+static void touch_camera_set(int v) { runtime_mouse_set(v); }
 /* Not const: the console mode's and render resolution's ids are this device type's own (per_device_ids). */
 static gamesettings_choice graphics_settings[] = {
-    {"shape", "Picture shape", shape_choices, 2, shape_get, shape_set, "The camera fills the screen without black bars; the HUD keeps its shape in the middle. Takes effect the next time the game starts."},
-    {"console_ios", "Console mode", console_choices, 3, console_get, console_set, "Docked is the game's TV mode: more detail, more GPU and battery. Handheld keeps the render resolution at 720p or lower. Automatic: handheld up to 720p, docked above. This device's own setting. Takes effect the next time the game starts."},
-    {"render", "Render resolution", render_choices, 5, render_get, render_set, "The 3D scene's size; the HUD stays sharp. Lower runs faster; MetalFX upscaling sharpens it. 900p and 1080p run the game in its docked mode (more detail, more GPU and battery). This device's own setting. Takes effect the next time the game starts."},
-    {"upscale", "Upscaling", upscale_choices, 2, upscale_get, upscale_set, "MetalFX scales the 720p picture to the screen's own pixels. New on iPad: uses more GPU time and battery."},
-    {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60). New on iPad."},
-    {"motion", "Motion controls", motion_choices, 2, motion_get, motion_set, "Tilt and turn the device (or a controller with a gyro, such as a DualSense) to aim, like the Switch's motion controls. Which actions use motion is set in the game's own Options."},
-    {"overlay", "FPS overlay", overlay_choices, 3, overlay_get, overlay_set, NULL},
+    {"shape", "Picture shape", shape_choices, 2, shape_get, shape_set, "The camera fills the screen without black bars; the HUD keeps its shape in the middle. (requires restart)", 0, "Picture"},
+    {"console_ios", "Console mode", console_choices, 3, console_get, console_set, "Docked is the game's TV mode: more detail, more GPU and battery. Handheld keeps the render resolution at 720p or lower. Automatic: handheld up to 720p, docked above. This device's own setting. (requires restart)", 0, NULL},
+    {"render", "Render resolution", render_choices, 5, render_get, render_set, "The 3D scene's size; the HUD stays sharp. Lower runs faster; MetalFX upscaling sharpens it. 900p and 1080p run the game in its docked mode (more detail, more GPU and battery). This device's own setting. (requires restart)", 0, NULL},
+    {"upscale", "Upscaling", upscale_choices, 2, upscale_get, upscale_set, "MetalFX scales the 720p picture to the screen's own pixels. New on iPad: uses more GPU time and battery.", 0, NULL},
+    {"interpolation", "Frame interpolation", interp_choices, 4, interp_get, interp_set, "MetalFX generates in-between frames (half of 120 Hz is 60). New on iPad.", 0, "Frame rate"},
+    {"motion", "Motion controls", motion_choices, 2, motion_get, motion_set, "Tilt and turn the device (or a controller with a gyro, such as a DualSense) to aim, like the Switch's motion controls. Which actions use motion is set in the game's own Options.", 1, "Controller"},
+    {"touch_camera", "Touch camera", motion_choices, 2, runtime_mouse_enabled, touch_camera_set, "Drag on the right half of the screen to turn the camera, like a trackpad, instead of using the camera stick.", 1, NULL},
+    {"touch_sensitivity", "Camera sensitivity", NULL, 100, runtime_mouse_sensitivity, runtime_mouse_set_sensitivity, "How far the camera turns for the same drag.", 1, NULL},
+    {"aim_sensitivity", "Aiming sensitivity", NULL, 100, runtime_aim_sensitivity, runtime_aim_set_sensitivity, "The same while aiming a bow or throwing.", 1, NULL},
+    {"overlay", "FPS overlay", overlay_choices, 3, overlay_get, overlay_set, NULL, 0, NULL},
 };
 /* Console mode and render resolution are read at start from NSUserDefaults, before the settings are loaded (they are applied
-   after 60 frames). Shared through iCloud they came a start late, and an iPhone and an iPad overwrote each other's size;
-   with an id per device type each keeps its own, and NSUserDefaults already holds it at start. */
+   after 60 frames). When settings were shared through iCloud an iPhone and an iPad overwrote each other's size, hence an
+   id per device type; settings are local now, the ids stay so the saved choices keep their names. */
 static void per_device_ids(void) {
     int pad = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
     for (unsigned i = 0; i < sizeof graphics_settings / sizeof *graphics_settings; i++) {
@@ -436,7 +441,7 @@ static void audio_observe(void) {
     unsetenv("TOTK_AUTOLOAD");
     chdir(docs.fileSystemRepresentation);
     host_argv[0] = strdup("TOTK"); host_argv[1] = strdup(res.fileSystemRepresentation); host_argv[2] = strdup("boot");
-    /* Settings: loaded off the main thread (iCloud may be slow to answer); graphics applied once the game draws. */
+    /* Settings: this device's, loaded off the main thread; graphics applied once the game draws. */
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ gamesettings_start(&settings_config); });
     [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t) { if (dm_nvn_frame_count() < 60) return; [t invalidate]; gamesettings_apply_graphics(); }];
     return YES;   // the window is made when the window scene connects (TOTKSceneDelegate)

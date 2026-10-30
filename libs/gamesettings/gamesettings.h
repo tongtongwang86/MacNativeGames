@@ -1,6 +1,6 @@
 /* GameSettings: one Settings window (⌘,) for native game ports: keyboard bindings shared by every game, and each
-   game's graphics settings. Both are kept in iCloud next to SaveSync's saves (<container>/Documents/Settings/), so
-   every game and every Mac uses the same keys, and a game's graphics follow you between Macs.
+   game's graphics settings. Both stay on this device (Application Support/MacNativeGames/Settings on a Mac,
+   Documents/Settings on iOS): every game uses the same keys, and each device keeps its own graphics.
    The library knows nothing about any game: the port lists its graphics settings as choices (a getter and a setter
    each) and asks the library which Switch buttons the held keys press. See ARCHITECTURE.md next to this file. */
 #pragma once
@@ -13,15 +13,18 @@
 extern "C" {
 #endif
 
-/* A graphics setting: one of a few choices, read and applied by the game. get/set run on the main thread. */
+/* A game setting: one of a few choices, read and applied by the game. get/set run on the main thread. Shown on the
+   Graphics tab, or with controls set on the Controls tab above the keyboard bindings (mouse, controller type). */
 typedef struct {
     const char *id;                 /* stable name in the settings file, e.g. "picture" */
     const char *title;              /* shown in the window, e.g. "Picture" */
-    const char *const *choices;     /* choice titles, index = the value */
+    const char *const *choices;     /* choice titles, index = the value; NULL: a slider showing 1..nchoices */
     unsigned nchoices;
     int (*get)(void);               /* the choice in force now (also after a shortcut key changed it) */
     void (*set)(int choice);        /* apply a choice now */
     const char *note;               /* optional line under the setting */
+    int controls;                   /* 1: on the Controls tab instead of Graphics */
+    const char *group;              /* starts a group under this heading on its tab; NULL: in the group above */
 } gamesettings_choice;
 
 typedef struct {
@@ -32,7 +35,7 @@ typedef struct {
     unsigned ngraphics;
 } gamesettings_config;
 
-/* Loads the settings (the newer of this Mac's copy and iCloud's) and makes the keyboard bindings live. Call early,
+/* Loads this device's settings and makes the keyboard bindings live. Call early,
    on any thread; the config is kept by reference (static storage). */
 void gamesettings_start(const gamesettings_config *config);
 /* Applies the saved graphics settings; call on the main thread once the renderer can take them. */

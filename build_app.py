@@ -1349,7 +1349,7 @@ def source_commit():
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
-def step_app(tree, out, logs, *, version="v0", game='totk', icon=None):
+def step_app(tree, out, logs, *, version="v0", game='totk', icon=None, launch_pattern=None):
     expected = VERSIONS[version]
     app_name, bundle_id, executable = APPS[game]
     tmp = out.with_name(out.name + '.partial')
@@ -1407,6 +1407,8 @@ def step_app(tree, out, logs, *, version="v0", game='totk', icon=None):
     elif (tree / 'build/AppIcon.icns').exists():
         clone(tree / 'build/AppIcon.icns', tmp / 'Contents/Resources/AppIcon.icns')
         info['CFBundleIconFile'] = 'AppIcon'
+    if launch_pattern:   # the boot screen's swirl pattern (runtime/boot_view.m); without it, a plain background
+        shutil.copytree(launch_pattern, tmp / 'Contents/Resources/launch')
     info['MNGContributionFolder'] = str(contrib_folder())   # app/launcher.m contrib_file: where players find it
     commit = source_commit()
     if commit:
@@ -1815,7 +1817,7 @@ def parse_args(argv):
     ap.add_argument('-o', '--out', type=Path, help=f'the app or IPA to write (default depends on --platform; next to the game file)')
     ap.add_argument('--work', type=Path, help='work folder (default: TOTK_build next to the game file)')
     ap.add_argument('--icon', type=Path, help='an Icon Composer .icon package to use as the app icon instead of the game\'s own')
-    ap.add_argument('--launch-pattern', type=Path, help='iPhone / iPad: the boot screen\'s swirl pattern, the folder '
+    ap.add_argument('--launch-pattern', type=Path, help='the boot screen\'s swirl pattern (Mac, iPhone and iPad), the folder '
                     'games/totk/ios/tools/launch_pattern.py makes from your own picture of it (without it, a plain background)')
     ap.add_argument('--mod', type=Path, metavar='FOLDER',
                     help='a mod folder prepared before the build: its exefs/ IPS / IPS32 / pchtxt patches for the main '
@@ -2025,7 +2027,8 @@ def main(argv):
             except BuildError as e:
                 say(f'   the Mac reminder for iPhone / iPad shader contributions was not installed: {e}')
     else:
-        step_app(tree, out, logs, version=version, icon=args.icon)
+        step_app(tree, out, logs, version=version, icon=args.icon,
+                 launch_pattern=args.launch_pattern.expanduser().resolve() if args.launch_pattern else None)
     # Refresh an existing app's version, executable and signing identity before
     # the next Finder launch; the desktop alias keeps pointing to this bundle.
     if args.platform=='macos': run([LSREGISTER, '-f', out], logs / 'register-app.log')

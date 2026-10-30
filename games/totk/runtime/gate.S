@@ -122,3 +122,57 @@ _runtime_gate:
     ldp x16, x17, [sp], #16
     ret
 
+// The direct camera (game_patches_v143.c): called from a veneer in the game's camera update, where nothing but x16 and
+// x30 (the veneer saved those) may change: x0 = the mode controller (the game's x19), x1 = its camera (x22).
+    .globl _runtime_camera_gate
+    .p2align 2
+_runtime_camera_gate:
+    sub sp, sp, #528
+    stp x0, x1, [sp, #0]
+    stp x2, x3, [sp, #16]
+    stp x4, x5, [sp, #32]
+    stp x6, x7, [sp, #48]
+    stp x8, x9, [sp, #64]
+    stp x10, x11, [sp, #80]
+    stp x12, x13, [sp, #96]
+    stp x14, x15, [sp, #112]
+    stp x17, x30, [sp, #128]
+    stp q0, q1, [sp, #144]
+    stp q2, q3, [sp, #176]
+    stp q4, q5, [sp, #208]
+    stp q6, q7, [sp, #240]
+    stp q16, q17, [sp, #272]
+    stp q18, q19, [sp, #304]
+    stp q20, q21, [sp, #336]
+    stp q22, q23, [sp, #368]
+    stp q24, q25, [sp, #400]
+    stp q26, q27, [sp, #432]
+    stp q28, q29, [sp, #464]
+    stp q30, q31, [sp, #496]
+    mov x0, x19
+    mov x1, x22
+    bl _runtime_camera_direct
+    ldp x0, x1, [sp, #0]
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldp x8, x9, [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x13, [sp, #96]
+    ldp x14, x15, [sp, #112]
+    ldp x17, x30, [sp, #128]
+    ldp q0, q1, [sp, #144]
+    ldp q2, q3, [sp, #176]
+    ldp q4, q5, [sp, #208]
+    ldp q6, q7, [sp, #240]
+    ldp q16, q17, [sp, #272]
+    ldp q18, q19, [sp, #304]
+    ldp q20, q21, [sp, #336]
+    ldp q22, q23, [sp, #368]
+    ldp q24, q25, [sp, #400]
+    ldp q26, q27, [sp, #432]
+    ldp q28, q29, [sp, #464]
+    ldp q30, q31, [sp, #496]
+    add sp, sp, #528
+    ret
+

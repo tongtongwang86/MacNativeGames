@@ -151,6 +151,12 @@ int runtime_mouse_set(int on);              /* runtime/gamepad.m: the settings p
 int runtime_mouse_enabled(void);
 void runtime_mouse_set_hook(void (*hook)(void));   /* the window (frontend.m): mouse mode changed, on the main queue */
 void runtime_mouse_move(double dx, double dy);      /* points, AppKit's deltaX / deltaY (down positive) */
+int runtime_mouse_sensitivity(void);                /* the Settings window's slider: 0..99, sensitivity 1..100 */
+void runtime_mouse_set_sensitivity(int v);
+int runtime_aim_sensitivity(void);                  /* the same for aiming */
+void runtime_aim_set_sensitivity(int v);
+extern uintptr_t runtime_camera_direct_mode, runtime_camera_direct_aim;   /* the follow and aiming cameras' updates, set by the 1.4.3 patch; 0: no direct camera */
+void runtime_camera_gate(void);                     /* gate.S: the veneer's call, into runtime_camera_direct (gamepad.m) */
 void runtime_mouse_button(int button, int down);    /* main thread; 0 left, 1 right, 2 middle, 3 and 4 the side buttons */
 void runtime_mouse_release(void);                   /* main thread: buttons up, stick centred */
 void runtime_touch_pad_set(const RuntimeGamepadState *state);   /* on-screen touch controls (iOS) */

@@ -194,6 +194,39 @@ static void patch_slowmo_bounce(Module *m){
 #endif
     fprintf(stderr,"[totk] 1.4.3 high-FPS fix: trampoline slow-motion check uses the time scale, veneer +%#llx\n",(unsigned long long)stub);
 }
+/* The direct camera (mouse and touch camera, runtime/gamepad.m). The camera's turn state is its eye position: each frame
+   0x2e228c turns eye minus look-at into radius, latitude, longitude before the mode's update (the virtual call at
+   0x2e2344) rotates it; the follow camera keeps its target latitude in controller + 0x108. The veneer runs at the top of
+   that, so movement written there is exactly the camera's next angle, past the stick's dead zone, curve and top speed
+   (about 129 degrees a second). 0x2e22d8 is the load of the camera (x22) from the controller (x19); the veneer does that
+   load and calls through a pointer on the data page, because the iPhone's text is fixed at export and the host's address
+   is not. After the Vert+ stubs (+320, 2 x 304 bytes), before the rewriter's code at +1024. */
+#define DIRECT_CAMERA_SLOT 0x100
+static void patch_direct_camera(Module *m){
+    uint64_t data=(m->file_size+0x3fff)&~0x3fffULL,stub=((m->text_end+15)&~15ULL)+928;
+    if(data+DIRECT_CAMERA_SLOT+8>m->size||stub+28>((m->text_end+15)&~15ULL)+1024)runtime_fail("1.4.3 direct camera layout");
+    uint32_t veneer[]={0xa9bf7bf0,   /* stp x16, x30, [sp, #-16]! */
+        0xf9401276,                  /* ldr x22, [x19, #0x20]: the original */
+        adrp(16,(uintptr_t)m->base+stub+8,(uintptr_t)m->base+data),
+        0xf9400210|((DIRECT_CAMERA_SLOT/8)<<10),   /* ldr x16, [x16, #slot] */
+        0xd63f0200,                  /* blr x16 */
+        0xa8c17bf0,                  /* ldp x16, x30, [sp], #16 */
+        branch(stub+24,0x2e22dc)};
+    uint32_t word=branch(0x2e22d8,stub);
+#if TARGET_OS_IPHONE
+    uint32_t got;memcpy(&got,m->base+0x2e22d8,4);
+    if(got!=word||memcmp(m->base+stub,veneer,sizeof veneer))runtime_fail("1.4.3 embedded direct camera mismatch");
+#else
+    uint32_t got;memcpy(&got,m->base+0x2e22d8,4);
+    if(got!=0xf9401276)runtime_fail("1.4.3 direct camera: original instruction mismatch");
+    for(unsigned i=0;i<sizeof veneer;i++)if(m->base[stub+i])runtime_fail("1.4.3 direct camera padding not empty");
+    memcpy(m->base+stub,veneer,sizeof veneer);memcpy(m->base+0x2e22d8,&word,4);
+#endif
+    *(void (**)(void))(void *)(m->base+data+DIRECT_CAMERA_SLOT)=runtime_camera_gate;
+    const char *e=getenv("TOTK_DIRECT_CAMERA");
+    if(!(e&&!strcmp(e,"0"))){runtime_camera_direct_mode=(uintptr_t)m->base+0x18e414;runtime_camera_direct_aim=(uintptr_t)m->base+0x23be978;}
+    fprintf(stderr,"[totk] 1.4.3 direct camera: veneer +%#llx (%s)\n",(unsigned long long)stub,runtime_camera_direct_mode?"on":"TOTK_DIRECT_CAMERA=0");
+}
 #if !TARGET_OS_IPHONE
 /* High-frame-rate diagnostics (Mac, TOTK_INPUT_FILE commands). Such bugs sit in game code that compares the game's time
    values with constants tuned for 30 Hz (#61: X+0x28 > 100 above). The time values: the FrameRateMgr singleton
@@ -266,6 +299,7 @@ void runtime_game_patches(Module *m) {
     patch_render_res(m);
     patch_fixed_res(m);
     patch_slowmo_bounce(m);
+    patch_direct_camera(m);
 #if !TARGET_OS_IPHONE
     diag_main=m;   /* frmwatch / xpoke */
 #endif

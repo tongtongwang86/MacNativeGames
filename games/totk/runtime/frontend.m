@@ -11,6 +11,7 @@
 #include "gamepad_layout.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
 #include "../vendor/gamesettings/gamesettings.h"
+#import "boot_view.h"
 /* Console mode (the Settings window): docked (the default) or handheld, kept in the app's defaults and read here before
    the game asks (services.c reads TOTK_OPERATION_MODE once), so a change takes effect at the next start. A mode already
    in the environment (a test run) wins. */
@@ -34,9 +35,11 @@ int mfxup_output_enabled(void);
 static NSWindow *window;
 uint64_t dm_nvn_frame_count(void);   /* gfx/nvn/hle_nvn.c: game frames presented so far */
 static CAMetalLayer *metalLayer;
-static NSView *bootOverlay;
-static NSTextField *bootStage,*bootDetail;
-static NSProgressIndicator *bootProgress;
+static TOTKMacBootView *bootOverlay;   /* the boot screen (boot_view.m) until the first presented frame */
+static void boot_hide(void){[bootOverlay dismiss];bootOverlay=nil;}
+static void boot_show(NSString *stage,NSString *detail,double progress){
+ dispatch_async(dispatch_get_main_queue(), ^{[bootOverlay setStage:stage detail:detail progress:progress];});
+}
 static NSView *hudBox;   /* the FPS / shader / load box (TOTKHudBox), nil with TOTK_HUD=corners */
 /* Mouse mode (the Settings window, runtime/gamepad.m): while it is on and the window has the keyboard, the window holds
    the pointer -- moved to the window's centre, detached from the mouse and hidden -- and sends the mouse's buttons and
@@ -45,7 +48,7 @@ static NSView *hudBox;   /* the FPS / shader / load box (TOTKHudBox), nil with T
 static BOOL mouseHeld;
 static int textEntryOpen;
 static void front_mouse_update(void);
-int taa_enabled(void);   /* third_party/d2r_gfx/gfx/nvn/totk_taa.m: edge smoothing (the Settings window) */
+int taa_enabled(void);   /* third_party/d2r_gfx/gfx/nvn/totk_taa.m: anti-aliasing (the Settings window) */
 void taa_set(int on);
 static uint64_t bootStartNS;
 static _Atomic uint64_t presentedFrames;
@@ -61,58 +64,39 @@ void *front_metal_layer(void){return (__bridge void *)metalLayer;}
 void front_frame_presented(void){
  if(atomic_fetch_add_explicit(&presentedFrames,1,memory_order_relaxed)==0){
   fprintf(stderr,"[totk-boot] %.3f first presented frame\n",(runtime_now_ns()-bootStartNS)/1e9);
-  dispatch_async(dispatch_get_main_queue(), ^{if(!atomic_load(&warmPending))bootOverlay.hidden=YES;});
+  dispatch_async(dispatch_get_main_queue(), ^{if(!atomic_load(&warmPending))boot_hide();});
  }
 }
 void runtime_boot_progress(const char *stage,uint64_t done,uint64_t total){
  static const char *last;
  if(stage!=last){fprintf(stderr,"[totk-boot] %.3f %s\n",bootStartNS?(runtime_now_ns()-bootStartNS)/1e9:0,stage?stage:"startup");last=stage;}
  NSString *s=[NSString stringWithUTF8String:stage?stage:TOTK_UI("正在启动","Starting")];
- dispatch_async(dispatch_get_main_queue(), ^{
-  if(!bootOverlay||bootOverlay.hidden)return;
-  bootStage.stringValue=s;
-  if(total){bootDetail.stringValue=[NSString stringWithFormat:@"%.1f / %.1f GB",done/1e9,total/1e9];
-   bootProgress.indeterminate=NO;bootProgress.doubleValue=(double)done/(double)total*100.0;}
-  else {bootDetail.stringValue=@(TOTK_UI("正在处理，请稍候","Working, please wait"));bootProgress.indeterminate=YES;[bootProgress startAnimation:nil];}
- });
+ if(total)boot_show(s,[NSString stringWithFormat:@"%.1f / %.1f GB",done/1e9,total/1e9],(double)done/(double)total);
+ else boot_show(s,@(TOTK_UI("正在处理，请稍候","Working, please wait")),-1);
 }
 void runtime_boot_count(const char *stage,uint64_t done,uint64_t total){
  /* Steps counted in items, not bytes (the shader import: tens of thousands of files, minutes on a phone). */
  static const char *last;
  if(stage!=last){fprintf(stderr,"[totk-boot] %.3f %s\n",bootStartNS?(runtime_now_ns()-bootStartNS)/1e9:0,stage?stage:"startup");last=stage;}
  NSString *s=[NSString stringWithUTF8String:stage?stage:TOTK_UI("正在启动","Starting")];
- dispatch_async(dispatch_get_main_queue(), ^{
-  if(!bootOverlay||bootOverlay.hidden)return;
-  bootStage.stringValue=s;bootDetail.stringValue=[NSString stringWithFormat:@"%llu / %llu",(unsigned long long)done,(unsigned long long)total];
-  if(total){bootProgress.indeterminate=NO;bootProgress.doubleValue=(double)done/(double)total*100.0;}
- });
+ boot_show(s,[NSString stringWithFormat:@"%llu / %llu",(unsigned long long)done,(unsigned long long)total],total?(double)done/(double)total:-1);
 }
 void runtime_boot_status(const char *stage,const char *detail){
  if(bootStartNS)fprintf(stderr,"[totk-boot] %.3f %s — %s\n",(runtime_now_ns()-bootStartNS)/1e9,stage?stage:"startup",detail?detail:"");
  NSString *s=[NSString stringWithUTF8String:stage?stage:TOTK_UI("正在启动","Starting")];
  NSString *d=[NSString stringWithUTF8String:detail?detail:TOTK_UI("正在处理，请稍候","Working, please wait")];
- dispatch_async(dispatch_get_main_queue(), ^{
-  if(!bootOverlay||bootOverlay.hidden)return;
-  bootStage.stringValue=s;bootDetail.stringValue=d;
-  bootProgress.indeterminate=YES;[bootProgress startAnimation:nil];
- });
+ boot_show(s,d,-1);
 }
 void runtime_warm_progress(uint64_t done,uint64_t total,uint64_t shaders,uint64_t shader_total,uint64_t pipelines,uint64_t pipeline_total){
  atomic_store(&warmPending,1);
- dispatch_async(dispatch_get_main_queue(), ^{
-  if(!bootOverlay||bootOverlay.hidden)return;
-  double percent=total ? fmin(100.0,(double)done/(double)total*100.0) : 100.0;
-  bootStage.stringValue=[NSString stringWithFormat:@(TOTK_UI("预热着色器与管线 %.0f%%","Warming shaders and pipelines %.0f%%")),floor(percent)];
-  bootDetail.stringValue=[NSString stringWithFormat:@(TOTK_UI("着色器 %llu/%llu · 管线 %llu/%llu","shaders %llu/%llu · pipelines %llu/%llu")),
-      (unsigned long long)shaders,(unsigned long long)shader_total,
-      (unsigned long long)pipelines,(unsigned long long)pipeline_total];
-  bootProgress.indeterminate=NO;
-  bootProgress.doubleValue=percent;
- });
+ double frac=total ? fmin(1.0,(double)done/(double)total) : 1.0;
+ boot_show([NSString stringWithFormat:@(TOTK_UI("预热着色器与管线 %.0f%%","Warming shaders and pipelines %.0f%%")),floor(frac*100.0)],
+           [NSString stringWithFormat:@(TOTK_UI("着色器 %llu/%llu · 管线 %llu/%llu","shaders %llu/%llu · pipelines %llu/%llu")),
+            (unsigned long long)shaders,(unsigned long long)shader_total,(unsigned long long)pipelines,(unsigned long long)pipeline_total],frac);
 }
 void runtime_warm_done(void){
  atomic_store(&warmPending,0);
- dispatch_async(dispatch_get_main_queue(), ^{if(atomic_load(&presentedFrames))bootOverlay.hidden=YES;});
+ dispatch_async(dispatch_get_main_queue(), ^{if(atomic_load(&presentedFrames))boot_hide();});
 }
 uint64_t front_game_res(int docked){(void)docked;return (720ULL<<32)|1280;}
 /* TOTK_ASSUME_FOCUS=1: unattended test runs. macOS refuses to activate an app launched from the background while the user is working in
@@ -333,7 +317,7 @@ int runtime_front_window_visible(void){return atomic_load(&windowVisible);}
 void runtime_front_request_close(void){dispatch_async(dispatch_get_main_queue(), ^{[window performClose:nil];});}
 /* Use the window-close path, not terminate:, so Command-Q also waits for active saves. */
 /* The Settings window (vendor/gamesettings; Command-comma or key 1): every setting of the Mac version in one place, kept on
-   this Mac and in iCloud. It took over the rows of the key-1 settings panel (user 2026-10-28: one settings window) and
+   this Mac only. It took over the rows of the key-1 settings panel (user 2026-10-28: one settings window) and
    brings back "The window's shape", the camera following the window as it is resized. Each row maps the window's choice
    (an index) to the game's value. A pick that sizes the window (a resolution, a fixed aspect ratio) does so only when the
    player makes it in the window, not when the saved settings are put back at start. */
@@ -373,10 +357,23 @@ static const char *const interp_choices[]={"Off","30 + 30","40 + 40","50 + 50","
 static const int interp_values[]={MFX_OFF,MFX_30,MFX_40,MFX_50,MFX_MAX};
 static int interp_get(void){return settings_index(interp_values,5,mfx_requested());}
 static void interp_set(int v){dm_gfx_set_flag("mfx_interp",interp_values[v]);if(interp_values[v]!=MFX_OFF)nvn_fps_lock_set(0);}
-/* The resolutions this game and start offer (settings_fill: known once the game's code is in). */
-static const char *res_choices[5]={"1080p"};static int res_modes[5]={OUTPUT_MODE_OFF},res_count=1;
-static int res_get(void){return settings_index(res_modes,res_count,runtime_output_mode());}
-static void res_set(int v){if(v<res_count&&runtime_output_mode_set(res_modes[v])&&settings_by_player())settings_window_for(res_modes[v]);}
+/* The resolution is the picture's size only (720p, 1080p, 2K); whether MetalFX also scales it up to a bigger window is
+   the Upscaler row's, so an output mode is a size (res_modes: the mode without MetalFX) plus the upscaler. The sizes
+   this game and start offer: settings_fill, once the game's code is in. */
+int mfxup_enabled(void);   /* gfx/nvn/totk_mfx_up.m: MetalFX instead of the game's own upscale */
+static const char *res_choices[3]={"1080p"};static int res_modes[3]={OUTPUT_MODE_OFF},res_count=1;
+static int size_of_mode(int m){return m==OUTPUT_MODE_METALFX?OUTPUT_MODE_OFF:m==OUTPUT_MODE_NATIVE_METALFX?OUTPUT_MODE_NATIVE:m;}
+/* The output mode for a size with or without MetalFX (720p has no MetalFX output mode: the scene upscale only). */
+static int mode_for(int size,int mfx){
+ int m=!mfx?size:size==OUTPUT_MODE_OFF?OUTPUT_MODE_METALFX:size==OUTPUT_MODE_NATIVE?OUTPUT_MODE_NATIVE_METALFX:size;
+ return runtime_output_modes()&1<<m?m:size;}
+/* runtime_output_mode_set sets the upscale with the mode; put the player's upscaler back where the mode has none. */
+static int output_set(int size,int mfx){
+ if(!runtime_output_mode_set(mode_for(size,mfx)))return 0;
+ if(mfx!=mfxup_enabled())dm_gfx_set_flag("mfx_upscale",mfx);
+ return 1;}
+static int res_get(void){return settings_index(res_modes,res_count,size_of_mode(runtime_output_mode()));}
+static void res_set(int v){if(v<res_count&&output_set(res_modes[v],mfxup_enabled())&&settings_by_player())settings_window_for(res_modes[v]);}
 /* The aspect ratios: the window's shape first, then the fixed ones (and TOTK_ASPECT's); one 16:9 where it cannot change. */
 static const char *aspect_choices[6]={"16:9 (the game's own)"};static float aspect_ratios[6]={(float)ASPECT_GAME};static int aspect_count=1,aspect_fit_offered;
 static int aspect_get(void){
@@ -402,34 +399,35 @@ static NSString *const scene_sizes[]={@"",@"960x540",@"1280x720",@"1600x900"};
 static int scene_get(void){NSString *v=[NSUserDefaults.standardUserDefaults stringForKey:@"TOTKRenderResMac"]?:@"";
  for(int i=0;i<4;i++)if([v isEqualToString:scene_sizes[i]])return i;return 0;}
 static void scene_set(int v){if(v>=0&&v<4)[NSUserDefaults.standardUserDefaults setObject:scene_sizes[v] forKey:@"TOTKRenderResMac"];}
-int mfxup_enabled(void);   /* gfx/nvn/totk_mfx_up.m: MetalFX instead of the game's own upscale of the scene */
+/* One upscaler for both steps: the 3D scene up to the resolution, and the picture up to a bigger window. */
 static const char *const upscaler_choices[]={"The game's own (FSR 1)","MetalFX"};
 static int upscaler_get(void){return mfxup_enabled()?1:0;}
-static void upscaler_set(int v){dm_gfx_set_flag("mfx_upscale",v);}
-enum { SETTING_RESOLUTION = 3, SETTING_ASPECT = 6 };
+static void upscaler_set(int v){output_set(size_of_mode(runtime_output_mode()),v);}
+enum { SETTING_RESOLUTION = 0, SETTING_ASPECT = 3 };   /* graphics_settings[] rows settings_fill fills */
 static gamesettings_choice graphics_settings[]={
- {"overlay_mac","Overlay",overlay_choices,3,overlay_get,overlay_set,"The FPS, shader and load box in the window's top-right corner."},
- {"frame_lock","Frame lock",lock_choices,4,lock_get,lock_set,"Holds the game at this frame rate. Turns frame interpolation off."},
- {"interpolation","Frame interpolation (MetalFX)",interp_choices,5,interp_get,interp_set,"MetalFX generates in-between frames. Turns the frame lock off."},
- {"resolution_mac","Resolution",res_choices,1,res_get,res_set,"The game's picture and UI size; the window takes that size when you pick it here."},
- {"render_res_mac","3D render resolution",scene_choices,4,scene_get,scene_set,"The 3D scene's size, below the resolution for speed; the upscaler brings it up. Takes effect the next time the game starts."},
- {"upscaler_mac","Upscaling the 3D scene",upscaler_choices,2,upscaler_get,upscaler_set,"MetalFX, or the game's own one-pass upscale. Edge smoothing works with either."},
- {"aspect_mac","Aspect ratio",aspect_choices,1,aspect_get,aspect_set,"Fill the window: the picture takes the window's shape and follows it as you resize it or go full screen, the HUD keeping its 16:9 shape in the middle. A fixed ratio gives the window that shape."},
- {"edge_smoothing","Edge smoothing (MetalFX Temporal)",onoff_choices,2,taa_enabled,taa_choice,NULL},
- {"controller_type","Controller type",pad_choices,4,pad_get,pad_set,"Which button prompts and layout the controller uses; Automatic goes by the controller connected."},
- {"mouse","Mouse (camera, buttons)",onoff_choices,2,runtime_mouse_enabled,mouse_choice,"The mouse turns the camera and its buttons press the game's; the window holds the pointer while it has the keyboard."},
- {"console_mac","Console mode",console_choices,2,console_get,console_set,"Docked is the game's TV mode; handheld draws less (the game's own handheld detail and resolution). Takes effect the next time the game starts."},
+ {"picture_size_mac","Resolution",res_choices,1,res_get,res_set,"The game's picture and UI size; the window takes that size when you pick it here.",0,"Picture"},
+ {"render_res_mac","3D render resolution",scene_choices,4,scene_get,scene_set,"The 3D scene's size, below the resolution for speed; the upscaler brings it up. (requires restart)",0,NULL},
+ {"upscaler_mac","Upscaler",upscaler_choices,2,upscaler_get,upscaler_set,"Brings the 3D scene up to the resolution and, with MetalFX, the picture up to a bigger window or full screen. Anti-aliasing works with either.",0,NULL},
+ {"aspect_mac","Aspect ratio",aspect_choices,1,aspect_get,aspect_set,"Fill the window: the picture takes the window's shape and follows it as you resize it or go full screen, the HUD keeping its 16:9 shape in the middle. A fixed ratio gives the window that shape.",0,NULL},
+ {"edge_smoothing","Anti-aliasing (MetalFX Temporal)",onoff_choices,2,taa_enabled,taa_choice,NULL,0,NULL},
+ {"frame_lock","Frame lock",lock_choices,4,lock_get,lock_set,"Holds the game at this frame rate. Turns frame interpolation off.",0,"Frame rate"},
+ {"interpolation","Frame interpolation (MetalFX)",interp_choices,5,interp_get,interp_set,"MetalFX generates in-between frames. Turns the frame lock off.",0,NULL},
+ {"overlay_mac","Overlay",overlay_choices,3,overlay_get,overlay_set,"The FPS, shader and load box in the window's top-right corner.",0,NULL},
+ {"console_mac","Console mode",console_choices,2,console_get,console_set,"Docked is the game's TV mode; handheld draws less (the game's own handheld detail and resolution). (requires restart)",0,"Console"},
+ {"controller_type","Controller type",pad_choices,4,pad_get,pad_set,"Which button prompts and layout the controller uses; Automatic goes by the controller connected.",1,"Controller"},
+ {"mouse_sensitivity","Camera sensitivity",NULL,100,runtime_mouse_sensitivity,runtime_mouse_set_sensitivity,"How far the camera turns for the same mouse movement.",1,NULL},
+ {"aim_sensitivity","Aiming sensitivity",NULL,100,runtime_aim_sensitivity,runtime_aim_set_sensitivity,"The same while aiming a bow or throwing.",1,NULL},
+ {"mouse","Mouse (camera, buttons)",onoff_choices,2,runtime_mouse_enabled,mouse_choice,"The mouse turns the camera and its buttons press the game's; the window holds the pointer while it has the keyboard.",1,NULL},
 };
 static const gamesettings_config settings_config={"0100F2C0115B6000","Tears of the Kingdom","[totk]",graphics_settings,sizeof graphics_settings/sizeof *graphics_settings};
 /* The rows whose choices depend on the game's code (resolutions, whether the shape can change): filled once it is in. */
 static void settings_fill(void){
  static char native[2][48];
  int modes=runtime_output_modes();res_count=0;
- static const int order[]={OUTPUT_MODE_720P,OUTPUT_MODE_OFF,OUTPUT_MODE_METALFX,OUTPUT_MODE_NATIVE,OUTPUT_MODE_NATIVE_METALFX};
- for(unsigned i=0;i<sizeof order/sizeof *order;i++){
-  int m=order[i];if(!(modes&1<<m))continue;unsigned nw=0,nh=0;runtime_output_native(m,&nw,&nh);
-  const char *name=m==OUTPUT_MODE_720P?"720p":m==OUTPUT_MODE_OFF?"1080p":m==OUTPUT_MODE_METALFX?"1080p + MetalFX upscaling":
-   m==OUTPUT_MODE_NATIVE_METALFX?"2K + MetalFX upscaling (4K screens)":NULL;
+ static const int sizes[]={OUTPUT_MODE_720P,OUTPUT_MODE_OFF,OUTPUT_MODE_NATIVE};
+ for(unsigned i=0;i<sizeof sizes/sizeof *sizes;i++){
+  int m=sizes[i];if(!(modes&1<<m))continue;unsigned nw=0,nh=0;runtime_output_native(m,&nw,&nh);
+  const char *name=m==OUTPUT_MODE_720P?"720p":m==OUTPUT_MODE_OFF?"1080p":NULL;
   if(!name){snprintf(native[0],sizeof native[0],nw==2560&&nh==1440?"2K (2560x1440)":"Native %ux%u",nw,nh);name=native[0];}
   res_choices[res_count]=name;res_modes[res_count++]=m;}
  if(!res_count){res_choices[0]="1080p";res_modes[0]=OUTPUT_MODE_OFF;res_count=1;}
@@ -482,18 +480,16 @@ void runtime_front_run(void(*callback)(void)){
   window.contentView=[[TOTKInputView alloc] initWithFrame:NSMakeRect(0,0,ww,wh)];
   metalLayer=[CAMetalLayer layer];metalLayer.device=MTLCreateSystemDefaultDevice();metalLayer.pixelFormat=MTLPixelFormatBGRA8Unorm;metalLayer.drawableSize=CGSizeMake(ww,wh);runtime_aspect_view(ww,wh);
   metalLayer.framebufferOnly=NO;window.contentView.wantsLayer=YES;window.contentView.layer=metalLayer;
-  bootOverlay=[[NSView alloc] initWithFrame:window.contentView.bounds];bootOverlay.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
-  bootOverlay.wantsLayer=YES;bootOverlay.layer.backgroundColor=[NSColor colorWithCalibratedRed:0.035 green:0.075 blue:0.09 alpha:1].CGColor;
-  bootStage=[NSTextField labelWithString:@(TOTK_UI("正在启动海拉鲁","Starting Hyrule"))];
-  bootStage.font=[NSFont systemFontOfSize:25 weight:NSFontWeightSemibold];bootStage.textColor=NSColor.whiteColor;
-  bootStage.alignment=NSTextAlignmentCenter;bootStage.frame=NSMakeRect(0,wh/2+20,ww,40);bootStage.autoresizingMask=NSViewWidthSizable|NSViewMinYMargin|NSViewMaxYMargin;
-  bootDetail=[NSTextField labelWithString:@(TOTK_UI("正在准备游戏环境","Preparing the game environment"))];
-  bootDetail.font=[NSFont systemFontOfSize:14];bootDetail.textColor=[NSColor colorWithCalibratedWhite:0.72 alpha:1];
-  bootDetail.alignment=NSTextAlignmentCenter;bootDetail.frame=NSMakeRect(0,wh/2-20,ww,28);bootDetail.autoresizingMask=NSViewWidthSizable|NSViewMinYMargin|NSViewMaxYMargin;
-  bootProgress=[[NSProgressIndicator alloc] initWithFrame:NSMakeRect(ww/2-140,wh/2-55,280,10)];
-  bootProgress.minValue=0;bootProgress.maxValue=100;bootProgress.indeterminate=YES;bootProgress.autoresizingMask=NSViewMinXMargin|NSViewMaxXMargin|NSViewMinYMargin|NSViewMaxYMargin;
-  [bootOverlay addSubview:bootStage];[bootOverlay addSubview:bootDetail];[bootOverlay addSubview:bootProgress];
-  [window.contentView addSubview:bootOverlay];[bootProgress startAnimation:nil];
+  /* The boot screen: the swirl pattern the app carries in Contents/Resources/launch (build_app.py --launch-pattern;
+     TOTK_LAUNCH_PATTERN another folder; without one the plain ground), the step in the bottom-right corner. The binary is
+     Contents/Resources/totk/build/totk-native. */
+  const char *patternEnv=getenv("TOTK_LAUNCH_PATTERN");
+  NSString *pattern=patternEnv&&*patternEnv?@(patternEnv):[NSBundle.mainBundle.executablePath.stringByResolvingSymlinksInPath
+      stringByAppendingPathComponent:@"../../../launch"].stringByStandardizingPath;
+  if(![NSFileManager.defaultManager fileExistsAtPath:[pattern stringByAppendingPathComponent:@"pattern.json"]])pattern=nil;
+  bootOverlay=[[TOTKMacBootView alloc] initWithFrame:window.contentView.bounds patternFolder:pattern];
+  [bootOverlay setStage:@(TOTK_UI("正在启动海拉鲁","Starting Hyrule")) detail:@(TOTK_UI("正在准备游戏环境","Preparing the game environment")) progress:-1];
+  [window.contentView addSubview:bootOverlay];
   front_menubar_fps();
   /* The FPS, shader and load lines: in the corner box (compact HUD), or with TOTK_HUD=corners drawn into the game picture's
      corners by the present encoder (gfx/nvn/fps_overlay.c). The box sits under the opaque boot overlay until it is hidden. */
